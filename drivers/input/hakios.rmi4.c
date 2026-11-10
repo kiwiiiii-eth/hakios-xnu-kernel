@@ -19,7 +19,8 @@
  * The bring-up is made in steps, each said in the log before it is made; boot-arg rmi4_steps=N stops after the first N:
  *   1 power  2 pins and reset  3 clocks  4 the serial engine  5 the controller (PDT, F01)  6 watch (the default)
  *
- * Boot-args: rmi4=1; rmi4_steps=N; rmi4_khz=100|400 (the bus, 400); rmi4_x=<max>, rmi4_y=<max> (the controller's
+ * Boot-args: rmi4=1; rmi4_steps=N; rmi4_khz=100|400 (the bus, 400); rmi4_charger=0|1 (F01's charger bit, 0);
+ * rmi4_x=<max>, rmi4_y=<max> (the controller's
  * coordinate range: 1080 x 2340, the panel's own pixels on this phone); soc_rsc=, soc_cmd_db= (RPMh, the SDM845's by default).
  */
 #include <kern/clock.h>
@@ -509,7 +510,8 @@ rmi_write(uint8_t reg, uint8_t value)
 #define F12_OBJECT_SIZE         8
 static uint8_t f01_query, f01_cmd, f01_ctrl, f01_data, f12_query, f12_ctrl, f12_data;
 static uint8_t f01_irq_mask, f12_irq_mask;
-static uint32_t span_x = 1080, span_y = 2340;   /* the controller's coordinates: the panel's pixels */
+static uint32_t span_x = 1080, span_y = 2340;
+static uint32_t charger_bit;                    /* rmi4_charger=1: F01 ctrl0 bit 5, "a charger is connected" (noise) */   /* the controller's coordinates: the panel's pixels */
 
 static bool
 rmi_pdt(void)
@@ -569,8 +571,15 @@ rmi_f01_init(void)
 		}
 		say("rmi4: F01: manufacturer %#x, product \"%s\"\n", q[0], product);
 	}
-	/* no sleep, "configured" (bit 7: the controller clears it after a reset of its own); every interrupt source on */
-	if (rmi_write(f01_ctrl, 0x84) != 0 || rmi_write((uint8_t)(f01_ctrl + 1), 0x7f) != 0) {
+	/*
+	 * no sleep, "configured" (bit 7: the controller clears it after a reset of its own), and with rmi4_charger=1 bit 5,
+	 * "a charger is connected": the controller's filters for the noise USB brings (11-11: flat on the desk, USB in: no
+	 * touch at all; USB out: hundreds); every interrupt source on
+	 */
+	uint8_t ctrl0 = (uint8_t)(0x84 | (charger_bit ? 0x20 : 0));
+
+	say("rmi4: F01: control %#x (charger bit %s)\n", ctrl0, charger_bit ? "on" : "off");
+	if (rmi_write(f01_ctrl, ctrl0) != 0 || rmi_write((uint8_t)(f01_ctrl + 1), 0x7f) != 0) {
 		say("rmi4: F01: the control write failed (status %#x)\n", bus.last_status);
 		return false;
 	}
@@ -641,6 +650,7 @@ rmi4_thread(void *parameter, __unused wait_result_t result)
 
 	PE_parse_boot_argn("rmi4_khz", &khz, sizeof(khz));
 	PE_parse_boot_argn("rmi4_peek", &peek, sizeof(peek));
+	PE_parse_boot_argn("rmi4_charger", &charger_bit, sizeof(charger_bit));
 	PE_parse_boot_argn("rmi4_x", &span_x, sizeof(span_x));
 	PE_parse_boot_argn("rmi4_y", &span_y, sizeof(span_y));
 	(void)PE_parse_boot_argn("soc_rsc", &rsc_phys, sizeof(rsc_phys));

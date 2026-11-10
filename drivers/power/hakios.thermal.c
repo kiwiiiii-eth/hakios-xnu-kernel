@@ -44,6 +44,7 @@
  *   thermal_poll=<ms>  how often (200 to 60000; 2000)
  *   thermal_log=<s>    a summary line this often (0: only on a rise; 60)
  *   thermal_stop=<C>   stop the run at this temperature (0: never; 105)
+ *   thermal_soc=845    the SDM845's table of sensors (21) instead of the reference phone's (27)
  *   thermal_tm0=<pa>, thermal_tm1=<pa>  the two blocks' readings, when this is not the reference phone
  *                      (0xc263000 and 0xc265000)
  */
@@ -97,7 +98,7 @@ static const struct sensor_info {
 	uint32_t        number;
 	int32_t         slow_mc;
 	int32_t         limit_mc;
-} sensors[] = {
+} sensors_reference[] = {
 	{ "aoss-0", 0xc263000, 0, 115000, 125000 },
 	{ "cpu-0-0", 0xc263000, 1, 110000, 125000 },
 	{ "cpu-0-1", 0xc263000, 2, 110000, 125000 },
@@ -126,13 +127,48 @@ static const struct sensor_info {
 	{ "mdmss-3", 0xc265000, 10, 95000, 125000 },
 	{ "camera-0", 0xc265000, 11, 100000, 125000 },
 };
-#define NSENSORS        ((unsigned)(sizeof(sensors) / sizeof(sensors[0])))
+
+/*
+ * SDM845 (thermal_soc=845; the OnePlus 6T): its own device tree's thermal-zones, read by hand because tools/dt-thermal.py
+ * looks under /soc and this tree (Linux 4.9) has them at the root. Names in this driver's style; "slow down at" is the
+ * zone's *-step trip where there is one (pop-mem-step for ddr), else its first *-usr trip; "gives up at" the last *-usr.
+ * The two blocks are at the reference phone's addresses: 13 sensors in the first, 8 in the second.
+ */
+static const struct sensor_info sensors_sdm845[] = {
+	{ "aoss-0", 0xc263000, 0, 125000, 125000 },
+	{ "cpu-0-0", 0xc263000, 1, 110000, 125000 },
+	{ "cpu-0-1", 0xc263000, 2, 110000, 125000 },
+	{ "cpu-0-2", 0xc263000, 3, 110000, 125000 },
+	{ "cpu-0-3", 0xc263000, 4, 110000, 125000 },
+	{ "kryo-l3-0", 0xc263000, 5, 125000, 125000 },
+	{ "kryo-l3-1", 0xc263000, 6, 125000, 125000 },
+	{ "cpu-1-0", 0xc263000, 7, 110000, 125000 },
+	{ "cpu-1-1", 0xc263000, 8, 110000, 125000 },
+	{ "cpu-1-2", 0xc263000, 9, 110000, 125000 },
+	{ "cpu-1-3", 0xc263000, 10, 110000, 125000 },
+	{ "gpu-0", 0xc263000, 11, 115000, 125000 },
+	{ "gpu-1", 0xc263000, 12, 115000, 125000 },
+	{ "aoss-1", 0xc265000, 0, 125000, 125000 },
+	{ "mdm-dsp", 0xc265000, 1, 125000, 125000 },
+	{ "ddr", 0xc265000, 2, 95000, 125000 },
+	{ "wlan", 0xc265000, 3, 125000, 125000 },
+	{ "compute-hvx", 0xc265000, 4, 125000, 125000 },
+	{ "camera", 0xc265000, 5, 125000, 125000 },
+	{ "mmss", 0xc265000, 6, 125000, 125000 },
+	{ "mdm-core", 0xc265000, 7, 125000, 125000 },
+};
+#define MAX_SENSORS     27u
+_Static_assert(sizeof(sensors_reference) / sizeof(sensors_reference[0]) <= MAX_SENSORS, "MAX_SENSORS");
+_Static_assert(sizeof(sensors_sdm845) / sizeof(sensors_sdm845[0]) <= MAX_SENSORS, "MAX_SENSORS");
+static const struct sensor_info *sensors = sensors_reference;
+static unsigned nsensors = (unsigned)(sizeof(sensors_reference) / sizeof(sensors_reference[0]));
+#define NSENSORS        nsensors
 #define REFERENCE_TM0   0xc263000u
 #define REFERENCE_TM1   0xc265000u
 
 static vm_offset_t tm_va[2];
 static uint32_t tm_pa[2] = { REFERENCE_TM0, REFERENCE_TM1 };
-static int32_t tenths[NSENSORS];                /* the last good reading; INT32_MIN: none yet */
+static int32_t tenths[MAX_SENSORS];                /* the last good reading; INT32_MIN: none yet */
 static uint32_t poll_ms = 2000, log_seconds = 60, stop_celsius = 105;
 static uint64_t last_log, reads;
 static int strikes, last_step;
@@ -140,7 +176,7 @@ static bool stopping;
 
 static int thermal_max_mc = -273000;
 static char thermal_hottest[16] = "";
-static char thermal_list[NSENSORS * 16 + 8];
+static char thermal_list[MAX_SENSORS * 16 + 8];
 static int thermal_reads_value;
 
 SYSCTL_INT(_kern_hakios, OID_AUTO, thermal_max_mc, CTLFLAG_RD | CTLFLAG_LOCKED, &thermal_max_mc, 0,
@@ -253,6 +289,10 @@ thermal_init(void)
 
 	if (!PE_parse_boot_argn("thermal", &enabled, sizeof(enabled)) || !enabled) {
 		return;
+	}
+	if (PE_parse_boot_argn("thermal_soc", &value, sizeof(value)) && value == 845) {
+		sensors = sensors_sdm845;
+		nsensors = (unsigned)(sizeof(sensors_sdm845) / sizeof(sensors_sdm845[0]));
 	}
 	for (unsigned i = 0; i < NSENSORS; i++) {
 		tenths[i] = INT32_MIN;

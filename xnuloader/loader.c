@@ -261,6 +261,9 @@ clean_dcache(uint64_t start, uint64_t end)
 /* ------------------------------------------------------------------------ */
 /* Log persistence: raw write to a GPT partition (phone only)               */
 
+/* fajita: nothing is written to the phone's storage; the log stays in memory and on the console (U-Boot reads it) */
+static int log_partition_off;
+
 static efi_block_io *
 find_log_partition(void)
 {
@@ -270,6 +273,9 @@ find_log_partition(void)
 	efi_handle *handles;
 	uint64_t count;
 
+	if (log_partition_off) {
+		return NULL;
+	}
 	if (EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &part_guid, NULL, &count, &handles))) {
 		return NULL;
 	}
@@ -353,9 +359,14 @@ write_logs(const char *klog, uint64_t klog_len)
 	if (bio == NULL) {
 		/* No log partition (QEMU): echo the returned kernel log on the console instead. */
 		if (klog != NULL) {
-			print("\n== KERNEL LOG ==\n");
+			print("\n== KERNEL LOG (%d bytes at %x) ==\n", klog_len, (uint64_t)(uintptr_t)klog);
 			for (uint64_t i = 0; i < klog_len; i++) {
-				put_char(klog[i]);
+				char c = klog[i];
+				/* fajita: the log goes through U-Boot's console record, which takes text only */
+				if (log_partition_off && c != '\n' && (c < 0x20 || c > 0x7e)) {
+					c = '.';
+				}
+				put_char(c);
 			}
 			print("\n== END OF LOG ==\n");
 		}
@@ -586,6 +597,17 @@ static const struct platform platform_redwood = {
 	 * (XNU's machine_routines.c, ml_choose_slow_core_partners()).
 	 */
 	.small_cores = 0x0f,
+};
+
+/*
+ * OnePlus 6T (fajita, SDM845) under U-Boot: the same GIC addresses as SC7280, cores in Aff1.
+ * QHEE, not Gunyah: no virtual watchdog SMCs (wdt_arm() and charger_start() stay redwood-only).
+ */
+static const struct platform platform_fajita = {
+	.name = "fajita", .io_base = 0x00400000, .io_size = 0x3FC00000,
+	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
+	.cores = 8, .core_shift = 8,
+	.small_cores = 0x0f,            /* 0-3 Cortex-A55, 4-7 Cortex-A75 */
 };
 
 /* ------------------------------------------------------------------------ */
@@ -4345,6 +4367,9 @@ efi_main(efi_handle image, efi_system_table *st)
 		SCREEN.stride = GOP->mode->info->pixels_per_scanline * 4;
 		if (SCREEN.base == 0xE1000000ULL) {
 			PLAT = &platform_redwood;
+		} else if (SCREEN.base == 0x9D400000ULL) {
+			PLAT = &platform_fajita;
+			log_partition_off = 1;
 		} else {
 			ramfb_phone_screen();
 		}
@@ -4364,6 +4389,17 @@ efi_main(efi_handle image, efi_system_table *st)
 	/* One-shot mode: run the kernel that came with the image, then reset. */
 	if (have_payload) {
 		run_kernel(0, 0);
+	}
+	if (PLAT == &platform_fajita) {
+		/* back to U-Boot (its fastboot): a reset would land in the phone's other boot slot */
+		uint64_t n = log_len;
+		print("\n== LOADER LOG (all of it, the lines kept off the screen during the run too) ==\n");
+		for (uint64_t i = 0; i < n; i++) {
+			put_char(log_buf[i]);
+		}
+		print("\n== END OF LOADER LOG ==\n");
+		print("loader: back to U-Boot; log at %x, %d bytes\n", (uint64_t)(uintptr_t)out_buf, staged_len);
+		return 0;
 	}
 	reboot();
 	return 0;

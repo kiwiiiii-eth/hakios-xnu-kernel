@@ -61,7 +61,10 @@ bootcpu	kl
 bt	k
 bt_again	k
 buttons	k
+buttons_pon	k
 buttons_steps	k
+buttons_voldown	k
+buttons_volup	k
 ca_metallib	u
 ca_prof	u
 ca_vbl	u
@@ -106,6 +109,7 @@ fbsubtype	k
 fbtrace	k
 fbwidth	ku
 gamut	l
+gic_vtimer	k
 gl	u
 glblit	u
 glcensus	u
@@ -236,12 +240,22 @@ rec_step	k
 regtrace	k
 return_cpu	k
 return_panic	k
+rmi4	k
+rmi4_khz	k
+rmi4_peek	k
+rmi4_steps	k
+rmi4_x	k
+rmi4_y	k
 root_apfs	u
 sb_delay	u
 serial	l
 small_cores	k
 small_cores_after	k
 soc_cmd_db	k
+soc_cpufreq	k
+soc_cpufreq_groups	k
+soc_cpufreq_osm	k
+soc_cpufreq_step	k
 soc_gsi_base	k
 soc_imem	k
 soc_ipa_base	k
@@ -251,6 +265,7 @@ soc_ipa_stream_uc	k
 soc_mpss_mem	k
 soc_pas_ipa	k
 soc_pas_mpss	k
+soc_rsc	k
 soc_smem	k
 soc_smem_size	k
 socinfo	k
@@ -272,6 +287,7 @@ systrace_name	k
 thermal	k
 thermal_log	k
 thermal_poll	k
+thermal_soc	k
 thermal_stop	k
 thermal_tm0	k
 thermal_tm1	k

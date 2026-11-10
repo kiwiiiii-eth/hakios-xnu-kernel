@@ -72,7 +72,9 @@
 
 #define GIC_SGI_SIGNAL          0           /* cpu_signal(): another processor wants this one's attention */
 #define GIC_SGI_STOP            1           /* psci_smp_stop_here(): the system is going back to the boot loader */
-#define GIC_INTID_VTIMER        27          /* EL1 virtual timer PPI */
+/* EL1 virtual timer PPI: 27 on most SoCs, 19 on SDM845 (its timer's PPIs are 1/2/3/0): boot-arg gic_vtimer= */
+static uint32_t gic_intid_vtimer = 27;
+#define GIC_INTID_VTIMER        gic_intid_vtimer
 #define GIC_INTID_SPI_MIN       32
 #define GIC_INTID_SPURIOUS_MIN  1020
 #define GIC_SPI_MOST            48          /* attached at a time */
@@ -418,9 +420,10 @@ gic_v3_irq_cpu_init(void)
 {
 	int cpu = cpu_number();
 	vm_offset_t gicr;
-	uint32_t mine = 1u << GIC_INTID_VTIMER;
+	uint32_t mine;
 
 	if (gicd_base == 0) {
+		PE_parse_boot_argn("gic_vtimer", &gic_intid_vtimer, sizeof(gic_intid_vtimer));
 		DTEntry entry;
 		void const *prop;
 		unsigned int prop_size;
@@ -463,6 +466,7 @@ gic_v3_irq_cpu_init(void)
 	 * kernel switched off in the middle of one (a return to the boot loader, started again
 	 * since) may still have it marked active, and would then never see another.
 	 */
+	mine = 1u << GIC_INTID_VTIMER;
 	if (ml_get_cpu_count() > 1) {
 		uint32_t sgis = (1u << GIC_SGI_SIGNAL) | (1u << GIC_SGI_STOP);
 

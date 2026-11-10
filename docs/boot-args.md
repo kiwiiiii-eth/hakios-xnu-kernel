@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **350 arguments**: 279 read by the kernel, 14 by the loader, 68 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **366 arguments**: 295 read by the kernel, 14 by the loader, 68 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
@@ -179,7 +179,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `modem_step` | K | `hakios.mpss.c` | `CONFIG_MODEM_STEP` |  |
 | `modem_wait` | K | `hakios.mpss.c` | `CONFIG_MODEM_WAIT` |  |
 | `modem_wda_off` | K | `hakios.mpss.c` | `CONFIG_MODEM_WDA_OFF` |  |
-| `soc_cmd_db` | K | `hakios.mpss.c` | `CONFIG_SOC_CMD_DB` |  |
+| `soc_cmd_db` | K | `hakios.cpufreq.c`, `hakios.mpss.c`, `hakios.rmi4.c` | `CONFIG_SOC_CMD_DB` |  |
 | `soc_gsi_base` | K | `hakios.ipa.c` | `CONFIG_SOC_GSI_BASE` |  |
 | `soc_imem` | K | `hakios.mpss.c` | `CONFIG_SOC_IMEM` |  |
 | `soc_ipa_base` | K | `hakios.ipa.c` | `CONFIG_SOC_IPA_BASE` |  |
@@ -247,12 +247,15 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `cam_shutter` | K | `hakios.camera.c` | `CONFIG_CAM_SHUTTER` |  |
 | `cam_vblank` | K | `hakios.camera.c` | `CONFIG_CAM_VBLANK` |  |
 
-## Touch and buttons (10)
+## Touch and buttons (13)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
 | `buttons` | K | `hakios.buttons.c` | `CONFIG_BUTTONS` |  |
+| `buttons_pon` | K | `hakios.buttons.c` | `CONFIG_BUTTONS_PON` |  |
 | `buttons_steps` | K | `hakios.buttons.c` | `CONFIG_BUTTONS_STEPS` |  |
+| `buttons_voldown` | K | `hakios.buttons.c` | `CONFIG_BUTTONS_VOLDOWN` |  |
+| `buttons_volup` | K | `hakios.buttons.c` | `CONFIG_BUTTONS_VOLUP` |  |
 | `press_power` | K | `hakios.buttons.c` | `CONFIG_PRESS_POWER` |  |
 | `press_power_ms` | K | `hakios.buttons.c` | `CONFIG_PRESS_POWER_MS` |  |
 | `touch_flip` | K | `hakios.goodix.c` | `CONFIG_TOUCH_FLIP` |  |
@@ -328,7 +331,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `torch_max_s` | K | `hakios.torch.c` | `CONFIG_TORCH_MAX_S` |  |
 | `torch_secs` | K | `hakios.torch.c` | `CONFIG_TORCH_SECS` |  |
 
-## Chip, thermal and PMIC (10)
+## Chip, thermal and PMIC (11)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -339,11 +342,12 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `thermal` | K | `hakios.thermal.c` | `CONFIG_THERMAL` |  |
 | `thermal_log` | K | `hakios.thermal.c` | `CONFIG_THERMAL_LOG` |  |
 | `thermal_poll` | K | `hakios.thermal.c` | `CONFIG_THERMAL_POLL` |  |
+| `thermal_soc` | K | `hakios.thermal.c` | `CONFIG_THERMAL_SOC` |  |
 | `thermal_stop` | K | `hakios.thermal.c` | `CONFIG_THERMAL_STOP` |  |
 | `thermal_tm0` | K | `hakios.thermal.c` | `CONFIG_THERMAL_TM0` |  |
 | `thermal_tm1` | K | `hakios.thermal.c` | `CONFIG_THERMAL_TM1` |  |
 
-## CPU, memory and boot (23)
+## CPU, memory and boot (28)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -366,6 +370,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `return_panic` | K | `loader_return.c` | `CONFIG_RETURN_PANIC` |  |
 | `small_cores` | K | `(patch)` | `CONFIG_SMALL_CORES` |  |
 | `small_cores_after` | K | `GenericARMPE.cpp` | `CONFIG_SMALL_CORES_AFTER` |  |
+| `soc_cpufreq` | K | `hakios.cpufreq.c` | `CONFIG_SOC_CPUFREQ` |  |
+| `soc_cpufreq_groups` | K | `hakios.cpufreq.c` | `CONFIG_SOC_CPUFREQ_GROUPS` |  |
+| `soc_cpufreq_osm` | K | `hakios.cpufreq.c` | `CONFIG_SOC_CPUFREQ_OSM` |  |
+| `soc_cpufreq_step` | K | `hakios.cpufreq.c` | `CONFIG_SOC_CPUFREQ_STEP` |  |
+| `soc_rsc` | K | `hakios.cpufreq.c`, `hakios.rmi4.c` | `CONFIG_SOC_RSC` |  |
 | `syssleep` | K | `(patch)` | `CONFIG_SYSSLEEP` |  |
 | `systrace` | K | `(patch)`, `user_exception_trace.c` | `CONFIG_SYSTRACE` |  |
 | `systrace_name` | K | `(patch)` | `CONFIG_SYSTRACE_NAME` |  |
@@ -393,7 +402,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (35)
+## User space (42)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -405,6 +414,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ca_vbl` | U | `inject.c` | `CONFIG_CA_VBL` |  |
 | `caenv` | U | `inject.c`, `inject_sb.c` | `CONFIG_CAENV` |  |
 | `cc_fade` | U | `inject_sb.c` | `CONFIG_CC_FADE` |  |
+| `gic_vtimer` | K | `gic_v3_irq.c` | `CONFIG_GIC_VTIMER` |  |
 | `gl` | U | `inject.c`, `inject_sb.c` | `CONFIG_GL` |  |
 | `glcompile` | U | `inject.c` | `CONFIG_GLCOMPILE` |  |
 | `glno` | U | `inject.c` | `CONFIG_GLNO` |  |
@@ -423,6 +433,12 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `metal_skip` | U | `HakiosMetalCA.m` | `CONFIG_METAL_SKIP` |  |
 | `metal_trace` | U | `HakiosMetalCA.m` | `CONFIG_METAL_TRACE` |  |
 | `metal_watch` | U | `inject.c` | `CONFIG_METAL_WATCH` |  |
+| `rmi4` | K | `hakios.rmi4.c` | `CONFIG_RMI4` |  |
+| `rmi4_khz` | K | `hakios.rmi4.c` | `CONFIG_RMI4_KHZ` |  |
+| `rmi4_peek` | K | `hakios.rmi4.c` | `CONFIG_RMI4_PEEK` |  |
+| `rmi4_steps` | K | `hakios.rmi4.c` | `CONFIG_RMI4_STEPS` |  |
+| `rmi4_x` | K | `hakios.rmi4.c` | `CONFIG_RMI4_X` |  |
+| `rmi4_y` | K | `hakios.rmi4.c` | `CONFIG_RMI4_Y` |  |
 | `root_apfs` | U | `init.c` | `CONFIG_ROOT_APFS` |  |
 | `sb_delay` | U | `inject_sb.c` |  | xl (XL_SB_DELAY) |
 | `switcher_wallpaper` | U | `inject_sb.c` | `CONFIG_SWITCHER_WALLPAPER` |  |

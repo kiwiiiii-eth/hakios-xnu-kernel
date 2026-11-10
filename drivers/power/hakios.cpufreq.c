@@ -63,6 +63,21 @@ tell(const char *format, ...)
 #define XO_KHZ                  19200
 #define ALTERNATE_KHZ           300000          /* source 0: a fixed 300 MHz */
 
+/*
+ * The SoCs before EPSS (SDM845, the OnePlus 6T: Linux's "qcom,cpufreq-hw", the OSM): soc_cpufreq_osm=1. Two groups
+ * (cores 0-3, 4-7) at soc_cpufreq (0x17d43000) and soc_cpufreq + soc_cpufreq_step (0x2800); in each the enable bit at 0,
+ * a table of 40 rows of 32 bytes at 0x110 (the same word as EPSS's, and [18:16] the number of cores a row is for: 1 marks
+ * a "turbo" row, for one busy core only, which is not chosen here) and the wanted row at 0x920.
+ */
+#define OSM_ENABLE              0x0
+#define OSM_FREQ_TABLE          0x110
+#define OSM_ROW_SIZE            32
+#define OSM_PERF_STATE          0x920
+#define OSM_TURBO               1
+
+static uint64_t cpufreq_phys = EPSS_PHYS, cpufreq_step = EPSS_DOMAIN_SIZE;
+static uint32_t cpufreq_groups = EPSS_DOMAINS, cpufreq_osm;
+
 /* How fast a simple loop runs, in thousands of iterations per millisecond. */
 static uint32_t
 loop_speed(void)
@@ -83,6 +98,9 @@ domain_of(uint32_t phys_id)
 {
 	uint32_t core = (phys_id >> 8) & 0xff;
 
+	if (cpufreq_groups == 2) {
+		return core < 4 ? 0 : 1;
+	}
 	return core < 4 ? 0 : core < 7 ? 1 : 2;
 }
 
@@ -92,7 +110,37 @@ raise_domain(uint32_t domain, uint32_t cores)
 	uint32_t top = 0, top_khz = 0, was;
 	vm_offset_t base;
 
-	base = ml_io_map(EPSS_PHYS + domain * EPSS_DOMAIN_SIZE, EPSS_DOMAIN_SIZE);
+	base = ml_io_map(cpufreq_phys + domain * cpufreq_step, 0x1000);
+	if (cpufreq_osm) {
+		uint32_t turbo_khz = 0;
+
+		if (!(*(volatile uint32_t *)(base + OSM_ENABLE) & 1)) {
+			tell("cpufreq: group %u: the OSM is not enabled by the firmware; left alone\n", domain);
+			return;
+		}
+		for (uint32_t row = 0; row < EPSS_TABLE_ROWS; row++) {
+			uint32_t entry = *(volatile uint32_t *)(base + OSM_FREQ_TABLE + OSM_ROW_SIZE * row);
+			uint32_t khz = (entry >> 30) ? XO_KHZ * (entry & 0xff) : ALTERNATE_KHZ;
+
+			if (row > 0 && khz <= top_khz && khz <= turbo_khz) {
+				break;          /* the table ends by repeating its last row */
+			}
+			if (((entry >> 16) & 7) == OSM_TURBO) {
+				turbo_khz = khz > turbo_khz ? khz : turbo_khz;
+				continue;
+			}
+			if (khz > top_khz) {
+				top = row;
+				top_khz = khz;
+			}
+		}
+		was = *(volatile uint32_t *)(base + OSM_PERF_STATE);
+		*(volatile uint32_t *)(base + OSM_PERF_STATE) = top;
+		delay_for_interval(20, NSEC_PER_MSEC);
+		tell("cpufreq: OSM group %u (%u of our cores): row %u -> %u, %u MHz (turbo %u MHz not used)\n", domain, cores, was,
+		    top, top_khz / 1000, turbo_khz / 1000);
+		return;
+	}
 	for (uint32_t row = 0; row < EPSS_TABLE_ROWS; row++) {
 		uint32_t entry = *(volatile uint32_t *)(base + EPSS_FREQ_TABLE + 4 * row);
 		uint32_t khz = (entry >> 30) ? XO_KHZ * (entry & 0xff) : ALTERNATE_KHZ;
@@ -306,7 +354,9 @@ load_start(void)
  * left, with what is needed to vote for bandwidth on them -- only read. (membench=2 says the cores
  * together get no more from memory than one alone: 12 GB/s; nobody here votes for more.)
  */
-#define CMD_DB_PHYS             0x80860000UL
+/* soc_cmd_db=<pa>: the command database (0x80860000 on the reference phone, 0x85fe0000 on SDM845) */
+static uint64_t cmd_db_phys = 0x80860000UL;
+#define CMD_DB_PHYS             ((vm_offset_t)cmd_db_phys)
 #define CMD_DB_SIZE             0x20000UL
 #define CMD_DB_BCM              5               /* the kind of resource in a slave's id: bus clock managers */
 
@@ -380,7 +430,9 @@ ddr_look(void)
  * each (sc7280's qcom,tcs-config): every command with an address, and which of them go to the BCMs
  * above -- the bandwidth it asked for, and that is in force whenever the processors are awake.
  */
-#define RSC_PHYS                0x18220000UL
+/* soc_rsc=<pa>: the application processor's RSC, DRV 2 (0x18220000 on the reference phone, 0x179e0000 on SDM845) */
+static uint64_t rsc_phys = 0x18220000UL;
+#define RSC_PHYS                ((vm_offset_t)rsc_phys)
 #define RSC_SIZE                0x10000UL
 #define RSC_TCS(n, reg)         (0xd00 + 0x2a0 * (n) + (reg))
 #define RSC_TCS_COUNT           9
@@ -562,6 +614,15 @@ hakios_cpufreq_init(void)
 	const ml_topology_info_t *topology = ml_get_topology_info();
 	uint32_t enabled = 0, membench = 0, cores[EPSS_DOMAINS] = { 0 }, before, here;
 
+	(void)PE_parse_boot_argn("soc_cmd_db", &cmd_db_phys, sizeof(cmd_db_phys));
+	(void)PE_parse_boot_argn("soc_rsc", &rsc_phys, sizeof(rsc_phys));
+	(void)PE_parse_boot_argn("soc_cpufreq", &cpufreq_phys, sizeof(cpufreq_phys));
+	(void)PE_parse_boot_argn("soc_cpufreq_step", &cpufreq_step, sizeof(cpufreq_step));
+	(void)PE_parse_boot_argn("soc_cpufreq_groups", &cpufreq_groups, sizeof(cpufreq_groups));
+	(void)PE_parse_boot_argn("soc_cpufreq_osm", &cpufreq_osm, sizeof(cpufreq_osm));
+	if (cpufreq_groups < 1 || cpufreq_groups > EPSS_DOMAINS) {
+		cpufreq_groups = EPSS_DOMAINS;
+	}
 	load_start();
 	enabled = 2;
 	PE_parse_boot_argn("ddr", &enabled, sizeof(enabled));
@@ -581,7 +642,7 @@ hakios_cpufreq_init(void)
 	/* (whichever core this thread happens to be on, and stays on or not: it only goes to the log) */
 	here = (uint32_t)(__builtin_arm_rsr64("MPIDR_EL1") >> 8) & 0xff;
 	before = loop_speed();
-	for (uint32_t domain = 0; domain < EPSS_DOMAINS; domain++) {
+	for (uint32_t domain = 0; domain < cpufreq_groups; domain++) {
 		if (cores[domain] != 0) {
 			raise_domain(domain, cores[domain]);
 		}

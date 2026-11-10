@@ -14,6 +14,11 @@ driver GOODIX
 	help    the touch screen: a Goodix GT9916 ("Berlin-D") or a FocalTech FT3680 on SPI (touchscreen=1). The bus,
 	help    pins and supplies are the POCO X5 Pro's; another phone with one of these controllers changes those
 
+driver RMI4
+	file    bsd/dev/hakios.rmi4.c
+	help    the OnePlus 6T's touch screen: a Synaptics controller speaking RMI4 over I2C (rmi4=1). Its bus, pins,
+	help    clocks and supplies are the SDM845 phone's (the ios-fajita port's measured sequence)
+
 driver BUTTONS
 	file    bsd/dev/hakios.buttons.c
 	help    the power and volume keys, read from the PMIC through the SPMI arbiter (buttons=1)

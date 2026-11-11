@@ -6332,10 +6332,11 @@ nas_stop(void)
 #define MBA_PHYS_DEFAULT        0x96600000u     /* 6T: reserved-memory mba_region@0x96600000 (the phone's own tree; mainline 0x96500000) */
 #define MBA_SIZE                0x00200000u
 #define MBA_MAX                 0x00100000u     /* Linux: "MBA is restricted to a maximum size of 1M" */
-#define MDATA_PHYS_DEFAULT      0xa0000000u     /* plain RAM, as Linux's mdata_mem (sdm845.dtsi: in 0xa0000000..0xc0000000, no-map);
-                                                   U-Boot r6 reserves it (hakios-mdata@a0000000, no-map) and maps it FAULT. Not a
-                                                   subsystem's region: at 0x95c00000 (video) and 0x9f780000 (splash) the modem's
-                                                   own read of the header put the phone in CrashDump (runs of 11-11) */
+#define MDATA_PHYS_DEFAULT      0u              /* 0: the MBA region's second megabyte (mba_phys + MBA_PART), as the phone's own
+                                                   Android puts it (pil-msa.c: the header from the same pool as the MBA,
+                                                   mba_mem_dev_fixed); elsewhere (0x9f780000, 0x95c00000, 0xa0000000) the
+                                                   phone went to CrashDump when the MBA was told of it (runs of 11-11) */
+#define MBA_PART                0x00100000u     /* the MBA's own part of its region, handed to the modem (pil-msa.c: SZ_1M) */
 #define MDATA_SIZE              0x4000u
 static uint32_t mba_phys = MBA_PHYS_DEFAULT, mdata_phys = MDATA_PHYS_DEFAULT;
 
@@ -6560,7 +6561,7 @@ mss_reclaim(void)
 	mss_active = false;
 	branch(GCC_MSS_SNOC_AXI, "snoc_axi", 1, false, false);
 	branch(GCC_MSS_CFG_AHB, "iface", 0, false, false);
-	if (!mem_assign("the MBA's memory taken back", mba_phys, MBA_SIZE, &mba_owners, OWNER_HLOS)) {
+	if (!mem_assign("the MBA's memory taken back", mba_phys, MBA_PART, &mba_owners, OWNER_HLOS)) {
 		printf("mpss: %u: THE MBA'S MEMORY STAYS THE MODEM'S\n", step);
 	}
 	mss_touched = false;
@@ -6684,6 +6685,9 @@ step_mba(void)
 	PE_parse_boot_argn("modem_mba", &mba_phys, sizeof(mba_phys));
 	PE_parse_boot_argn("modem_tick", &tick_seconds, sizeof(tick_seconds));
 	PE_parse_boot_argn("modem_mdata", &mdata_phys, sizeof(mdata_phys));
+	if (mdata_phys == 0) {
+		mdata_phys = mba_phys + MBA_PART;
+	}
 	announce("the MBA: mba.mbn into its memory; the always-on processor told \"modem: on\", RPMh asked for CX, MX and MSS; the "
 	    "modem's clocks on and its reset let go; its memory and the MBA's handed to it; its boot ROM started, and the MBA "
 	    "waited for; then the image's header handed to the MBA to check");
@@ -6732,7 +6736,7 @@ step_mba(void)
 		goto out;
 	}
 	alive("the modem's memory was handed to it");
-	if (!mem_assign("the MBA's memory handed to the modem", mba_phys, MBA_SIZE, &mba_owners, OWNER_MSA)) {
+	if (!mem_assign("the MBA's memory handed to the modem", mba_phys, MBA_PART, &mba_owners, OWNER_MSA)) {
 		goto out;
 	}
 	alive("the MBA's memory was handed to it");
@@ -6966,7 +6970,7 @@ step_start845(void)
 				tell("mpss: %u: THE MODEM SAYS IT IS UP: \"slave-kernel\" says %#x, %llu.%03llu ms after the watch began\n", step,
 				    state, (now - started) / 1000, (now - started) % 1000);
 				lck_mtx_lock(&dsp_lock);
-				(void)mem_assign("the MBA's memory taken back (it has done its work)", mba_phys, MBA_SIZE, &mba_owners, OWNER_HLOS);
+				(void)mem_assign("the MBA's memory taken back (it has done its work)", mba_phys, MBA_PART, &mba_owners, OWNER_HLOS);
 				lck_mtx_unlock(&dsp_lock);
 			}
 			if ((state & DSP_HANDOVER) && !handed_over) {

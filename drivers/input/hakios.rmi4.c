@@ -617,6 +617,9 @@ report(const uint8_t *d)
 
 		if (present) {
 			uint32_t rx = o[1] | (uint32_t)(o[2] & 0x0f) << 8, ry = o[3] | (uint32_t)(o[4] & 0x0f) << 8;
+
+			hakios_cpufreq_boost();         /* the cores and the GPU at full speed while fingers are on it */
+			hakios_gpu_boost();
 			uint32_t x = rx >= span_x ? 65535 : rx * 65535 / span_x, y = ry >= span_y ? 65535 : ry * 65535 / span_y;
 
 			if (!contact[id].down) {

@@ -3395,6 +3395,7 @@ hakios_adreno_quiesce(void)
 #define EVENT_INVALIDATE_COLOR  0x19
 
 static bool gpu_kept;
+static volatile uint32_t gpu_submits;  /* 6T: submissions so far, for gpu_dvfs */
 static uint32_t gpu_fence;              /* the number of the last submission */
 static uint32_t gpu_timed;              /* ... of the last whose times have been added up */
 static uint64_t gpu_ticks;              /* how long the core has worked on the submissions added up */
@@ -3678,6 +3679,8 @@ uint32_t
 hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
 {
 	uint32_t wanted = 26 + 4 * count, room = 0;
+
+	gpu_submits++;                          /* 6T: what gpu_dvfs goes by */
 
 	for (int i = 0; i < 20000; i++) {
 		room = (rd(gpu.base + CP_RB_RPTR) + RING_WORDS - ring_at - 1) % RING_WORDS;
@@ -3967,6 +3970,112 @@ start_by_itself(void)
  * as long as the steps and the watch after them last, nothing else writes to the log, so that
  * its end -- all that the loader's notes keep -- is about what is being done here.
  */
+/*
+ * 6T, gpu_dvfs (on unless gpu_dvfs=0): the core's speed by how much it is given, instead of 596 MHz for good -- the GPU
+ * kept at that speed, and the voltage that goes with it, was the phone's main heat (11-11). Every 25 ms: more than six
+ * submissions in the last 100 ms (an animation: CoreAnimation submits twice a frame, 120 a second at 60 frames), or a finger on the screen in the
+ * last 1.5 s (hakios_gpu_boost, from the touch screen's driver), and the fast speed at once; a second without either,
+ * and the slow one. The home screen's clock alone (10 frames a second, 2 or 3 in 100 ms: with "more than two" the GPU was fast 97% of
+ * a run) stays slow. Each change is the legacy DCVS
+ * request (step 17), here without a word in the log but the summary every 10 s.
+ */
+#define GPU_DVFS_EVERY_MS       25
+#define GPU_DVFS_SLOW           1               /* 257 MHz */
+#define GPU_DVFS_HOLD_MS        1000
+#define GPU_DVFS_BUSY           6               /* submissions in 100 ms above which it is an animation */
+static volatile uint64_t gpu_boost_until;
+
+void
+hakios_gpu_boost(void)
+{
+	uint64_t span;
+
+	nanoseconds_to_absolutetime(1500 * NSEC_PER_MSEC, &span);
+	gpu_boost_until = mach_absolute_time() + span;
+}
+
+/* The DCVS request without the log (step 17 says it aloud): true if the GMU acknowledged and returned 0. */
+static bool
+a630_dcvs(uint32_t speed)
+{
+	uint32_t info = 0;
+
+	wr(gmu.base + GMU_DCVS_ACK_OPTION, 0);
+	wr(gmu.base + GMU_DCVS_PERF_SETTING, 3u << 28 | speed);
+	wr(gmu.base + GMU_DCVS_BW_SETTING, 0xff);
+	wr(gmu.base + GMU_HOST2GMU_INTR_SET, 1u << OOB_DCVS_SET);
+	for (int i = 0; i < 200 && !(info & 1u << OOB_DCVS_ACK); i++) {
+		sleep_us(50);
+		info = rd(gmu.base + GMU_GMU2HOST_INTR_INFO);
+	}
+	wr(gmu.base + GMU_GMU2HOST_INTR_CLR, 1u << OOB_DCVS_ACK);
+	wr(gmu.base + GMU_HOST2GMU_INTR_SET, 1u << OOB_DCVS_ACK);
+	return (info & 1u << OOB_DCVS_ACK) && rd(gmu.base + GMU_DCVS_RETURN) == 0;
+}
+
+static void
+gpu_dvfs_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	uint32_t fast = 0, at, recent[4] = { 0 }, last = gpu_submits, changes = 0, failures = 0, looks = 0;
+	uint64_t quiet_since = mach_absolute_time(), hold, time_fast = 0, time_slow = 0, then = quiet_since, last_log = then, ten;
+
+	for (uint32_t i = 1; i < A630_SPEEDS; i++) {
+		if (a630_speeds[i].khz == core_khz) {
+			fast = i;
+		}
+	}
+	if (fast <= GPU_DVFS_SLOW) {
+		return;
+	}
+	at = fast;
+	nanoseconds_to_absolutetime(GPU_DVFS_HOLD_MS * NSEC_PER_MSEC, &hold);
+	nanoseconds_to_absolutetime(10ull * NSEC_PER_SEC, &ten);
+	printf("adreno: gpu_dvfs: %u MHz with work or a finger on the screen, %u MHz without\n", a630_speeds[fast].khz / 1000,
+	    a630_speeds[GPU_DVFS_SLOW].khz / 1000);
+	while (gpu_kept) {
+		uint32_t now_count, sum, want;
+		uint64_t now;
+
+		sleep_ms(GPU_DVFS_EVERY_MS);
+		now = mach_absolute_time();
+		now_count = gpu_submits;
+		recent[looks++ % 4] = now_count - last;
+		last = now_count;
+		sum = recent[0] + recent[1] + recent[2] + recent[3];
+		if (at == fast) {
+			time_fast += now - then;
+		} else {
+			time_slow += now - then;
+		}
+		then = now;
+		if (sum > GPU_DVFS_BUSY || now < gpu_boost_until) {
+			quiet_since = now;
+			want = fast;
+		} else {
+			want = now - quiet_since >= hold ? GPU_DVFS_SLOW : at;
+		}
+		if (want != at && gpu_kept) {
+			if (a630_dcvs(want)) {
+				at = want;
+				changes++;
+			} else {
+				failures++;
+			}
+		}
+		if (now - last_log >= ten) {
+			uint64_t f, sl;
+
+			absolutetime_to_nanoseconds(time_fast, &f);
+			absolutetime_to_nanoseconds(time_slow, &sl);
+			printf("adreno: gpu_dvfs: %llu ms fast, %llu ms slow, %u changes (%u failed); now %u MHz\n", f / 1000000,
+			    sl / 1000000, changes, failures, a630_speeds[at].khz / 1000);
+			time_fast = time_slow = 0;
+			changes = failures = 0;
+			last_log = now;
+		}
+	}
+}
+
 void
 hakios_adreno_init(void)
 {
@@ -4047,6 +4156,15 @@ hakios_adreno_init(void)
 			quiet = true;
 			printf("adreno: THE GPU STAYS ON for the system to draw with: the service HakiosGPU\n");
 			HakiosGPUStart();
+			{
+				uint32_t dvfs = 1;
+				thread_t thread;
+
+				PE_parse_boot_argn("gpu_dvfs", &dvfs, sizeof(dvfs));
+				if (dvfs && kernel_thread_start(gpu_dvfs_thread, NULL, &thread) == KERN_SUCCESS) {
+					thread_deallocate(thread);
+				}
+			}
 			/* 6T, for finding what ends a run with the GPU kept: adreno_keep_watch=S holds the system's start S seconds */
 			only = 0;
 			PE_parse_boot_argn("adreno_keep_watch", &only, sizeof(only));

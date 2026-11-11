@@ -402,6 +402,29 @@ static struct {
 	uint64_t time_at[EPSS_TABLE_ROWS];                              /* how long at each, for the log */
 } gov[EPSS_DOMAINS];
 
+/*
+ * A finger on the screen (drivers/input/hakios.rmi4.c): the group that has the most of our cores at its top row at once,
+ * and kept there while touches go on and BOOST_MS after the last -- a change of screen starts with a touch, and its
+ * first frames came out black while the load-driven speed was still climbing (11-11).
+ */
+#define BOOST_MS                1500
+static volatile uint64_t boost_until;
+static volatile uint32_t boost_group = ~0u;
+
+void
+hakios_cpufreq_boost(void)
+{
+	uint64_t now = mach_absolute_time(), span;
+	uint32_t d = boost_group;
+
+	nanoseconds_to_absolutetime(BOOST_MS * NSEC_PER_MSEC, &span);
+	boost_until = now + span;
+	if (d < EPSS_DOMAINS && gov[d].rows != 0 && gov[d].at != gov[d].rows - 1) {
+		gov[d].at = gov[d].rows - 1;
+		*(volatile uint32_t *)(gov[d].base + OSM_PERF_STATE) = gov[d].row[gov[d].at];
+	}
+}
+
 static bool
 gov_table(uint32_t domain)
 {
@@ -478,7 +501,7 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 			}
 			gov[d].time_at[gov[d].at] += now - then;
 			busy_sum[d] += busiest[d];
-			if (busiest[d] >= GOV_UP_BUSY) {
+			if (busiest[d] >= GOV_UP_BUSY || (d == boost_group && now < boost_until)) {
 				want = gov[d].rows - 1;
 			} else {
 				need = (uint32_t)((uint64_t)gov[d].khz[gov[d].at] * busiest[d] / GOV_TARGET_BUSY);
@@ -773,6 +796,14 @@ hakios_cpufreq_init(void)
 	if (!PE_parse_boot_argn("cpufreq", &enabled, sizeof(enabled)) || !enabled) {
 		return;
 	}
+	{
+		uint32_t gov_on = 0;
+
+		/* cpufreq_gov=1 (a defconfig's CONFIG_CPUFREQ_GOV; CONFIG_CPUFREQ is a bool): as cpufreq=2 */
+		if (PE_parse_boot_argn("cpufreq_gov", &gov_on, sizeof(gov_on)) && gov_on) {
+			enabled = 2;
+		}
+	}
 	for (unsigned int i = 0; i < topology->num_cpus; i++) {
 		cores[domain_of(topology->cpus[i].phys_id)]++;
 	}
@@ -789,6 +820,12 @@ hakios_cpufreq_init(void)
 				tell("cpufreq: group %u (%u of our cores): %u rows, %u to %u MHz, by load (cpufreq=2)\n", domain,
 				    cores[domain], gov[domain].rows, gov[domain].khz[0] / 1000, gov[domain].khz[gov[domain].rows - 1] / 1000);
 				any = true;
+			}
+		}
+		for (uint32_t domain = 0, most = 0; domain < cpufreq_groups; domain++) {
+			if (gov[domain].rows != 0 && cores[domain] >= most) {
+				most = cores[domain];
+				boost_group = domain;           /* (the big cores' group, where there is a choice: the later one) */
 			}
 		}
 		if (any && kernel_thread_start(gov_thread, NULL, &thread) == KERN_SUCCESS) {

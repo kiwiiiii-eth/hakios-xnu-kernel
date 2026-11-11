@@ -74,7 +74,12 @@ void hakios_battery_report(__unused const struct hakios_battery_state *state) {}
 
 #ifndef HAKIOS_CPUFREQ
 void hakios_cpufreq_init(void) {}
+void hakios_cpufreq_boost(void) {}
 void hakios_ddr_quiesce(void) {}
+#endif
+
+#if !defined(HAKIOS_A630)
+void hakios_gpu_boost(void) {}
 #endif
 
 #if !defined(HAKIOS_ADRENO) && !defined(HAKIOS_A630)

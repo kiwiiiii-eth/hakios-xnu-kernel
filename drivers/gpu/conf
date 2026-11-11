@@ -7,3 +7,8 @@ driver ADRENO
 	file    iokit/Kernel/hakios.gpu.cpp iokitcpp
 	help    the Adreno 642L of the SC7280 woken step by step (adreno=N), and HakiosGPU, the IOKit service Mesa, Metal and
 	help    the window server draw through (gpu=1, adreno_keep=1; docs/reference/metal.md). Needs the GPU's firmware from the phone (fw-gpu/)
+
+driver A630
+	file    bsd/dev/hakios.a630.c
+	help    the OnePlus 6T's Adreno 630 (SDM845): the port of the ADRENO driver's steps (adreno=N), so far the first ones;
+	help    the same boot-args and entry points, so not built together with ADRENO. No HakiosGPU service yet

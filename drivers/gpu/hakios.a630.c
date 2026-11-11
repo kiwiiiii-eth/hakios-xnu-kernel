@@ -1,6 +1,6 @@
 /*
  * THE ONEPLUS 6T (fajita, SDM845) PORT of drivers/gpu/hakios.adreno.c: its GPU is an Adreno 630 (chip id 0x06030000 in
- * the phone's own device tree), where the reference phone's is a 642L. Ported so far: steps 1 to 13 (A630_PORTED_STEPS below);
+ * the phone's own device tree), where the reference phone's is a 642L. Ported so far: steps 1 to 15 (A630_PORTED_STEPS below);
  * asking for more stops at the last ported step, and gpu=1 is refused, until the rest has been made to work here. The
  * 6T's addresses are from its own device tree (LineageOS 22.2's fajita DTB: qcom,kgsl-3d0@5000000, qcom,gmu with
  * 0x506a000 and the PDC at 0xb200000, qcom,kgsl-iommu at 0x5040000, qcom,gpucc@5090000, qcom,gdsc@0x509106c) and Linux's
@@ -119,8 +119,8 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
  * The steps made to work on the 6T, a bit each (bit 1 = step 1): 1 to 3, and TrustZone's (11, 12), which need no power
  * in the GPU block and say early whether the zap shader is this phone's. The others are left out, whatever is asked.
  */
-#define A630_PORTED_STEPS       (0x7feu | 1u << 11 | 1u << 12 | 1u << 13)
-#define A630_LAST_PORTED        13
+#define A630_PORTED_STEPS       0xfffeu        /* 1 to 15 */
+#define A630_LAST_PORTED        15
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
@@ -1759,67 +1759,40 @@ step_gmu_space(void)
 
 #define GMU_ITCM                GMU_WORD(0x0c00)
 
+/*
+ * 6T: the old kind of firmware is one image of the GMU's two memories, written from the start of its code memory on and
+ * running on into its data memory, which follows it (a6xx_gmu_fw_load: "gmu_write_bulk(gmu, REG_A6XX_GMU_CM3_ITCM_START,
+ * ..., fw_image->size)" for legacy GMUs, at most 32K). Written, then read back.
+ */
 static bool
 step_gmu_firmware(void)
 {
-	uint32_t wrong = 0;
+	uint32_t wrong = 0, words;
 
 	if (!cx_ready() || gmu_firmware == NULL) {
 		return false;
 	}
-	announce("load the GMU's firmware: its first 16K of code and of data through the GMU's registers (0x3d6d000, "
-	    "0x3d71000), the rest into the memory just made");
+	announce("load the GMU's firmware, the old kind: the whole image through the GMU's registers, from its code memory "
+	    "(0x506d000) on into its data memory after it (0x5071000)");
 	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 1);
-	for (int pass = 0; pass < 2; pass++) {
-		for (uint64_t at = 0; at + sizeof(struct gmu_firmware_block) <= gmu_firmware_size;) {
-			struct gmu_firmware_block block;
-			const uint8_t *data = gmu_firmware + at + sizeof(block);
+	words = (uint32_t)(gmu_firmware_size / 4);
+	for (uint32_t i = 0; i < words; i++) {
+		uint32_t word;
 
-			memcpy(&block, gmu_firmware + at, sizeof(block));
-			at += sizeof(block) + block.size;
-			if (block.size == 0) {
-				continue;
-			}
-			/* the end is worked out in 64 bits: a block whose address and size wrap past 4 GB is not "inside the TCM" and is not written */
-			if (in_tcm(block.address) && (uint64_t)block.address + block.size <= 0x100000000ull &&
-			    in_tcm(block.address + block.size - 1)) {
-				uint32_t registers = block.address < GMU_DTCM_ADDRESS ? GMU_ITCM + block.address - GMU_ITCM_ADDRESS :
-				    GMU_DTCM + block.address - GMU_DTCM_ADDRESS;
+		memcpy(&word, gmu_firmware + 4 * i, sizeof(word));
+		wr(gmu.base + GMU_ITCM + 4 * i, word);
+	}
+	settle();
+	for (uint32_t i = 0; i < words; i++) {
+		uint32_t word;
 
-				for (uint32_t offset = 0; offset + 4 <= block.size; offset += 4) {
-					uint32_t word;
-
-					memcpy(&word, data + offset, sizeof(word));
-					if (pass == 0) {
-						wr(gmu.base + registers + offset, word);
-					} else if (rd(gmu.base + registers + offset) != word) {
-						wrong++;
-					}
-				}
-				if (pass == 1) {
-					printf("adreno: %u: %#x bytes at the GMU's %#x, through its registers\n", step, block.size,
-					    block.address);
-				}
-				continue;
-			}
-			for (unsigned i = 0; pass == 0 && i <= gmu_block_count; i++) {
-				if (i == gmu_block_count) {
-					printf("adreno: %u: the firmware has %#x bytes for %#x, where it asked for no memory\n", step,
-					    block.size, block.address);
-					return false;
-				}
-				/* (64-bit sum: with 32 bits a block that wraps would pass and the copy would run past the block's memory) */
-				if (block.address >= gmu_blocks[i].address &&
-				    (uint64_t)block.address + block.size <= gmu_blocks[i].address + gmu_blocks[i].size) {
-					memcpy((void *)(gmu_blocks[i].memory + (block.address - gmu_blocks[i].address)), data, block.size);
-					to_memory(gmu_blocks[i].memory, gmu_blocks[i].size);
-					printf("adreno: %u: %#x bytes at the GMU's %#x, in memory\n", step, block.size, block.address);
-					break;
-				}
-			}
+		memcpy(&word, gmu_firmware + 4 * i, sizeof(word));
+		if (rd(gmu.base + GMU_ITCM + 4 * i) != word) {
+			wrong++;
 		}
 	}
 	snprintf(last_write, sizeof(last_write), "step %u wrote the GMU's firmware into its code and data memory", step);
+	printf("adreno: %u: %u bytes at the GMU's code memory and on, through its registers\n", step, words * 4);
 	if (wrong) {
 		printf("adreno: %u: %u words of the GMU's own memory do not read back as written\n", step, wrong);
 		return false;
@@ -1851,7 +1824,9 @@ step_gmu_firmware(void)
 #define GMU_RSCC_CONTROL_REQ    GMU_WORD(0x9307)
 #define GMU_AO_AHB_FENCE_CTRL   GMU_WORD(0x9310)
 #define GMU_AHB_FENCE_RANGE_0   GMU_WORD(0x9311)
-#define GMU_CHIP                0x06035000      /* dt qcom,chipid 0x06030500 the way the firmware wants it */
+#define GMU_CHIP                0x06030000      /* 6T: dt qcom,chipid 0x06030000 the way the firmware wants it (same) */
+#define GMU_OLD_FIRMWARE        0x20010004      /* a6xx_gmu_start: firmware up to this core version says 0xbabeface */
+#define GMU_STARTED_OLD         0xbabeface
 #define GMU_STARTED_MASK        0x1ff           /* of fw_init_result, for firmware newer than core 0x20010004 */
 #define GMU_STARTED             0x100
 #define GMU_FAILED              0xe00
@@ -1878,7 +1853,8 @@ static bool
 step_gmu_start(void)
 {
 	static const uint8_t priority[HFI_QUEUES] = { 10, 10, 40 };
-	uint32_t result = 0;
+	static const uint8_t queue_id[HFI_QUEUES] = { 0, 4, 5 };   /* 6T: a legacy GMU's answers and debug queues are 4 and 5 */
+	uint32_t result = 0, version, started_mask, started;
 
 	if (!cx_ready() || !gmu_space_is_on) {
 		return false;
@@ -1894,8 +1870,9 @@ step_gmu_start(void)
 	hfi->queues = hfi->active_queues = HFI_QUEUES;
 	for (unsigned i = 0; i < HFI_QUEUES; i++) {
 		hfi->queue[i].start = GMU_HFI_ADDRESS + HFI_QUEUE_AT(i);
-		hfi->queue[i].type = i | (uint32_t)priority[i] << 8;
+		hfi->queue[i].type = queue_id[i] | (uint32_t)priority[i] << 8;
 		hfi->queue[i].words = HFI_QUEUE_WORDS;
+		hfi->queue[i].unused[1] = hfi->queue[i].unused[2] = hfi->queue[i].unused[3] = 1;    /* Linux: rx/tx watermark, rx request */
 		hfi->queue[i].status = 1;
 	}
 
@@ -1922,16 +1899,15 @@ step_gmu_start(void)
 		get(&rscc, "seq_busy_drv0", RSCC_SEQ_BUSY_DRV0);
 	}
 	rsc_awake = true;
-	put(&gmu, "cx_falnext_intf", GMU_CX_FALNEXT_INTF, 1);
-	put(&gmu, "cx_fal_intf", GMU_CX_FAL_INTF, 1);
+	/* 6T: no FAL votes (a650 family and on only, a6xx_gmu_fw_start) */
 	put(&gmu, "general_7", GMU_GENERAL_7, 1);
 	put(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT, 0);
 	put(&gmu, "cm3_boot_config", GMU_CM3_BOOT_CONFIG, 2);
 	put(&gmu, "hfi_qtbl_addr", GMU_HFI_QTBL_ADDR, GMU_HFI_ADDRESS);
 	put(&gmu, "hfi_qtbl_info", GMU_HFI_QTBL_INFO, 1);
-	put(&gmu, "ahb_fence_range_0", GMU_AHB_FENCE_RANGE_0, 1u << 31 | (0xa << 2) << 18 | 0x8a0);
+	put(&gmu, "ahb_fence_range_0", GMU_AHB_FENCE_RANGE_0, 1u << 31 | 0xa << 18 | 0xa0);        /* 6T: the a6xx range */
 	put(&gmu, "cm3_cfg", GMU_CM3_CFG, 0x4052);
-	put(&gbif, "halt", GBIF_HALT, 0);
+	/* 6T: no GBIF to un-halt */
 	put(&gmu, "pwr_col_cp_resp", GMU_PWR_COL_CP_RESP, 0);
 	put(&gmu, "hfi_sfr_addr", GMU_HFI_SFR_ADDR, GMU_CHIP);
 	put(&gmu, "pwr_col_cp_msg", GMU_PWR_COL_CP_MSG, GMU_LOG_ADDRESS | (GMU_LOG_SIZE / 4096 - 1));
@@ -1942,9 +1918,16 @@ step_gmu_start(void)
 	set(&gmu, "rpmh_ctrl", GMU_RPMH_CTRL, GMU_RPMH_CTRL_ALL);
 	put(&gmu, "gmu2host_intr_clr", GMU_GMU2HOST_INTR_CLR, 0xffffffff);
 
+	/* a6xx_gmu_start: what a started firmware writes depends on its version (6T: an old one is to be expected) */
+	version = get(&gmu, "dtcm: the firmware's core version", GMU_DTCM_VERSIONS);
+	started_mask = version <= GMU_OLD_FIRMWARE ? 0xffffffffu : GMU_STARTED_MASK;
+	started = version <= GMU_OLD_FIRMWARE ? GMU_STARTED_OLD : GMU_STARTED;
+	printf("adreno: %u: firmware core version %#x: a started one writes %#x (of mask %#x)\n", step, version, started,
+	    started_mask);
 	gmu_runs = true;
 	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 0);
-	for (int i = 0; i < 5000 && (result & GMU_STARTED_MASK) != GMU_STARTED && !(result & GMU_FAILED); i++) {
+	for (int i = 0; i < 5000 && (result & started_mask) != started && (version <= GMU_OLD_FIRMWARE || !(result & GMU_FAILED));
+	    i++) {
 		sleep_us(100);
 		result = rd(gmu.base + GMU_CM3_FW_INIT_RESULT);
 	}
@@ -1952,7 +1935,7 @@ step_gmu_start(void)
 	get(&gmu, "gmu2host_intr_info", GMU_GMU2HOST_INTR_INFO);
 	get(&gmu, "ao_host_interrupt_status", GMU_AO_HOST_INTERRUPT_STATUS);
 	get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
-	if (space_faulted(&gmu_space) || (result & GMU_STARTED_MASK) != GMU_STARTED) {
+	if (space_faulted(&gmu_space) || (result & started_mask) != started) {
 		printf("adreno: %u: the GMU's firmware does not come up\n", step);
 		gmu_post_mortem();
 		return false;

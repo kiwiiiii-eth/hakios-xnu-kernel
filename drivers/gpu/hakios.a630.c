@@ -1,6 +1,6 @@
 /*
  * THE ONEPLUS 6T (fajita, SDM845) PORT of drivers/gpu/hakios.adreno.c: its GPU is an Adreno 630 (chip id 0x06030000 in
- * the phone's own device tree), where the reference phone's is a 642L. Ported so far: steps 1 to 6, 11 and 12 (A630_PORTED_STEPS below);
+ * the phone's own device tree), where the reference phone's is a 642L. Ported so far: steps 1 to 9, 11 and 12 (A630_PORTED_STEPS below);
  * asking for more stops at the last ported step, and gpu=1 is refused, until the rest has been made to work here. The
  * 6T's addresses are from its own device tree (LineageOS 22.2's fajita DTB: qcom,kgsl-3d0@5000000, qcom,gmu with
  * 0x506a000 and the PDC at 0xb200000, qcom,kgsl-iommu at 0x5040000, qcom,gpucc@5090000, qcom,gdsc@0x509106c) and Linux's
@@ -119,7 +119,7 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
  * The steps made to work on the 6T, a bit each (bit 1 = step 1): 1 to 3, and TrustZone's (11, 12), which need no power
  * in the GPU block and say early whether the zap shader is this phone's. The others are left out, whatever is asked.
  */
-#define A630_PORTED_STEPS       (0x7eu | 1u << 11 | 1u << 12)
+#define A630_PORTED_STEPS       (0x3feu | 1u << 11 | 1u << 12)
 #define A630_LAST_PORTED        12
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
@@ -947,7 +947,8 @@ step_first_words(void)
  * kernel asks RPMh for the touch screen's supply, but the GMU's own; through them its firmware
  * raises the 3D core's rail. Offsets in words: a6xx_gmu.xml, domain A6XX_RSCC.
  */
-static struct block rscc = { "rscc", 0x03de0000, 0x2000 };
+/* 6T: no block of its own -- on the A630 it is inside the GMU's, 0x23000 on (a6xx_gmu.c: "gmu->mmio + 0x23000") */
+static struct block rscc = { "rscc", 0x0508d000, 0x2000 };
 #define RSCC_RSC_STATUS0_DRV0   (4 * 0x004)
 #define RSCC_PDC_SLAVE_ID_DRV0  (4 * 0x00b)
 #define RSCC_SEQ_BUSY_DRV0      (4 * 0x101)
@@ -989,7 +990,7 @@ step_rscc(void)
 	if (!cx_ready()) {
 		return false;
 	}
-	announce("read the GMU's RPMh channel (0x3de0000)");
+	announce("read the GMU's RPMh channel (0x508d000, inside the GMU's block)");
 	get(&rscc, "rsc_status0_drv0", RSCC_RSC_STATUS0_DRV0);
 	get(&rscc, "pdc_slave_id_drv0", RSCC_PDC_SLAVE_ID_DRV0);
 	get(&rscc, "seq_busy_drv0", RSCC_SEQ_BUSY_DRV0);
@@ -1050,7 +1051,7 @@ step_smmu(void)
 	if (!cx_ready()) {
 		return false;
 	}
-	announce("read the ID registers of the GPU's SMMU (0x3da0000): global registers, which the hypervisor answers for");
+	announce("read the ID registers of the GPU's SMMU (0x5040000): global registers");
 	if (!smmu_layout()) {
 		return false;
 	}

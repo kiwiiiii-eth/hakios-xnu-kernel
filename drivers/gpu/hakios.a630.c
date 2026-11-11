@@ -1,6 +1,6 @@
 /*
  * THE ONEPLUS 6T (fajita, SDM845) PORT of drivers/gpu/hakios.adreno.c: its GPU is an Adreno 630 (chip id 0x06030000 in
- * the phone's own device tree), where the reference phone's is a 642L. Ported so far: steps 1 to 9, 11 and 12 (A630_PORTED_STEPS below);
+ * the phone's own device tree), where the reference phone's is a 642L. Ported so far: steps 1 to 13 (A630_PORTED_STEPS below);
  * asking for more stops at the last ported step, and gpu=1 is refused, until the rest has been made to work here. The
  * 6T's addresses are from its own device tree (LineageOS 22.2's fajita DTB: qcom,kgsl-3d0@5000000, qcom,gmu with
  * 0x506a000 and the PDC at 0xb200000, qcom,kgsl-iommu at 0x5040000, qcom,gpucc@5090000, qcom,gdsc@0x509106c) and Linux's
@@ -119,8 +119,8 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
  * The steps made to work on the 6T, a bit each (bit 1 = step 1): 1 to 3, and TrustZone's (11, 12), which need no power
  * in the GPU block and say early whether the zap shader is this phone's. The others are left out, whatever is asked.
  */
-#define A630_PORTED_STEPS       (0x3feu | 1u << 11 | 1u << 12)
-#define A630_LAST_PORTED        12
+#define A630_PORTED_STEPS       (0x7feu | 1u << 11 | 1u << 12 | 1u << 13)
+#define A630_LAST_PORTED        13
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
@@ -1112,7 +1112,7 @@ step_gmu_memory(void)
 	if (!cx_ready()) {
 		return false;
 	}
-	announce("hold the GMU's processor in reset, write two words into its data memory (0x3d71000), read them back");
+	announce("hold the GMU's processor in reset, write two words into its data memory (0x5071000), read them back");
 	if (get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT) == 0xbabeface) {
 		printf("adreno: %u: firmware is running in the GMU: leaving its memory alone\n", step);
 		return false;
@@ -1159,7 +1159,7 @@ step_gmu_memory(void)
 
 #define SMMU_S2CR_FAULT         (2u << 16)
 #define SMMU_SMR_VALID          (1u << 31)
-#define SMMU_STREAM_MASK        0x400           /* dt: the second cell of every "iommus" of this SMMU */
+#define SMMU_STREAM_MASK        0               /* 6T: its "iommus" have one cell, the stream, and no mask (redwood's 0x400) */
 #define SMMU_CBAR_STAGE_1       (1u << 16 | 3u << 8 | 0xfu << 12)       /* our tables alone decide; weakest defaults */
 #define SMMU_CBA2R(n)           (0x800 + 4 * (n))                       /* in the second page, like CBAR */
 #define SMMU_CBA2R_64_BIT       1
@@ -1686,9 +1686,19 @@ step_zap_signature(void)
 #define GMU_ITCM_ADDRESS        0x00000000u
 #define GMU_DTCM_ADDRESS        0x10004000u     /* a6xx_gmu_fw_load: the 650 family's */
 #define GMU_TCM_SIZE            0x4000u
-#define GMU_LOG_ADDRESS         0x60002000u     /* after the two pages the firmware asks for at 0x60000000 */
+/*
+ * 6T: the A630's GMU firmware is the old kind, one image of its two memories (step 14) with no list of what else it wants.
+ * Linux gives it, in its addresses through the SMMU (a6xx_gmu.c: a6xx_gmu_init, a6xx_gmu_memory_alloc): a "dummy" page at
+ * 0x60000000, and from the next page on 16K each of a debug region, a log and the HFI queues. The debug region's address
+ * goes to the firmware in the first HFI message (HFI v1), the log's and the queues' through registers.
+ */
+#define GMU_DUMMY_ADDRESS       0x60000000u
+#define GMU_DEBUG_ADDRESS       0x60001000u
+#define GMU_DEBUG_SIZE          0x4000u
+#define GMU_LEGACY_IMAGE_SIZE   0x8000u         /* a6xx_gmu_fw_load: the most a legacy image may be */
+#define GMU_LOG_ADDRESS         0x60005000u
 #define GMU_LOG_SIZE            0x4000u
-#define GMU_HFI_ADDRESS         0x60006000u
+#define GMU_HFI_ADDRESS         0x60009000u
 #define GMU_STREAM              5
 #define GMU_MATCH               1               /* entry of the stream table; 0 is kept for the 3D core */
 
@@ -1699,7 +1709,7 @@ struct gmu_firmware_block {
 #define GMU_FIRMWARE_NEEDS_KEPT 7
 
 static struct gpu_space gmu_space = { .name = "the GMU", .context = 1 };
-static struct gpu_block gmu_blocks[12], gmu_log, gmu_hfi;
+static struct gpu_block gmu_blocks[12], gmu_log, gmu_hfi, gmu_dummy, gmu_debug;
 static unsigned gmu_block_count;
 static const uint8_t *gmu_firmware;
 static uint64_t gmu_firmware_size;
@@ -1718,38 +1728,26 @@ step_gmu_space(void)
 	if (!cx_ready()) {
 		return false;
 	}
-	announce("find the GMU's firmware, fw/a630_gmu.bin, in the small image, and make the memory it asks for");
+	announce("find the GMU's firmware, fw/a630_gmu.bin, in the small image: the old kind, one image of its memories");
 	gmu_firmware = image_file("fw", "a630_gmu.bin", &gmu_firmware_size);
 	if (gmu_firmware == NULL) {
 		return false;
 	}
-	for (uint64_t at = 0; at + sizeof(struct gmu_firmware_block) <= gmu_firmware_size;) {
-		struct gmu_firmware_block block;
-
-		memcpy(&block, gmu_firmware + at, sizeof(block));
-		at += sizeof(block) + block.size;
-		if (at > gmu_firmware_size) {
-			printf("adreno: %u: the file ends inside a block\n", step);
-			return false;
-		}
-		if (block.size != 0 || (block.type != GMU_FIRMWARE_NEEDS && block.type != GMU_FIRMWARE_NEEDS_KEPT) ||
-		    in_tcm(block.address)) {
-			continue;
-		}
-		if (gmu_block_count == sizeof(gmu_blocks) / sizeof(gmu_blocks[0]) || (block.address & 4095) ||
-		    block.value > 0x100000 || !block_new(&gmu_space, &gmu_blocks[gmu_block_count++], block.address, block.value,
-		    PTE_GMU)) {
-			printf("adreno: %u: cannot make %#x bytes at %#x for the firmware\n", step, block.value, block.address);
-			return false;
-		}
+	if (gmu_firmware_size == 0 || gmu_firmware_size > GMU_LEGACY_IMAGE_SIZE || (gmu_firmware_size & 3)) {
+		printf("adreno: %u: %llu bytes: not an image of the GMU's memories (at most %u)\n", step, gmu_firmware_size,
+		    GMU_LEGACY_IMAGE_SIZE);
+		return false;
 	}
-	if (!block_new(&gmu_space, &gmu_log, GMU_LOG_ADDRESS, GMU_LOG_SIZE, PTE_GMU) ||
+	announce("make the memory Linux gives the A630's GMU: a page at 0x60000000, then 16K each of debug region, log, HFI queues");
+	if (!block_new(&gmu_space, &gmu_dummy, GMU_DUMMY_ADDRESS, 4096, PTE_GMU) ||
+	    !block_new(&gmu_space, &gmu_debug, GMU_DEBUG_ADDRESS, GMU_DEBUG_SIZE, PTE_GMU) ||
+	    !block_new(&gmu_space, &gmu_log, GMU_LOG_ADDRESS, GMU_LOG_SIZE, PTE_GMU) ||
 	    !block_new(&gmu_space, &gmu_hfi, GMU_HFI_ADDRESS, PAGE_SIZE, PTE_GMU)) {
 		return false;
 	}
 
 	announce("give the SMMU's context 1 these tables and send the GMU's requests (stream 5) through it: the first "
-	    "writes to the SMMU, the global ones (cbar, cba2r, s2cr, smr) through the hypervisor");
+	    "writes to the SMMU");
 	if (!smmu_layout()) {
 		return false;
 	}

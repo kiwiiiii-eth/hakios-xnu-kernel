@@ -51,6 +51,7 @@ int hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, u
 const uint8_t *hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
 void hakios_battery_init(void);        /* boot-arg battery=1: Qualcomm UEFI charger state shared by xnuloader */
 void hakios_fg8998_init(void);         /* the OnePlus 6T's PMI8998 fuel gauge, read only (fg8998=0: off) */
+void hakios_dsibl_init(void);          /* dsibl=1: the OnePlus 6T panel's brightness by DCS (kern.hakios.brightness) */
 int hakios_battery_temperature(void);  /* the battery's temperature in C, -273 while it is not known */
 /* one transfer at a time through the PMIC arbiter for this system (drivers/input/hakios.buttons.c) */
 void hakios_spmi_lock(void);

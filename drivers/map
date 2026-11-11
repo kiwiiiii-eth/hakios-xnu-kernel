@@ -25,6 +25,7 @@ storage  bsd/dev/hakios.virtio_blk.c
 
 gpu      bsd/dev/hakios.adreno.c
 gpu      bsd/dev/hakios.a630.c
+gpu      bsd/dev/hakios.dsibl.c
 power    bsd/dev/hakios.fg8998.c
 gpu      iokit/Kernel/hakios.gpu.cpp
 

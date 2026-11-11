@@ -62,6 +62,10 @@ void hakios_virtio_blk_init(void) {}
 bool hakios_virtio_blk_dev(__unused dev_t dev) { return false; }
 #endif
 
+#ifndef HAKIOS_DSIBL
+void hakios_dsibl_init(void) {}
+#endif
+
 #ifndef HAKIOS_FG8998
 void hakios_fg8998_init(void) {}
 #endif

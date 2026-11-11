@@ -129,7 +129,7 @@ static bool rmtfs_start(void);
 static void rmtfs_stop(void);
 
 #define STEPS                   11
-#define MPSS845_PORTED          2       /* the steps made the 6T's: the others are not attempted */
+#define MPSS845_PORTED          7       /* the steps made the 6T's: the others are not attempted */
 #define HAKIOS_SOC_BASE        0x00400000ul    /* where the loader says the phone's peripherals begin */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
@@ -622,7 +622,7 @@ show_crash_reason(void)
 #define QMP_DOWN                0xffff0000u
 #define QMP_MESSAGE             64
 
-static struct block aoss = { "mailbox", 0x0c300000, 0x400 };
+static struct block aoss = { "mailbox", 0x0c300000, 0x1000 };
 
 #define IPCC_SEND               0x0c
 #define IPCC_RECEIVED           0x10
@@ -637,6 +637,20 @@ static struct block aoss = { "mailbox", 0x0c300000, 0x400 };
 
 static struct block ipcc = { "ipcc", 0, 0x1000 };     /* 6T: NONE (0x408000 on the reference phone): see need() */
 
+/* 6T: the doorbells are bits of apss_shared's IPC register (Linux's qcom-apcs-ipc-mailbox.c, "qcom,sdm845-apss-shared": +12) */
+static struct block apss = { "apss_shared", 0x17990000, 0x1000 };
+#define APSS_IPC                0x0c
+#define APSS_AOP                0               /* dt: mboxes = <&apss_shared 0> of aoss_qmp */
+#define APSS_GLINK              12              /* ... 12 of glink-edge "modem" */
+#define APSS_SMP2P              14              /* ... 14 of smp2p-mpss */
+
+static void
+apss_ring(unsigned bit)
+{
+	need(&apss);
+	wr(apss.base + APSS_IPC, 1u << bit);
+}
+
 static struct {
 	uint32_t glink, smp2p, said;
 	uint64_t since;
@@ -650,6 +664,8 @@ static struct {
 static void
 doorbells(void)
 {
+	/* 6T: the modem's rings are interrupts of the GIC (SPI 449 GLINK, 451 SMP2P), not a register to read: the shared memory is watched instead */
+	return;
 	for (unsigned i = 0; i < 8; i++) {
 		uint32_t who = rd(ipcc.base + IPCC_RECEIVED);
 
@@ -686,7 +702,7 @@ mailbox_wait(uint32_t offset, uint32_t value, uint32_t ms)
 static void
 ring_aop(void)
 {
-	wr(ipcc.base + IPCC_SEND, IPCC_AOP << 16 | 0);
+	apss_ring(APSS_AOP);
 }
 
 /* Linux's qmp_open(), as hakios.wifi.c does it; what is done already is found done. Under the mailbox's lock. */
@@ -696,7 +712,6 @@ mailbox_open(void)
 	uint32_t box, size;
 
 	need(&aoss);
-	need(&ipcc);
 	if (get(&aoss, "magic", QMP_MAGIC) != QMP_MAGIC_VALUE || get(&aoss, "version", QMP_VERSION) != 1) {
 		printf("mpss: %u: not a mailbox this knows\n", step);
 		return false;
@@ -901,11 +916,11 @@ rail_position(const char *name, uint32_t level, uint32_t *address)
 static bool
 rails(uint32_t level)
 {
-	static const char *const names[2] = { "cx.lvl", "mss.lvl" };
-	uint32_t addresses[2] = { 0, 0 }, values[2] = { 0, 0 }, done = 0;
+	static const char *const names[3] = { "cx.lvl", "mx.lvl", "mss.lvl" };      /* 6T: sdm845_mss's proxy_pd_names */
+	uint32_t addresses[3] = { 0, 0, 0 }, values[3] = { 0, 0, 0 }, done = 0;
 	uint64_t began;
 
-	for (unsigned r = 0; r < 2; r++) {
+	for (unsigned r = 0; r < 3; r++) {
 		int position = level == 0 ? 0 : rail_position(names[r], level, &addresses[r]);
 
 		if (level == 0) {
@@ -926,18 +941,18 @@ rails(uint32_t level)
 		lck_mtx_unlock(&hakios_rsc_lock);
 		return false;
 	}
-	printf("mpss: %u: about to ask RPMh, through TCS %u, for cx.lvl (%#x) = %u and mss.lvl (%#x) = %u (level %u%s)\n", step,
-	    RPMH_TCS, addresses[0], values[0], addresses[1], values[1], level, level == 0 ? ": given back" : "");
+	printf("mpss: %u: about to ask RPMh, through TCS %u, for cx.lvl (%#x) = %u, mx.lvl (%#x) = %u and mss.lvl (%#x) = %u (level %u%s)\n",
+	    step, RPMH_TCS, addresses[0], values[0], addresses[1], values[1], addresses[2], values[2], level, level == 0 ? ": given back" : "");
 	snprintf(last_write, sizeof(last_write), "step %u asked RPMh for the modem's rails at level %u", step, level);
 	hold();
 	wr(rsc.base + RSC_IRQ_CLEAR, 1u << RPMH_TCS);
-	for (unsigned r = 0; r < 2; r++) {
+	for (unsigned r = 0; r < 3; r++) {
 		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(r), MSGID_WRITE_WAITED);
 		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(r) + 4, addresses[r]);
 		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(r) + 8, values[r]);
 	}
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_WAIT_FOR_DONE, 3);
-	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_ENABLED, 3);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_WAIT_FOR_DONE, 7);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_ENABLED, 7);
 	settle();
 	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) & ~TCS_TRIGGER);
 	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) | TCS_ACTIVE_MODE);
@@ -950,9 +965,10 @@ rails(uint32_t level)
 		}
 		sleep_us(50);
 	}
-	printf("mpss: %u: RPMh %s after %llu us; the commands' status %#x %#x, the TCS's %#x\n", step, done ? "HAS DONE IT" :
+	printf("mpss: %u: RPMh %s after %llu us; the commands' status %#x %#x %#x, the TCS's %#x\n", step, done ? "HAS DONE IT" :
 	    "HAS NOT SAID DONE", now_us() - began, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(0) + 12),
-	    rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(1) + 12), rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_STATUS));
+	    rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(1) + 12), rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(2) + 12),
+	    rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_STATUS));
 	wr(rsc.base + RSC_IRQ_CLEAR, 1u << RPMH_TCS);
 	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) & ~(TCS_TRIGGER | TCS_ACTIVE_MODE));
 	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_ENABLED, 0);
@@ -1385,7 +1401,7 @@ dsp_listen(const struct smp2p *theirs)
 		    step, theirs->flags, smp2p_restart_acked);
 		smem_poke(our_item + SMP2P_AT_FLAGS, (ours.flags & ~SMP2P_RESTART_ACK) | (smp2p_restart_acked ? SMP2P_RESTART_ACK : 0));
 		settle();
-		wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_SMP2P);
+		apss_ring(APSS_SMP2P);
 	}
 }
 
@@ -1416,14 +1432,13 @@ dsp_ask_to_stop(uint32_t bound_ms)
 		printf("mpss: %u: the DSP is not asked to stop first: its entry says %#x, not \"up\"\n", step, state);
 		return false;
 	}
-	need(&ipcc);
 	value_at = at + SMP2P_AT_VALUE((uint32_t)entry);
 	printf("mpss: %u: about to ask the DSP to stop: bit 0 of our entry \"%s\" at %#lx, and its SMP2P doorbell\n", step,
 	    OUR_ENTRY_STOP, smem_phys + value_at);
 	snprintf(last_write, sizeof(last_write), "step %u asked the modem to stop", step);
 	smem_poke(value_at, ours.entry[entry].value | DSP_STOP);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_SMP2P);
+	apss_ring(APSS_SMP2P);
 	asked = now = now_us();
 	while (now - asked < bound_ms * 1000ull) {
 		if (dsp_words(&theirs) && (dsp_state(&theirs) & (DSP_STOP_ACK | DSP_FATAL))) {
@@ -1438,43 +1453,32 @@ dsp_ask_to_stop(uint32_t bound_ms)
 	    (now - asked) % 1000, state);
 	smem_poke(value_at, ours.entry[entry].value & ~DSP_STOP);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_SMP2P);
+	apss_ring(APSS_SMP2P);
 	return (state & DSP_STOP_ACK) != 0;
 }
 
 static void link_stop(void);
 
-/* Asked to stop, then shut down by TrustZone, then the always-on processor told that the image is gone. */
+/*
+ * 6T: asked to stop (SMP2P), then halted and put back in reset as Linux's q6v5_stop() does (q6v5_mba_reclaim():
+ * mss_reclaim() below, which also tells the always-on processor "modem: off"); our proxy votes given back.
+ */
+static void mss_reclaim(void);
+
 static bool
 dsp_shutdown(const char *why)
 {
-	uint64_t answer = ~0ull;
-	int32_t result;
-
-	printf("mpss: %u: %s: the modem is asked to stop, then TrustZone to shut it down\n", step, why);
+	printf("mpss: %u: %s: the modem is asked to stop, then halted and put back in reset\n", step, why);
 	if (!leaving) {
 		link_stop();
 	}
 	stopped_by_its_word = dsp_ask_to_stop(leaving ? 2000 : 5000);
-	result = scm("to shut the modem down", SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, pas_mpss, 0, 0, 0, &answer);
-	if (result != 0 || answer != 0) {
-		printf("mpss: %u: TRUSTZONE DOES NOT SHUT THE MODEM DOWN: the call returns %d, its answer is %#llx\n", step, result,
-		    answer);
-		return false;
-	}
+	mss_reclaim();
 	printf("mpss: %u: THE MODEM IS SHUT DOWN\n", step);
-	if (ipa_loaded) {
-		ipa_firmware_stop();
-		ipa_loaded = false;
-	}
 	if (!leaving) {
 		rmtfs_share(false);
 	}
-	need(&ipcc);
-	wr(ipcc.base + IPCC_DISABLE, IPCC_MPSS << 16 | IPCC_SMP2P);
-	doorbells();
 	dsp_started = false;
-	mailbox_send("{class: image, res: load_state, name: modem, val: off}");
 	if (rails_asked) {
 		rails(0);
 		rails_asked = false;
@@ -1484,7 +1488,7 @@ dsp_shutdown(const char *why)
 
 /* ---- step 4: TrustZone takes the header ------------------------------------------------------------ */
 
-static bool
+static bool __attribute__((unused))
 step_header(void)
 {
 	struct smp2p words;
@@ -1591,7 +1595,7 @@ segment_check(volatile uint8_t *dsp_memory, unsigned s)
 	return wrong;
 }
 
-static bool
+static bool __attribute__((unused))
 step_image(void)
 {
 	volatile uint8_t *dsp_memory;
@@ -1749,7 +1753,7 @@ step_our_item(void)
 	 * driver here). Off unless modem_ipa=1 (valid, off) or 3 (on): with the entry the run of 23 October hung.
 	 */
 	{
-		uint32_t ipa = 3;                       /* (the modem's IPA driver waits for this entry to exist: see the IPA's handshake) */
+		uint32_t ipa = 1;                       /* 6T: valid, the IPA's clock off (no IPA driver here; the reference phone's 3 is "on") */
 
 		PE_parse_boot_argn("modem_ipa", &ipa, sizeof(ipa));
 		if (ipa != 0) {
@@ -1768,8 +1772,7 @@ step_our_item(void)
 	smem_poke(our_item + SMP2P_AT_VERSION, SMP2P_RESTART_ACKS << 8 | SMP2P_VERSION);
 	settle();
 	smp2p_agreed = smp2p_restart_acks = smp2p_restart_acked = false;
-	need(&ipcc);
-	wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_SMP2P);
+	apss_ring(APSS_SMP2P);
 	if (!smem_peek(our_item, &ours, sizeof(ours)) || ours.magic != SMP2P_MAGIC || smp2p_entry(&ours, OUR_ENTRY_STOP) < 0) {
 		printf("mpss: %u: OUR ITEM DOES NOT READ BACK AS WRITTEN\n", step);
 		return false;
@@ -2433,7 +2436,7 @@ ipa_firmware_stop(void)
  * is watched for as the audio DSP is (hakios.adsp.c, step 7): its SMP2P item, its doorbells, its
  * "slave-kernel" word, and its last words in item 421 if it gives up.
  */
-static bool
+static bool __attribute__((unused))
 step_start(void)
 {
 	struct smp2p words, last;
@@ -2451,7 +2454,6 @@ step_start(void)
 	have = dsp_words(&last);
 	announce("listen for the modem's doorbells, ask RPMh for its rails, tell the always-on processor that its image is "
 	    "loaded, and ask TrustZone to authenticate the image and let the DSP out of reset");
-	need(&ipcc);
 	for (unsigned i = 0; i < 8 && (rang = rd(ipcc.base + IPCC_RECEIVED)) != IPCC_NOBODY && rang >> 16 == IPCC_MPSS; i++) {
 		put(&ipcc, "heard", IPCC_CLEAR, rang);
 	}
@@ -2750,7 +2752,7 @@ glink_put(const void *first, uint32_t first_length, const void *second, uint32_t
 	settle();
 	smem_poke(glink.descriptor + GLINK_OUR_HEAD, (head + padded) % glink.ours_size);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_GLINK);
+	apss_ring(APSS_GLINK);
 	glink.said++;
 	return true;
 }
@@ -2981,7 +2983,7 @@ glink_pump(void)
 		}
 		case GLINK_READ_NOTIFY:
 			glink_advance(length);
-			wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_GLINK);
+			apss_ring(APSS_GLINK);
 			break;
 		case GLINK_CLOSE:
 			glink_advance(length);
@@ -6199,10 +6201,628 @@ nas_stop(void)
 	cellular_up = cellular_registered = cellular_bars = cellular_dbm = cellular_radio = 0;
 }
 
+/* ---- the SDM845's modem, started by its MBA (the 6T's steps 5 to 7; Wi-Fi W2, 11-11) ------------------- */
+
+/*
+ * Linux's qcom_q6v5_mss.c for "qcom,sdm845-mss-pil" (sdm845_mss), done by hand. TrustZone does not
+ * start this modem: the modem's own boot ROM (PBL) does, given the MBA ("modem boot authenticator",
+ * mba.mbn), which checks the image's header and then each segment as it is put in, told of them
+ * through the RMB registers; the hypervisor hands the memory to the modem (its "MSA" side) and back.
+ *
+ *   q6v5_mba_load():  the always-on processor told "modem: on"; the rails CX, MX and MSS asked for
+ *                     (the "proxy" votes); the clocks prng (proxy), iface and snoc_axi (reset), the
+ *                     reset let go the "alt" way (PDC's modem sync reset held, RMB_MBA_ALT_RESET,
+ *                     AOSS_CC_MSS_RESTART pulsed); the clocks bus, mem, gpll0_mss and mnoc_axi
+ *                     (active); the modem's memory and the MBA's handed to it; RMB_MBA_IMAGE; the
+ *                     boot FSM started (QDSP6SS_SLEEP, BOOT_CORE_START, BOOT_CMD); PBL's status,
+ *                     then the MBA's (XPU unlocked)
+ *   q6v5_mpss_init_image():  the header (modem.mdt, with its hashes) in memory handed to the modem
+ *                     for the time it takes, RMB_PMI_META_DATA, "meta data ready", status 3
+ *   q6v5_mpss_load(): the modem's memory taken back and shared; each segment put in and the MBA
+ *                     told (code start, "load ready", code length); the memory the modem's alone;
+ *                     status 4, "authentication complete": the MBA starts the image
+ *   q6v5_start():     the modem's "ready" on SMP2P; then the MBA's memory taken back, and on its
+ *                     "handover" our proxy votes given back
+ *   q6v5_stop():      "stop" on SMP2P; q6v5_mba_reclaim(): the AXI ports halted (TCSR), the reset
+ *                     pulsed, the clocks off, the MBA's memory taken back; the modem's memory stays
+ *                     the modem's (Linux takes it back only when an MBA runs again)
+ *
+ * Its registers are read only while its iface clock (GCC_MSS_CFG_AHB) runs: without it the bus hangs.
+ */
+#define MBA_PHYS_DEFAULT        0x96600000u     /* 6T: reserved-memory mba_region@0x96600000 (the phone's own tree; mainline 0x96500000) */
+#define MBA_SIZE                0x00200000u
+#define MBA_MAX                 0x00100000u     /* Linux: "MBA is restricted to a maximum size of 1M" */
+#define MDATA_PHYS_DEFAULT      0x95c00000u     /* the last megabyte of video_region@0x95800000 (the video DSP is never started here); within
+                                                   U-Boot r5's carve-out 0x8c400000..0x97c00000, as everything handed to the modem must be */
+#define MDATA_SIZE              0x4000u
+static uint32_t mba_phys = MBA_PHYS_DEFAULT, mdata_phys = MDATA_PHYS_DEFAULT;
+
+static struct block gcc = { "gcc", 0x00100000, 0x1f0000 };
+static struct block qdsp6 = { "qdsp6", 0x04080000, 0x1000 };
+static struct block rmb = { "rmb", 0x04180000, 0x1000 };
+static struct block halt = { "tcsr_regs_1", 0x01f60000, 0x6000 };        /* qcom,halt-regs: q6 +0x3000, modem +0x5000, nc +0x4000 */
+static struct block aoss_cc = { "aoss_cc", 0x0c2b0000, 0x1000 };         /* aoss_reset@c2a0000 + 0x10000: AOSS_CC_MSS_RESTART */
+static struct block pdc_global = { "pdc_global", 0x0b2e0000, 0x1000 };   /* pdc_reset@b2e0000: +0x100, bit 9 PDC_MODEM_SYNC_RESET */
+
+#define GCC_MSS_CFG_AHB         0x8a000         /* "iface" */
+#define GCC_MSS_MFAB_AXIS       0x8a004         /* "mnoc_axi" */
+#define GCC_MSS_SNOC_AXI        0x8a150         /* "snoc_axi" */
+#define GCC_MSS_Q6_MEMNOC_AXI   0x8a154         /* "bus" */
+#define GCC_APCS_VOTE           0x52004         /* this processor's votes for the shared branches */
+#define VOTE_BOOT_ROM           (1u << 10)      /* "mem" */
+#define VOTE_PRNG               (1u << 13)      /* "prng" */
+#define VOTE_MSS_GPLL0_DIV      (1u << 17)      /* "gpll0_mss" */
+#define CBCR_ENABLE             (1u << 0)
+#define CBCR_OFF                (1u << 31)
+#define PDC_SYNC_RESET          0x100
+#define PDC_MODEM_SYNC          (1u << 9)
+
+#define RMB_MBA_IMAGE           0x00
+#define RMB_PBL_STATUS          0x04
+#define RMB_MBA_COMMAND         0x08
+#define RMB_MBA_STATUS          0x0c
+#define RMB_PMI_META_DATA       0x10
+#define RMB_PMI_CODE_START      0x14
+#define RMB_PMI_CODE_LENGTH     0x18
+#define RMB_MBA_MSS_STATUS      0x40
+#define RMB_MBA_ALT_RESET       0x44
+#define RMB_CMD_META_DATA_READY 1
+#define RMB_CMD_LOAD_READY      2
+#define MBA_XPU_UNLOCKED        1
+#define MBA_XPU_UNLOCKED_SCRIBBLED 2
+#define MBA_META_DATA_AUTH_SUCCESS 3
+#define MBA_AUTH_COMPLETE       4
+#define QDSP6SS_SLEEP           0x3c
+#define QDSP6SS_BOOT_CORE_START 0x400
+#define QDSP6SS_BOOT_CMD        0x404
+#define AXI_HALTREQ             0x0
+#define AXI_HALTACK             0x4
+#define AXI_IDLE                0x8
+
+#define VM_PERM_RWX             7
+#define OWNER_HLOS              1u
+#define OWNER_MSA               2u
+
+static uint32_t mpss_owners = OWNER_HLOS, mba_owners = OWNER_HLOS;
+static uint32_t votes_set;                      /* the votes of GCC_APCS_VOTE that we set (the others were set before us) */
+static uint32_t branches_set;                   /* bits 0..3: iface, snoc_axi, bus, mnoc_axi turned on by us */
+static bool mss_iface_on;                       /* its registers may be read */
+static bool mss_touched;                        /* clocks or reset have been changed: mss_reclaim() puts them back */
+static bool mss_load_state_on;
+static bool mss_active;                         /* reset let go and active clocks on: the QDSP6's own registers may be read */
+
+/* Linux's q6v5_xfer_mem_ownership(): memory handed by the hypervisor between us (HLOS, rwx) and the modem (MSA, rw). */
+static bool
+mem_assign(const char *what, uint64_t pa, uint32_t size, uint32_t *owners, uint32_t want)
+{
+	struct {
+		uint64_t address, size;
+		uint64_t pad0[6];
+		uint32_t sources[2];
+		uint32_t pad1[14];
+		struct {
+			uint32_t vmid, permission;
+			uint64_t context;
+			uint32_t context_size, unused;
+		} destinations[2];
+		uint8_t pad2[64];
+		uint64_t more[7];                       /* +240 */
+	} *page;
+	vm_offset_t memory = 0;
+	uint64_t answer = ~0ull, page_pa;
+	unsigned sources = 0, destinations = 0;
+	int32_t result;
+
+	_Static_assert(__builtin_offsetof(__typeof__(*page), sources) == 64, "sources");
+	_Static_assert(__builtin_offsetof(__typeof__(*page), destinations) == 128, "destinations");
+	_Static_assert(__builtin_offsetof(__typeof__(*page), more) == 240, "more");
+	if (*owners == want) {
+		return true;
+	}
+	if (kmem_alloc(kernel_map, &memory, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		return false;
+	}
+	page = (void *)memory;
+	page->address = pa;
+	page->size = (size + 0xfffu) & ~0xfffu;
+	if (*owners & OWNER_HLOS) {
+		page->sources[sources++] = VMID_HLOS;
+	}
+	if (*owners & OWNER_MSA) {
+		page->sources[sources++] = VMID_MSS_MSA;
+	}
+	if (want & OWNER_HLOS) {
+		page->destinations[destinations].vmid = VMID_HLOS;
+		page->destinations[destinations++].permission = VM_PERM_RWX;
+	}
+	if (want & OWNER_MSA) {
+		page->destinations[destinations].vmid = VMID_MSS_MSA;
+		page->destinations[destinations++].permission = VM_PERM_RW;
+	}
+	page_pa = kvtophys(memory);
+	page->more[0] = sources * 4;
+	page->more[1] = page_pa + 128;
+	page->more[2] = destinations * sizeof(page->destinations[0]);
+	page->more[3] = 0;
+	for (vm_offset_t line = memory; line < memory + PAGE_SIZE; line += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (line));
+	}
+	settle();
+	printf("mpss: %u: %s: %#llx, %#x bytes, from %s%s%s to %s%s%s\n", step, what, pa, size, *owners & OWNER_HLOS ? "us" : "",
+	    *owners == (OWNER_HLOS | OWNER_MSA) ? " and " : "", *owners & OWNER_MSA ? "the modem" : "", want & OWNER_HLOS ? "us" : "",
+	    want == (OWNER_HLOS | OWNER_MSA) ? " and " : "", want & OWNER_MSA ? "the modem" : "");
+	result = scm(what, SCM_MP_ASSIGN, SCM_ASSIGN_ARGUMENTS, page_pa, 16, page_pa + 64, page_pa + 240, &answer);
+	kmem_free(kernel_map, memory, PAGE_SIZE);
+	if (result != 0 || answer != 0) {
+		printf("mpss: %u: THE HYPERVISOR DOES NOT HAND IT OVER: the call returns %d, its answer is %#llx\n", step, result, answer);
+		return false;
+	}
+	*owners = want;
+	return true;
+}
+
+/* A branch clock of the GCC on (or back off, if we turned it on), and whether it says it runs. */
+static void
+branch(uint32_t cbcr, const char *name, unsigned bit, bool on, bool wait)
+{
+	uint32_t value;
+
+	need(&gcc);
+	value = rd(gcc.base + cbcr);
+	if (on && !(value & CBCR_ENABLE)) {
+		put(&gcc, name, cbcr, value | CBCR_ENABLE);
+		branches_set |= 1u << bit;
+	} else if (!on && (branches_set & (1u << bit))) {
+		put(&gcc, name, cbcr, value & ~CBCR_ENABLE);
+		branches_set &= ~(1u << bit);
+	}
+	for (unsigned i = 0; on && wait && i < 500 && (rd(gcc.base + cbcr) & CBCR_OFF); i++) {
+		sleep_us(2);
+	}
+	printf("mpss: %u: the clock %s (%#x): %#x, %s\n", step, name, gcc.phys + cbcr, rd(gcc.base + cbcr),
+	    (rd(gcc.base + cbcr) & CBCR_OFF) ? "off" : "RUNS");
+}
+
+static void
+vote(uint32_t bits, bool on)
+{
+	uint32_t value;
+
+	need(&gcc);
+	value = rd(gcc.base + GCC_APCS_VOTE);
+	if (on && (value & bits) != bits) {
+		votes_set |= bits & ~value;
+		put(&gcc, "our votes", GCC_APCS_VOTE, value | bits);
+	} else if (!on && (votes_set & bits)) {
+		put(&gcc, "our votes", GCC_APCS_VOTE, value & ~(votes_set & bits));
+		votes_set &= ~bits;
+	}
+	sleep_us(10);
+}
+
+/* Linux's q6v5_reset_deassert() (alt = true) and q6v5_reset_assert() (false), for has_alt_reset. */
+static void
+mss_reset(bool alt)
+{
+	need(&pdc_global);
+	need(&aoss_cc);
+	put(&pdc_global, "modem sync reset held", PDC_SYNC_RESET, rd(pdc_global.base + PDC_SYNC_RESET) | PDC_MODEM_SYNC);
+	if (alt && mss_iface_on) {
+		put(&rmb, "alt reset", RMB_MBA_ALT_RESET, 1);
+	}
+	put(&aoss_cc, "MSS restart", 0, 1);
+	sleep_us(250);
+	put(&aoss_cc, "MSS restart", 0, 0);
+	sleep_us(250);
+	if (alt && mss_iface_on) {
+		put(&rmb, "alt reset", RMB_MBA_ALT_RESET, 0);
+	}
+	put(&pdc_global, "modem sync reset let go", PDC_SYNC_RESET, rd(pdc_global.base + PDC_SYNC_RESET) & ~PDC_MODEM_SYNC);
+}
+
+static void
+halt_port(uint32_t offset, const char *name)
+{
+	uint32_t ack = 0;
+
+	need(&halt);
+	if (rd(halt.base + offset + AXI_IDLE) != 0) {
+		printf("mpss: %u: the modem's AXI port %s is idle already\n", step, name);
+		return;
+	}
+	put(&halt, name, offset + AXI_HALTREQ, 1);
+	for (unsigned i = 0; i < 100 && !(ack = rd(halt.base + offset + AXI_HALTACK)); i++) {
+		sleep_ms(1);
+	}
+	printf("mpss: %u: the AXI port %s: halt %s, idle %#x\n", step, name, ack ? "acknowledged" : "NOT ACKNOWLEDGED",
+	    rd(halt.base + offset + AXI_IDLE));
+	put(&halt, name, offset + AXI_HALTREQ, 0);
+}
+
+/* Linux's q6v5_mba_reclaim(), and what q6v5_mba_load() undoes on its way out. */
+static void
+mss_reclaim(void)
+{
+	if (!mss_touched) {
+		return;
+	}
+	printf("mpss: %u: the modem halted and put back in reset (Linux's q6v5_mba_reclaim)\n", step);
+	halt_port(0x3000, "q6");
+	halt_port(0x5000, "modem");
+	halt_port(0x4000, "nc");
+	mss_reset(false);
+	branch(GCC_MSS_Q6_MEMNOC_AXI, "bus", 2, false, false);
+	branch(GCC_MSS_MFAB_AXIS, "mnoc_axi", 3, false, false);
+	vote(VOTE_BOOT_ROM | VOTE_MSS_GPLL0_DIV | VOTE_PRNG, false);
+	mss_iface_on = false;
+	mss_active = false;
+	branch(GCC_MSS_SNOC_AXI, "snoc_axi", 1, false, false);
+	branch(GCC_MSS_CFG_AHB, "iface", 0, false, false);
+	if (!mem_assign("the MBA's memory taken back", mba_phys, MBA_SIZE, &mba_owners, OWNER_HLOS)) {
+		printf("mpss: %u: THE MBA'S MEMORY STAYS THE MODEM'S\n", step);
+	}
+	mss_touched = false;
+	if (mss_load_state_on) {
+		mailbox_send("{class: image, res: load_state, name: modem, val: off}");
+		mss_load_state_on = false;
+	}
+}
+
+static int32_t
+rmb_wait(uint32_t offset, int32_t want, uint32_t ms, uint64_t *took)
+{
+	uint64_t began = now_us();
+	int32_t value = 0;
+
+	for (;;) {
+		value = (int32_t)rd(rmb.base + offset);
+		if (value < 0 || (want == 0 && value != 0) || (want != 0 && value == want) || now_us() - began > ms * 1000ull) {
+			break;
+		}
+		sleep_us(200);
+	}
+	*took = now_us() - began;
+	return value;
+}
+
+static void
+rmb_show(const char *when)
+{
+	if (!mss_iface_on) {
+		return;
+	}
+	if (!mss_active) {
+		printf("mpss: %u: %s: RMB image %#x, PBL %#x, MBA status %#x, MSS status %#x, alt reset %#x\n", step, when,
+		    rd(rmb.base + RMB_MBA_IMAGE), rd(rmb.base + RMB_PBL_STATUS), rd(rmb.base + RMB_MBA_STATUS),
+		    rd(rmb.base + RMB_MBA_MSS_STATUS), rd(rmb.base + RMB_MBA_ALT_RESET));
+		return;
+	}
+	printf("mpss: %u: %s: RMB image %#x, PBL %#x, MBA command %#x status %#x, meta data %#x, code start %#x length %#x, MSS "
+	    "status %#x, alt reset %#x; QDSP6SS sleep %#x\n", step, when, rd(rmb.base + RMB_MBA_IMAGE), rd(rmb.base + RMB_PBL_STATUS),
+	    rd(rmb.base + RMB_MBA_COMMAND), rd(rmb.base + RMB_MBA_STATUS), rd(rmb.base + RMB_PMI_META_DATA),
+	    rd(rmb.base + RMB_PMI_CODE_START), rd(rmb.base + RMB_PMI_CODE_LENGTH), rd(rmb.base + RMB_MBA_MSS_STATUS),
+	    rd(rmb.base + RMB_MBA_ALT_RESET), rd(qdsp6.base + QDSP6SS_SLEEP));
+}
+
+/* mba.mbn into the MBA's memory, whole, as Linux's q6v5_load() copies it. */
+static bool
+mba_put(void)
+{
+	const uint8_t *mba;
+	volatile uint8_t *window;
+	uint64_t size = 0, wrong = 0;
+	bool ours = false;
+
+	mba = hakios_image_file("fw", "mba.mbn", &size, NULL);
+	if (mba == NULL) {
+		mba = root_file("mba.mbn", &size);
+		ours = mba != NULL;
+	}
+	if (mba == NULL || size < 64 || size > MBA_MAX || memcmp(mba, "\177ELF", 4) != 0) {
+		printf("mpss: %u: no fw/mba.mbn that is an MBA (%llu bytes): fw-modem/mba.mbn, MODEM=1 userland/build.sh\n", step, size);
+		if (ours) {
+			uint8_t *gone = __DECONST(uint8_t *, mba);
+
+			kfree_data(gone, size);
+		}
+		return false;
+	}
+	window = (volatile uint8_t *)ml_io_map_unmappable(mba_phys, MBA_SIZE, VM_WIMG_WCOMB);
+	snprintf(last_write, sizeof(last_write), "step %u wrote the MBA at %#x", step, mba_phys);
+	for (uint64_t i = 0; i < size; i++) {
+		window[i] = mba[i];
+	}
+	settle();
+	for (uint64_t i = 0; i < size; i++) {
+		wrong += window[i] != mba[i];
+	}
+	printf("mpss: %u: the MBA (%llu bytes, %02x %02x %02x %02x) written at %#x; read back, %llu bytes differ\n", step, size,
+	    mba[0], mba[1], mba[2], mba[3], mba_phys, wrong);
+	ml_io_unmap((vm_offset_t)window, MBA_SIZE);
+	if (ours) {
+		uint8_t *gone = __DECONST(uint8_t *, mba);
+
+		kfree_data(gone, size);
+	}
+	return wrong == 0;
+}
+
+static bool
+step_mba(void)
+{
+	uint64_t took = 0;
+	int32_t status;
+	uint32_t mdata_owners = OWNER_HLOS, value = 0;
+	bool ok = false;
+
+	if (image.segments == 0) {
+		return false;
+	}
+	PE_parse_boot_argn("modem_mba", &mba_phys, sizeof(mba_phys));
+	PE_parse_boot_argn("modem_mdata", &mdata_phys, sizeof(mdata_phys));
+	announce("the MBA: mba.mbn into its memory; the always-on processor told \"modem: on\", RPMh asked for CX, MX and MSS; the "
+	    "modem's clocks on and its reset let go; its memory and the MBA's handed to it; its boot ROM started, and the MBA "
+	    "waited for; then the image's header handed to the MBA to check");
+	if (!mba_put()) {
+		return false;
+	}
+	lck_mtx_lock(&dsp_lock);
+	if (!mailbox_send("{class: image, res: load_state, name: modem, val: on}")) {
+		goto out;
+	}
+	mss_load_state_on = true;
+	if (!rails(384)) {
+		goto out;
+	}
+	rails_asked = true;
+	mss_touched = true;
+	announce("(5a) the rails are asked for; next the prng vote and the iface and snoc_axi clocks");
+	/* proxy and reset clocks (xo is the always-on oscillator, held by this processor while it runs) */
+	vote(VOTE_PRNG, true);
+	branch(GCC_MSS_CFG_AHB, "iface", 0, true, true);
+	if (rd(gcc.base + GCC_MSS_CFG_AHB) & CBCR_OFF) {
+		printf("mpss: %u: THE MODEM'S IFACE CLOCK DOES NOT RUN: its registers are not touched\n", step);
+		goto out;
+	}
+	mss_iface_on = true;
+	need(&rmb);
+	need(&qdsp6);
+	branch(GCC_MSS_SNOC_AXI, "snoc_axi", 1, true, true);
+	rmb_show("before its reset is let go");
+	announce("(5b) its reset clocks run; next its reset let go (PDC sync reset, RMB alt reset, AOSS MSS restart)");
+	mss_reset(true);
+	announce("(5c) its reset is let go; next the bus, mem, gpll0_mss and mnoc_axi clocks");
+	/* active clocks */
+	branch(GCC_MSS_Q6_MEMNOC_AXI, "bus", 2, true, false);
+	vote(VOTE_BOOT_ROM | VOTE_MSS_GPLL0_DIV, true);
+	branch(GCC_MSS_MFAB_AXIS, "mnoc_axi", 3, true, false);
+	mss_active = true;
+	rmb_show("its reset let go, its clocks on");
+	announce("(5d) its clocks run; next its memory and the MBA's handed to it by the hypervisor");
+	if (!mem_assign("the modem's memory handed to it (the MBA may clear it)", mpss_memory, MPSS_MEMORY_SIZE, &mpss_owners,
+	    OWNER_MSA) || !mem_assign("the MBA's memory handed to the modem", mba_phys, MBA_SIZE, &mba_owners, OWNER_MSA)) {
+		goto out;
+	}
+	announce("(5e) the memory is the modem's; next RMB_MBA_IMAGE and its boot ROM started");
+	put(&rmb, "MBA image", RMB_MBA_IMAGE, mba_phys);
+	/* q6v5proc_reset(), MSS_SDM845 */
+	put(&qdsp6, "sleep clock", QDSP6SS_SLEEP, rd(qdsp6.base + QDSP6SS_SLEEP) | CBCR_ENABLE);
+	for (unsigned i = 0; i < 200 && ((value = rd(qdsp6.base + QDSP6SS_SLEEP)) & CBCR_OFF); i++) {
+		sleep_us(1);
+	}
+	if (value & CBCR_OFF) {
+		printf("mpss: %u: THE QDSP6'S SLEEP CLOCK DOES NOT RUN (%#x)\n", step, value);
+		goto out;
+	}
+	put(&qdsp6, "boot core start", QDSP6SS_BOOT_CORE_START, 1);
+	put(&qdsp6, "boot command", QDSP6SS_BOOT_CMD, 1);
+	dsp_started = true;                     /* (from here on, stopping it is dsp_shutdown()) */
+	stopped_by_its_word = false;
+	status = rmb_wait(RMB_MBA_MSS_STATUS, 1, 10, &took);
+	printf("mpss: %u: the boot FSM %s after %llu us (MSS status %#x)\n", step, (status & 1) ? "HAS COMPLETED" : "HAS NOT COMPLETED",
+	    took, status);
+	if (!(status & 1)) {
+		goto out;
+	}
+	status = rmb_wait(RMB_PBL_STATUS, 0, 1000, &took);
+	printf("mpss: %u: the boot ROM (PBL) says %d after %llu ms%s\n", step, status, took / 1000, status == 1 ? ": SUCCESS" : "");
+	if (status != 1) {
+		goto out;
+	}
+	status = rmb_wait(RMB_MBA_STATUS, 0, 5000, &took);
+	printf("mpss: %u: THE MBA says %d after %llu ms%s\n", step, status, took / 1000, status == MBA_XPU_UNLOCKED ||
+	    status == MBA_XPU_UNLOCKED_SCRIBBLED ? ": IT RUNS (XPU unlocked)" : ": not what it should say");
+	if (status != MBA_XPU_UNLOCKED && status != MBA_XPU_UNLOCKED_SCRIBBLED) {
+		goto out;
+	}
+	/* q6v5_mpss_load()'s start, and q6v5_mpss_init_image() */
+	put(&rmb, "code length", RMB_PMI_CODE_LENGTH, 0);
+	if (image.header_size > MDATA_SIZE) {
+		printf("mpss: %u: the header (%llu bytes) does not fit its %#x bytes\n", step, image.header_size, MDATA_SIZE);
+		goto out;
+	}
+	{
+		volatile uint8_t *window = (volatile uint8_t *)ml_io_map_unmappable(mdata_phys, MDATA_SIZE, VM_WIMG_WCOMB);
+
+		for (uint64_t i = 0; i < image.header_size; i++) {
+			window[i] = image.header[i];
+		}
+		settle();
+		ml_io_unmap((vm_offset_t)window, MDATA_SIZE);
+	}
+	if (!mem_assign("the header handed to the modem", mdata_phys, (uint32_t)image.header_size, &mdata_owners, OWNER_MSA)) {
+		goto out;
+	}
+	put(&rmb, "meta data", RMB_PMI_META_DATA, mdata_phys);
+	put(&rmb, "MBA command", RMB_MBA_COMMAND, RMB_CMD_META_DATA_READY);
+	status = rmb_wait(RMB_MBA_STATUS, MBA_META_DATA_AUTH_SUCCESS, 1000, &took);
+	printf("mpss: %u: %s: the MBA says %d after %llu ms\n", step, status == MBA_META_DATA_AUTH_SUCCESS ?
+	    "THE MBA HAS AUTHENTICATED THE HEADER" : "THE HEADER IS NOT AUTHENTICATED", status, took / 1000);
+	if (!mem_assign("the header taken back", mdata_phys, (uint32_t)image.header_size, &mdata_owners, OWNER_HLOS)) {
+		printf("mpss: %u: the header's memory stays the modem's\n", step);
+	}
+	ok = status == MBA_META_DATA_AUTH_SUCCESS;
+out:
+	rmb_show(ok ? "the header taken" : "given up");
+	if (!ok) {
+		if (dsp_started) {
+			dsp_shutdown("the MBA did not go as it should");
+		} else {
+			mss_reclaim();
+			if (rails_asked) {
+				rails(0);
+				rails_asked = false;
+			}
+		}
+	}
+	lck_mtx_unlock(&dsp_lock);
+	return ok;
+}
+
+static bool
+step_image845(void)
+{
+	volatile uint8_t *dsp_memory = NULL;
+	uint64_t took = 0, began;
+	uint32_t size = 0;
+	int32_t status = 0;
+	bool ok = false;
+
+	if (!dsp_started || image.segments == 0) {
+		return false;
+	}
+	announce("the image: the modem's memory taken back and shared while its segments go in, the MBA told of each (code "
+	    "start, \"load ready\", code length); then the memory the modem's alone, and the MBA's word that the image is "
+	    "authenticated waited for");
+	lck_mtx_lock(&dsp_lock);
+	if (!mem_assign("the modem's memory taken back", mpss_memory, MPSS_MEMORY_SIZE, &mpss_owners, OWNER_HLOS) ||
+	    !mem_assign("the modem's memory shared for the loading", mpss_memory, MPSS_MEMORY_SIZE, &mpss_owners,
+	    OWNER_HLOS | OWNER_MSA)) {
+		goto out;
+	}
+	dsp_memory = (volatile uint8_t *)ml_io_map_unmappable(mpss_memory, image.size, VM_WIMG_WCOMB);
+	if (dsp_memory == NULL) {
+		printf("mpss: %u: the modem's memory cannot be mapped (%#x bytes)\n", step, image.size);
+		goto out;
+	}
+	snprintf(last_write, sizeof(last_write), "step %u wrote the image at %#x", step, mpss_memory);
+	began = now_us();
+	for (unsigned s = 0; s < image.segments; s++) {
+		segment_put(dsp_memory, s);
+		settle();
+		size += image.segment[s].memory_size;
+		if (rd(rmb.base + RMB_PMI_CODE_LENGTH) == 0) {
+			put(&rmb, "code start", RMB_PMI_CODE_START, mpss_memory);
+			put(&rmb, "MBA command", RMB_MBA_COMMAND, RMB_CMD_LOAD_READY);
+		}
+		wr(rmb.base + RMB_PMI_CODE_LENGTH, size);
+		status = (int32_t)rd(rmb.base + RMB_MBA_STATUS);
+		if (status < 0) {
+			printf("mpss: %u: SEGMENT %u: THE MBA SAYS %d\n", step, s, status);
+			break;
+		}
+	}
+	ml_io_unmap((vm_offset_t)dsp_memory, image.size);
+	printf("mpss: %u: %u segments, %#x bytes, in %llu ms; the MBA says %d\n", step, image.segments, size, (now_us() - began) / 1000,
+	    status);
+	image_forget();
+	if (status < 0 || !mem_assign("the modem's memory handed to it", mpss_memory, MPSS_MEMORY_SIZE, &mpss_owners, OWNER_MSA)) {
+		goto out;
+	}
+	status = rmb_wait(RMB_MBA_STATUS, MBA_AUTH_COMPLETE, 10000, &took);
+	printf("mpss: %u: %s: the MBA says %d after %llu ms\n", step, status == MBA_AUTH_COMPLETE ?
+	    "THE MBA HAS AUTHENTICATED THE IMAGE: THE MODEM STARTS" : "THE IMAGE IS NOT AUTHENTICATED", status, took / 1000);
+	ok = status == MBA_AUTH_COMPLETE;
+out:
+	rmb_show(ok ? "the image taken" : "given up");
+	if (!ok) {
+		dsp_shutdown("the image did not go in as it should");
+	}
+	lck_mtx_unlock(&dsp_lock);
+	return ok;
+}
+
+/* q6v5_start()'s end: the modem's "ready" (and "handover") on SMP2P; its fatal bit and last words if it gives up. */
+static bool
+step_start845(void)
+{
+	struct smp2p words, last;
+	uint64_t started, now, ready_at = 0, limit;
+	uint32_t state = 0, changes = 0, wait_seconds = 10;
+	bool have, handed_over = false;
+
+	if (!dsp_started) {
+		return false;
+	}
+	PE_parse_boot_argn("modem_wait", &wait_seconds, sizeof(wait_seconds));
+	announce("watch the modem's SMP2P item for \"ready\" and \"handover\" (its fatal bit and last words, if it gives up)");
+	bzero(&last, sizeof(last));
+	have = dsp_words(&last);
+	started = now_us();
+	limit = started + wait_seconds * 1000000ull;
+	for (;;) {
+		now = now_us();
+		if (now >= limit || !dsp_started) {
+			break;
+		}
+		if (dsp_words(&words) && (!have || memcmp(&words, &last, sizeof(words)) != 0)) {
+			char when[64];
+
+			snprintf(when, sizeof(when), "+%llu.%03llu ms: the modem's item %s", (now - started) / 1000, (now - started) % 1000,
+			    have ? "changes" : "APPEARS");
+			if (changes++ < 40) {
+				show_words(when, &words);
+			}
+			last = words;
+			have = true;
+			dsp_listen(&words);
+			state = dsp_state(&words);
+			if ((state & DSP_READY) && ready_at == 0) {
+				ready_at = now;
+				limit = now + 3000000ull;
+				tell("mpss: %u: THE MODEM SAYS IT IS UP: \"slave-kernel\" says %#x, %llu.%03llu ms after the watch began\n", step,
+				    state, (now - started) / 1000, (now - started) % 1000);
+				lck_mtx_lock(&dsp_lock);
+				(void)mem_assign("the MBA's memory taken back (it has done its work)", mba_phys, MBA_SIZE, &mba_owners, OWNER_HLOS);
+				lck_mtx_unlock(&dsp_lock);
+			}
+			if ((state & DSP_HANDOVER) && !handed_over) {
+				handed_over = true;
+				printf("mpss: %u: the modem says it holds its own power now (handover): our proxy votes given back\n", step);
+				lck_mtx_lock(&dsp_lock);
+				if (rails_asked) {
+					rails(0);
+					rails_asked = false;
+				}
+				vote(VOTE_PRNG, false);
+				lck_mtx_unlock(&dsp_lock);
+			}
+			if (state & DSP_FATAL) {
+				printf("mpss: %u: THE MODEM SAYS IT HAS GIVEN UP\n", step);
+				show_crash_reason();
+				break;
+			}
+		}
+		sleep_us(200);
+	}
+	printf("mpss: %u: the watch is over after %llu ms\n", step, (now_us() - started) / 1000);
+	show_partition();
+	if (our_item != 0 && smem_peek(our_item, &words, sizeof(words))) {
+		show_words("our item (428) now", &words);
+	}
+	rmb_show("after the watch");
+	return ready_at != 0 && !(state & DSP_FATAL);
+}
+
 /* ---- the steps, and their end ----------------------------------------------------------------------- */
 
+/*
+ * The 6T's order: our SMP2P item before the modem runs (here it starts when the MBA has checked the image, not when
+ * TrustZone is asked), then the MBA (5), the image (6), the watch (7). The reference phone's 4, 5 and 7 (TrustZone's
+ * PAS) are left in the file, unused.
+ */
 static bool (*const steps[STEPS])(void) = {
-	step_survey, step_firmware, step_mailbox, step_header, step_image, step_our_item, step_start, step_queues, step_link,
+	step_survey, step_firmware, step_mailbox, step_our_item, step_mba, step_image845, step_start845, step_queues, step_link,
 	step_qrtr, step_nas,
 };
 

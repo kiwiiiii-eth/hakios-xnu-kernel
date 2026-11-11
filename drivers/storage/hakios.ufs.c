@@ -1147,6 +1147,16 @@ static const struct {
 	{ "bluetooth", 503808 }, { "abl", 208896 }, { "aop", 208896 }, { "xbl", 3706880 },
 	{ "tz", 3710976 }, { "hyp", 3653632 }, { "dsp", 67108864 }, { "modem", 214265856 },
 };
+/*
+ * The OnePlus 6T's (a kernel whose hakios_kver names sdm845): whole partitions, the sizes of the 11-07 backup of the
+ * phone's own partitions (~/Backups/oneplus6t-20261107), which tools on the computer hash the same way.
+ */
+static const struct {
+	const char *name;
+	uint64_t bytes;
+} ufs_references_6t[] = {
+	{ "abl", 8388608 }, { "aop", 524288 }, { "hyp", 524288 }, { "tz", 2097152 }, { "xbl", 3670016 }, { "devcfg", 131072 },
+};
 
 static bool
 ufs_is_reference(const char *name, const char *ref)
@@ -1171,15 +1181,21 @@ ufs_check(void *arg, __unused wait_result_t wr)
 	if (arg == NULL) {
 		IOSleep(40000);
 	}
-	printf("ufs: check: %u partitions of the phone's storage, read through %s\n", ufs_parts,
-	    ufs_native_on ? "this kernel's own UFS driver" : "the loader's page");
+	char kver[96] = { 0 };
+	bool six_t = PE_parse_boot_argn("hakios_kver", kver, sizeof(kver)) && strnstr(kver, "-sdm845-", sizeof(kver)) != NULL;
+	unsigned references = six_t ? sizeof(ufs_references_6t) / sizeof(ufs_references_6t[0]) :
+	    sizeof(ufs_references) / sizeof(ufs_references[0]);
+
+	printf("ufs: check: %u partitions of the phone's storage, read through %s; %s's references\n", ufs_parts,
+	    ufs_native_on ? "this kernel's own UFS driver" : "the loader's page", six_t ? "the 6T" : "redwood");
 	for (uint32_t part = 0; chunk != NULL && part < ufs_parts; part++) {
-		for (unsigned r = 0; r < sizeof(ufs_references) / sizeof(ufs_references[0]); r++) {
+		for (unsigned r = 0; r < references; r++) {
 			uint64_t h = 0xcbf29ce484222325ULL, done = 0, started = mach_absolute_time(), ns;
-			uint64_t bytes = ufs_references[r].bytes;
+			uint64_t bytes = six_t ? ufs_references_6t[r].bytes : ufs_references[r].bytes;
+			const char *ref = six_t ? ufs_references_6t[r].name : ufs_references[r].name;
 			int error = 0;
 
-			if (!ufs_is_reference((const char *)ufs_page->part[part].name, ufs_references[r].name)) {
+			if (!ufs_is_reference((const char *)ufs_page->part[part].name, ref)) {
 				continue;
 			}
 			while (done < bytes && error == 0) {

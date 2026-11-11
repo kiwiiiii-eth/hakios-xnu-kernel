@@ -383,6 +383,143 @@ struct cmd_db_bcm {                             /* a BCM's auxiliary data (Linux
 };
 
 /* (the same condition as the cores' clocks: the addresses are this phone's) */
+/*
+ * Boot-arg cpufreq=2 (the OnePlus 6T, 11-11): not the top row for good, but what the cores' load asks for. Every 40 ms,
+ * for each group, the busiest of its cores (ml_cpu_idle_time, as cpuload= measures it): over 85% busy, the top row at
+ * once; below, the lowest row that would bring it to 70% at that speed, but a step down only after three looks in a
+ * row that want less (up at once, down slowly). The OSM changes clock and voltage itself when told the row. A core
+ * held at the top row when idle was the phone's hottest part (73 C with the GPU drawing).
+ */
+#define GOV_EVERY_MS            40
+#define GOV_UP_BUSY             85
+#define GOV_TARGET_BUSY         70
+#define GOV_DOWN_LOOKS          3
+
+static struct {
+	vm_offset_t base;
+	uint32_t rows, row[EPSS_TABLE_ROWS], khz[EPSS_TABLE_ROWS];      /* the non-turbo rows, slowest first */
+	uint32_t at, down_looks;                                        /* index into row[]/khz[] */
+	uint64_t time_at[EPSS_TABLE_ROWS];                              /* how long at each, for the log */
+} gov[EPSS_DOMAINS];
+
+static bool
+gov_table(uint32_t domain)
+{
+	vm_offset_t base = ml_io_map(cpufreq_phys + domain * cpufreq_step, 0x1000);
+	uint32_t last_khz = 0;
+
+	if (!cpufreq_osm || !(*(volatile uint32_t *)(base + OSM_ENABLE) & 1)) {
+		return false;
+	}
+	gov[domain].base = base;
+	gov[domain].rows = 0;
+	for (uint32_t row = 0; row < EPSS_TABLE_ROWS; row++) {
+		uint32_t entry = *(volatile uint32_t *)(base + OSM_FREQ_TABLE + OSM_ROW_SIZE * row);
+		uint32_t khz = (entry >> 30) ? XO_KHZ * (entry & 0xff) : ALTERNATE_KHZ;
+
+		if (((entry >> 16) & 7) == OSM_TURBO) {
+			continue;
+		}
+		if (row > 0 && khz <= last_khz) {
+			break;          /* the table ends by repeating its last row */
+		}
+		gov[domain].row[gov[domain].rows] = row;
+		gov[domain].khz[gov[domain].rows++] = khz;
+		last_khz = khz;
+	}
+	return gov[domain].rows > 0;
+}
+
+static void
+gov_set(uint32_t domain, uint32_t at)
+{
+	gov[domain].at = at;
+	*(volatile uint32_t *)(gov[domain].base + OSM_PERF_STATE) = gov[domain].row[at];
+}
+
+static void
+gov_thread(void *arg __unused, wait_result_t wr __unused)
+{
+	const ml_topology_info_t *topology = ml_get_topology_info();
+	uint64_t idle_before[MAX_CPUS] = { 0 }, then = mach_absolute_time(), last_log = then, log_every;
+	uint32_t busiest[EPSS_DOMAINS], looks = 0, busy_sum[EPSS_DOMAINS] = { 0 };
+
+	nanoseconds_to_absolutetime(10ull * NSEC_PER_SEC, &log_every);
+	for (unsigned int i = 0; i < topology->num_cpus && i < MAX_CPUS; i++) {
+		(void)ml_cpu_idle_time((int)i, &idle_before[i]);
+	}
+	for (;;) {
+		uint64_t now;
+
+		delay_for_interval(GOV_EVERY_MS, NSEC_PER_MSEC);
+		now = mach_absolute_time();
+		for (uint32_t d = 0; d < EPSS_DOMAINS; d++) {
+			busiest[d] = 0;
+		}
+		for (unsigned int i = 0; i < topology->num_cpus && i < MAX_CPUS; i++) {
+			uint64_t idle = 0, busy;
+			uint32_t d = domain_of(topology->cpus[i].phys_id), percent;
+
+			if (!ml_cpu_idle_time((int)i, &idle)) {
+				continue;
+			}
+			busy = (now - then) > (idle - idle_before[i]) ? (now - then) - (idle - idle_before[i]) : 0;
+			idle_before[i] = idle;
+			percent = (uint32_t)(100 * busy / (now - then));
+			if (d < EPSS_DOMAINS && percent > busiest[d]) {
+				busiest[d] = percent;
+			}
+		}
+		for (uint32_t d = 0; d < cpufreq_groups; d++) {
+			uint32_t want = 0, need;
+
+			if (gov[d].rows == 0) {
+				continue;
+			}
+			gov[d].time_at[gov[d].at] += now - then;
+			busy_sum[d] += busiest[d];
+			if (busiest[d] >= GOV_UP_BUSY) {
+				want = gov[d].rows - 1;
+			} else {
+				need = (uint32_t)((uint64_t)gov[d].khz[gov[d].at] * busiest[d] / GOV_TARGET_BUSY);
+				while (want + 1 < gov[d].rows && gov[d].khz[want] < need) {
+					want++;
+				}
+			}
+			if (want > gov[d].at) {
+				gov[d].down_looks = 0;
+				gov_set(d, want);
+			} else if (want < gov[d].at && ++gov[d].down_looks >= GOV_DOWN_LOOKS) {
+				gov[d].down_looks = 0;
+				gov_set(d, gov[d].at - 1);
+			} else if (want == gov[d].at) {
+				gov[d].down_looks = 0;
+			}
+		}
+		then = now;
+		looks++;
+		if (now - last_log >= log_every) {
+			for (uint32_t d = 0; d < cpufreq_groups; d++) {
+				uint64_t all = 0, weighted = 0;
+
+				if (gov[d].rows == 0) {
+					continue;
+				}
+				for (uint32_t r = 0; r < gov[d].rows; r++) {
+					all += gov[d].time_at[r];
+					weighted += gov[d].time_at[r] * (gov[d].khz[r] / 1000);
+					gov[d].time_at[r] = 0;
+				}
+				printf("cpufreq: group %u: busiest core %u%% on average, %llu MHz on average, now %u MHz\n", d,
+				    busy_sum[d] / (looks ? looks : 1), all ? weighted / all : 0, gov[d].khz[gov[d].at] / 1000);
+				busy_sum[d] = 0;
+			}
+			looks = 0;
+			last_log = now;
+		}
+	}
+}
+
 static bool
 cpufreq_wanted(void)
 {
@@ -642,9 +779,26 @@ hakios_cpufreq_init(void)
 	/* (whichever core this thread happens to be on, and stays on or not: it only goes to the log) */
 	here = (uint32_t)(__builtin_arm_rsr64("MPIDR_EL1") >> 8) & 0xff;
 	before = loop_speed();
-	for (uint32_t domain = 0; domain < cpufreq_groups; domain++) {
-		if (cores[domain] != 0) {
-			raise_domain(domain, cores[domain]);
+	if (enabled == 2) {
+		thread_t thread;
+		bool any = false;
+
+		for (uint32_t domain = 0; domain < cpufreq_groups; domain++) {
+			if (cores[domain] != 0 && gov_table(domain)) {
+				gov_set(domain, gov[domain].rows - 1);  /* the start at full speed, as cpufreq=1; the load decides from here */
+				tell("cpufreq: group %u (%u of our cores): %u rows, %u to %u MHz, by load (cpufreq=2)\n", domain,
+				    cores[domain], gov[domain].rows, gov[domain].khz[0] / 1000, gov[domain].khz[gov[domain].rows - 1] / 1000);
+				any = true;
+			}
+		}
+		if (any && kernel_thread_start(gov_thread, NULL, &thread) == KERN_SUCCESS) {
+			thread_deallocate(thread);
+		}
+	} else {
+		for (uint32_t domain = 0; domain < cpufreq_groups; domain++) {
+			if (cores[domain] != 0) {
+				raise_domain(domain, cores[domain]);
+			}
 		}
 	}
 	printf("cpufreq: on core %u a loop ran at %u, now at %u\n", here, before, loop_speed());

@@ -225,6 +225,38 @@ find_channel(struct peripheral *p, uint32_t channels)
 	}
 }
 
+/*
+ * hakios_pmic_reader, for the other drivers: any peripheral, its channel found the first time it is asked for. Called from
+ * one thread at a time (the touch screen's), so the table needs no lock; the transfers take the arbiter's lock as ours do.
+ */
+#define OTHER_PERIPHERALS       4
+static struct peripheral others[OTHER_PERIPHERALS];
+static uint32_t arb_channels;
+
+static int
+pmic_read_for_others(uint16_t id, uint8_t reg, uint8_t *bytes, uint32_t count)
+{
+	struct peripheral *p = NULL;
+
+	if (id == 0 || count == 0 || count > 8) {
+		return -1;
+	}
+	for (unsigned i = 0; i < OTHER_PERIPHERALS && p == NULL; i++) {
+		if (others[i].id == id) {
+			p = &others[i];
+		} else if (others[i].id == 0) {
+			others[i].id = id;
+			others[i].name = "a peripheral another driver reads";
+			find_channel(&others[i], arb_channels);
+			p = &others[i];
+		}
+	}
+	if (p == NULL || !p->found) {
+		return -1;
+	}
+	return spmi_read(p, reg, bytes, count) == NULL ? 0 : -1;
+}
+
 /* ---- the two peripherals ------------------------------------------------------------------------- */
 
 /* every peripheral of these PMICs */
@@ -499,6 +531,8 @@ buttons_thread(void *parameter, __unused wait_result_t result)
 	if (pin_down.id != 0) {
 		find_channel(&pin_down, channels);
 	}
+	arb_channels = channels;
+	hakios_pmic_reader = pmic_read_for_others;
 	if (steps < 3) {
 		goto out;
 	}

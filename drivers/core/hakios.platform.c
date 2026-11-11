@@ -44,6 +44,12 @@ hakios_spmi_unlock(void)
 }
 
 /*
+ * A read of any PMIC peripheral's registers for the drivers that do not map the arbiter themselves (the touch screen's
+ * charger bit): set by drivers/input/hakios.buttons.c once it has the arbiter (buttons=1); NULL before, or without it.
+ */
+int (*volatile hakios_pmic_reader)(uint16_t id, uint8_t reg, uint8_t *bytes, uint32_t count);
+
+/*
  * What the DSPs' starts use while another may be at work beside them: the mailbox to the always-on processor, one
  * message at a time, and the allocation of items in the shared memory (whose hardware lock both take under the same
  * number, so it does not keep the two apart); RPMh's sequencer (TCS 0 of the RSC); a free match register and context

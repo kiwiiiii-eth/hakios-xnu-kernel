@@ -1,6 +1,6 @@
 /*
  * THE ONEPLUS 6T (fajita, SDM845) PORT of drivers/gpu/hakios.adreno.c: its GPU is an Adreno 630 (chip id 0x06030000 in
- * the phone's own device tree), where the reference phone's is a 642L. Ported so far: steps 1 to 3 (A630_PORTED below);
+ * the phone's own device tree), where the reference phone's is a 642L. Ported so far: steps 1 to 3, 11 and 12 (A630_PORTED_STEPS below);
  * asking for more stops at the last ported step, and gpu=1 is refused, until the rest has been made to work here. The
  * 6T's addresses are from its own device tree (LineageOS 22.2's fajita DTB: qcom,kgsl-3d0@5000000, qcom,gmu with
  * 0x506a000 and the PDC at 0xb200000, qcom,kgsl-iommu at 0x5040000, qcom,gpucc@5090000, qcom,gdsc@0x509106c) and Linux's
@@ -43,16 +43,16 @@
  *              and which firmware images it says it authenticates
  *  12  asks    TrustZone to check the signature of the GPU's "zap shader", the signed image
  *              without which the 3D core stays locked in secure mode: its header goes from the
- *              small image (fw/a660_zap.mdt) into memory of ours that TrustZone is pointed at
+ *              small image (fw/a630_zap.mdt) into memory of ours that TrustZone is pointed at
  *  13  writes  page tables for the memory the GMU's firmware asks for, and the SMMU: a
  *              translation context with those tables, and the GMU's requests sent through it
- *  14  writes  the GMU's firmware (fw/a660_gmu.bin) into its own memory and into that memory
+ *  14  writes  the GMU's firmware (fw/a630_gmu.bin) into its own memory and into that memory
  *  15  writes  the GMU's configuration, and lets its processor out of reset: the firmware runs
  *  16  writes  the GMU's connection to RPMh; starts its message queues ("HFI")
  *  17  talks   to the GMU: the tables it needs, and the request to power the 3D core, whose
  *              registers are then read
  *  18  writes  the 3D core's translation context, with its ring and its microcode
- *              (fw/a660_sqe.fw) in it
+ *              (fw/a630_sqe.fw) in it
  *  19  asks    TrustZone to load the zap shader (and first to give up the one a kernel before
  *              this one may have left; the stop at the end of a run asks for that too)
  *  20  writes  the 3D core's registers; starts its command processor and gives it its first
@@ -115,7 +115,12 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
-#define A630_PORTED             3               /* the steps made to work on the 6T; asking for more stops here */
+/*
+ * The steps made to work on the 6T, a bit each (bit 1 = step 1): 1 to 3, and TrustZone's (11, 12), which need no power
+ * in the GPU block and say early whether the zap shader is this phone's. The others are left out, whatever is asked.
+ */
+#define A630_PORTED_STEPS       (0xeu | 1u << 11 | 1u << 12)
+#define A630_LAST_PORTED        12
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
@@ -1630,7 +1635,7 @@ image_file(const char *directory, const char *name, uint64_t *size)
 /*
  * The first of the three calls with which Linux has a zap shader loaded (mdt_loader.c:
  * qcom_mdt_pas_init, qcom_scm.c: qcom_scm_pas_init_image): TrustZone is given the image's header --
- * the ELF header and the block of hashes and certificates, which is all of the file a660_zap.mdt
+ * the ELF header and the block of hashes and certificates, which is all of the file a630_zap.mdt
  * -- and checks the signature. Nothing of the GPU is involved, so it can be asked now. The other
  * two (where the image will be, and "authenticate and start") need the 3D core powered.
  *
@@ -1648,7 +1653,7 @@ zap_header(uint64_t *phys)
 	uint64_t size = 0;
 	uint32_t segments, hashes;
 
-	header = image_file("fw", "a660_zap.mdt", &size);
+	header = image_file("fw", "a630_zap.mdt", &size);
 	if (header == NULL) {
 		return false;
 	}
@@ -1682,7 +1687,7 @@ step_zap_signature(void)
 	uint64_t header = 0, answer = ~0ull;
 	int32_t result;
 
-	announce("find the zap shader's header, fw/a660_zap.mdt, in the small image that came with the kernel");
+	announce("find the zap shader's header, fw/a630_zap.mdt, in the small image that came with the kernel");
 	if (!zap_header(&header)) {
 		return false;
 	}
@@ -1743,8 +1748,8 @@ step_gmu_space(void)
 	if (!cx_ready()) {
 		return false;
 	}
-	announce("find the GMU's firmware, fw/a660_gmu.bin, in the small image, and make the memory it asks for");
-	gmu_firmware = image_file("fw", "a660_gmu.bin", &gmu_firmware_size);
+	announce("find the GMU's firmware, fw/a630_gmu.bin, in the small image, and make the memory it asks for");
+	gmu_firmware = image_file("fw", "a630_gmu.bin", &gmu_firmware_size);
 	if (gmu_firmware == NULL) {
 		return false;
 	}
@@ -2390,7 +2395,7 @@ step_core_power(void)
 
 /*
  * The 3D core takes its orders as words in a ring of memory, which a small processor inside it
- * ("SQE", with microcode of its own: a660_sqe.fw) reads up to where a register says we have
+ * ("SQE", with microcode of its own: a630_sqe.fw) reads up to where a register says we have
  * written. Like the GMU it reaches memory through the SMMU: stream 0, to which this gives
  * context 0, with tables of ours that hold the ring, the microcode and later what is drawn into.
  * What is written to the core's registers before its processor is started, and in what order,
@@ -2566,8 +2571,8 @@ step_core_space(void)
 		return false;
 	}
 	PE_parse_boot_argn("adreno_stream1", &stream1, sizeof(stream1));
-	announce("make the 3D core's memory: its ring, its microcode (fw/a660_sqe.fw), a page to try writing to");
-	microcode = image_file("fw", "a660_sqe.fw", &size);
+	announce("make the 3D core's memory: its ring, its microcode (fw/a630_sqe.fw), a page to try writing to");
+	microcode = image_file("fw", "a630_sqe.fw", &size);
 	if (microcode == NULL || size < 8 || size > 0x40000 ||
 	    !block_new(&core_space, &core_ring, CORE_RING_ADDRESS, CORE_RING_SIZE, PTE_CORE) ||
 	    !block_new(&core_space, &core_sqe, CORE_SQE_ADDRESS, (uint32_t)size - 4, PTE_CORE | PTE_READ_ONLY) ||
@@ -2607,7 +2612,7 @@ step_core_space(void)
  * qcom_mdt_load; adreno_gpu.c: zap_shader_load_mdt): after the header (step 12), TrustZone is
  * told where the image will be -- the two pages the device tree reserves for it
  * (reserved-memory gpu_micro_code@8b71a000, the zap-shader node's memory-region) --, the image's
- * one segment (the file a660_zap.b02, relocatable: at the start of that memory) is put there,
+ * one segment (the file a630_zap.b02, relocatable: at the start of that memory) is put there,
  * and TrustZone is asked to authenticate it and run it. The vendor's driver does this before it
  * starts the 3D core's command processor (a6xx_rb_start: a6xx_microcode_load), Linux after;
  * this phone's own order is kept. Once that is done the memory is TrustZone's, and nothing
@@ -2651,7 +2656,7 @@ step_zap_load(void)
 	announce("ask TrustZone to give up a zap shader that a kernel before this one may have left");
 	printf("adreno: %u: %s\n", step, zap_unload() ? "TrustZone has given up what it had (it says so with none, too)" :
 	    "TRUSTZONE DOES NOT GIVE IT UP: the next answers tell whether it keeps one");
-	segment = image_file("fw", "a660_zap.b02", &size);
+	segment = image_file("fw", "a630_zap.b02", &size);
 	if (segment == NULL || size == 0 || size > 0x1000) {
 		return false;
 	}
@@ -3726,12 +3731,13 @@ extern vm_offset_t pe_arm_get_soc_base_phys(void);
 static bool
 start_by_itself(void)
 {
-	static const char *const files[] = { "a660_gmu.bin", "a660_sqe.fw", "a660_zap.mdt", "a660_zap.b02" };
+	static const char *const files[] = { "a630_gmu.bin", "a630_sqe.fw", "a630_zap.mdt", "a630_zap.b02" };
 	const char *missing = NULL;
 	uint64_t size;
 
-	if (A630_PORTED < 21) {
-		printf("adreno: THE GPU IS NOT STARTED: gpu=1 waits until the 6T port has all the steps (it has 1 to %u)\n", A630_PORTED);
+	if (A630_PORTED_STEPS != 0x3ffffeu) {
+		printf("adreno: THE GPU IS NOT STARTED: gpu=1 waits until the 6T port has all the steps (ported: mask %#x)\n",
+		    A630_PORTED_STEPS);
 		return false;
 	}
 	if (pe_arm_get_soc_base_phys() != HAKIOS_SOC_BASE) {
@@ -3797,10 +3803,15 @@ hakios_adreno_init(void)
 	if (last_step > STEPS) {
 		last_step = STEPS;
 	}
-	if (last_step > A630_PORTED) {
-		printf("adreno: the 6T port has steps 1 to %u so far: asked for %u, stopping at %u\n", A630_PORTED, last_step, A630_PORTED);
-		last_step = A630_PORTED;
+	if (last_step > A630_LAST_PORTED) {
+		printf("adreno: the 6T port goes up to step %u so far: asked for %u, stopping at %u\n", A630_LAST_PORTED, last_step,
+		    A630_LAST_PORTED);
+		last_step = A630_LAST_PORTED;
 	}
+	if (~skip_steps & ~A630_PORTED_STEPS & ((2u << last_step) - 2)) {
+		printf("adreno: the 6T port leaves out the steps not ported yet (mask %#x)\n", ~A630_PORTED_STEPS & ((2u << last_step) - 2));
+	}
+	skip_steps |= ~A630_PORTED_STEPS;
 	PE_parse_boot_argn("adreno_watch", &watch_seconds, sizeof(watch_seconds));
 	for (newest_step = last_step; newest_step > 0 && (skip_steps & 1u << newest_step); newest_step--) {
 	}

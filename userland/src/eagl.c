@@ -249,7 +249,7 @@ struct eagl {
 	id object;                      /* the EAGLContext */
 	struct hakios_gl *gl;
 	unsigned long api;
-	struct image images[256];
+	struct image images[2048];      /* 6T, 11-11: 256 ran out in Health (CoreAnimation keeps that many IOSurface textures alive), and every texture after it stayed black */
 	unsigned image_count;
 	GLuint framebuffer;             /* the one bound */
 	GLuint colour;                  /* ... and the texture that is its colour attachment (0: none, or no texture) */

@@ -2031,7 +2031,19 @@ static struct block pdc_seq = { "pdc_seq", 0x0b480000, 0x1000 };   /* 6T: sdm845
 /* The 3D core's speeds for the bring-up and the rail level each needs (sdm845.dtsi's lowest three); and the GMU's. */
 static const struct {
 	uint32_t khz, level;
-} a630_speeds[] = { { 0, 0 }, { 257000, 64 }, { 342000, 128 }, { 414000, 192 } };
+} a630_speeds[] = { { 0, 0 }, { 257000, 64 }, { 342000, 128 }, { 414000, 192 }, { 520000, 256 }, { 596000, 320 } };
+/*
+ * 6T: which of them the GMU is asked to run the core at (a6xx_gmu_set_freq for legacy GMUs: DCVS_PERF_SETTING and the
+ * DCVS out-of-band request). Without that request the core stays at whatever the GMU's firmware starts it at, and a
+ * window server drawing through it waited 70 to 185 ms a submission (11-11). adreno_speed=N picks another.
+ */
+#define A630_SPEED_DEFAULT      5               /* 596 MHz (sdm845.dtsi's NOM_L1) */
+#define GMU_DCVS_ACK_OPTION     GMU_WORD(0x23fc)
+#define GMU_DCVS_PERF_SETTING   GMU_WORD(0x23fd)
+#define GMU_DCVS_BW_SETTING     GMU_WORD(0x23fe)
+#define GMU_DCVS_RETURN         GMU_WORD(0x23ff)
+#define OOB_DCVS_SET            23
+#define OOB_DCVS_ACK            31
 #define A630_SPEEDS             (sizeof(a630_speeds) / sizeof(a630_speeds[0]))
 static struct {
 	uint32_t header, gpu_levels, gmu_levels;
@@ -2487,7 +2499,7 @@ step_core_power(void)
 {
 	static struct hfi_bw_table bw;
 	uint32_t init[5] = { 0, 0, GMU_DEBUG_ADDRESS, GMU_DEBUG_SIZE, 1 /* GMU_COLD_BOOT */ };
-	uint32_t version[2] = { 0, 1u << 28 | 1u << 19 | 1u << 17 }, test[1] = { 0 };
+	uint32_t version[2] = { 0, 1u << 28 | 1u << 19 | 1u << 17 }, test[1] = { 0 }, speed;
 
 	if (!cx_ready() || !gmu_talks || a630_perf.gpu_levels == 0) {
 		return false;
@@ -2510,8 +2522,6 @@ step_core_power(void)
 	bw.cnoc_data[1][0] = 0x60000001;
 	bw.cnoc_data[1][1] = 0x20000001;
 	bw.cnoc_data[1][2] = 0x60000001;
-	core_khz = a630_speeds[A630_SPEEDS - 1].khz;
-
 	announce("HFI v1: init, version, perf table, bus table, test");
 	if (!hfi_send("init", HFI_V1_INIT, init, 5)) {
 		return false;
@@ -2525,6 +2535,22 @@ step_core_power(void)
 	    !hfi_send("test", HFI_V1_TEST, test, 1)) {
 		return false;
 	}
+
+	speed = A630_SPEED_DEFAULT;
+	if (PE_parse_boot_argn("adreno_speed", &speed, sizeof(speed)) && (speed < 1 || speed >= A630_SPEEDS)) {
+		speed = A630_SPEED_DEFAULT;
+	}
+	core_khz = a630_speeds[speed].khz;
+	announce("the core's speed: the DCVS request of a legacy GMU (a6xx_gmu_set_freq)");
+	put(&gmu, "dcvs_ack_option", GMU_DCVS_ACK_OPTION, 0);
+	put(&gmu, "dcvs_perf_setting", GMU_DCVS_PERF_SETTING, 3u << 28 | speed);
+	put(&gmu, "dcvs_bw_setting", GMU_DCVS_BW_SETTING, 0xff);  /* "let the firmware decide on the bus vote" */
+	if (!gmu_oob("DCVS", OOB_DCVS_SET, OOB_DCVS_ACK)) {
+		return false;
+	}
+	put(&gmu, "host2gmu_intr_set", GMU_HOST2GMU_INTR_SET, 1u << OOB_DCVS_ACK);   /* the legacy DCVS clear */
+	printf("adreno: %u: core speed %u MHz asked for: the GMU returns %#x\n", step, core_khz / 1000,
+	    get(&gmu, "dcvs_return", GMU_DCVS_RETURN));
 
 	announce("ask the GMU to keep the 3D core powered for us (GPU_SET)");
 	get(&gmu, "sptprac_pwr_clk_status", GMU_SPTPRAC_PWR_CLK_STATUS);

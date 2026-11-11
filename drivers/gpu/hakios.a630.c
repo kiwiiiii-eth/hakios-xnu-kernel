@@ -1,6 +1,6 @@
 /*
  * THE ONEPLUS 6T (fajita, SDM845) PORT of drivers/gpu/hakios.adreno.c: its GPU is an Adreno 630 (chip id 0x06030000 in
- * the phone's own device tree), where the reference phone's is a 642L. Ported so far: steps 1 to 3, 11 and 12 (A630_PORTED_STEPS below);
+ * the phone's own device tree), where the reference phone's is a 642L. Ported so far: steps 1 to 6, 11 and 12 (A630_PORTED_STEPS below);
  * asking for more stops at the last ported step, and gpu=1 is refused, until the rest has been made to work here. The
  * 6T's addresses are from its own device tree (LineageOS 22.2's fajita DTB: qcom,kgsl-3d0@5000000, qcom,gmu with
  * 0x506a000 and the PDC at 0xb200000, qcom,kgsl-iommu at 0x5040000, qcom,gpucc@5090000, qcom,gdsc@0x509106c) and Linux's
@@ -119,7 +119,7 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
  * The steps made to work on the 6T, a bit each (bit 1 = step 1): 1 to 3, and TrustZone's (11, 12), which need no power
  * in the GPU block and say early whether the zap shader is this phone's. The others are left out, whatever is asked.
  */
-#define A630_PORTED_STEPS       (0xeu | 1u << 11 | 1u << 12)
+#define A630_PORTED_STEPS       (0x7eu | 1u << 11 | 1u << 12)
 #define A630_LAST_PORTED        12
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
@@ -572,13 +572,9 @@ step_cx_power(void)
 		 * votes in RPMh, the SMMU's contexts pointing into memory that is somebody else's now --
 		 * is taken down as gpu_block_stop() would have, and the start is from nothing.
 		 */
-		printf("adreno: %u: CX is on already: an earlier kernel left the GPU block running; stopping it first\n", step);
-		stale_stop();
-		if (cx_is_on()) {
-			printf("adreno: %u: CX stays on: going on with it as it is\n", step);
-			return true;
-		}
-		gdscr = rd(gpucc.base + GPUCC_CX_GDSCR);
+		/* 6T: stale_stop() reaches blocks not yet ported (redwood's addresses): not from here; a reset clears it all */
+		printf("adreno: %u: CX is on already (an earlier kernel left it so): restart the phone and try again\n", step);
+		return false;
 	}
 	if (gdscr & GDSC_HW_CONTROL) {
 		printf("adreno: %u: the switch is under hardware control: not ours to operate\n", step);
@@ -646,7 +642,7 @@ clock_source(const char *name, uint32_t rcgr, uint32_t source)
 	return true;
 }
 
-static bool measure_clocks(void);
+static bool clocks_running(void);
 
 /*
  * The clocks the device tree gives the GMU and the SMMU, at the rates both the vendor's driver
@@ -672,23 +668,56 @@ step_clocks(void)
 		return false;
 	}
 
-	announce("in the GPU's clock controller: the GMU's clock to 200 MHz, the hub's to 150 MHz");
-	if (!clock_source("gmu_clk_src", GPUCC_GMU_RCGR, RCG_GPLL0_DIV(3)) ||       /* 300 MHz / 1.5 */
-	    !clock_source("hub_clk_src", GPUCC_HUB_RCGR, RCG_GPLL0_DIV(4))) {       /* 300 MHz / 2 */
+	/* 6T: gpucc-sdm845.c's table: 200 MHz is the 300 MHz tap (source 6) / 1.5, as on redwood; there is no hub clock */
+	announce("in the GPU's clock controller: the GMU's clock to 200 MHz");
+	if (!clock_source("gmu_clk_src", GPUCC_GMU_RCGR, RCG_GPLL0_DIV(3))) {        /* 300 MHz / 1.5 */
 		return false;
 	}
 
-	announce("in the GPU's clock controller: the clocks of the GMU and of the SMMU on");
-	if (!clock_on(&gpucc, "cb", GPUCC_CB_CBCR, false) ||
-	    !clock_on(&gpucc, "cxo", GPUCC_CXO_CBCR, true) ||
+	/*
+	 * 6T: the clocks the GMU's node names (cx_gmu, cxo; axi and memnoc above) and the register bus's (ahb). The SDM845's
+	 * controller has no cb or hub clocks, and its GPU SMMU runs on the global controller's clocks (the phone's device tree:
+	 * qcom,kgsl-iommu's iface, mem, mem_iface), so redwood's SMMU vote here is not written either.
+	 */
+	announce("in the GPU's clock controller: the clocks of the GMU and of the GPU block's register bus on");
+	if (!clock_on(&gpucc, "cxo", GPUCC_CXO_CBCR, true) ||
 	    !clock_on(&gpucc, "ahb", GPUCC_AHB_CBCR, false) ||
-	    !clock_on(&gpucc, "hub_aon", GPUCC_HUB_AON_CBCR, true) ||
-	    !clock_on(&gpucc, "hub_cx_int", GPUCC_HUB_CX_INT_CBCR, true) ||
-	    !clock_on(&gpucc, "cx_gmu", GPUCC_CX_GMU_CBCR, true) ||
-	    !clock_on(&gpucc, "smmu vote", GPUCC_SMMU_VOTE_CBCR, false)) {
+	    !clock_on(&gpucc, "cx_gmu", GPUCC_CX_GMU_CBCR, true)) {
 		return false;
 	}
-	return measure_clocks();
+	return clocks_running();
+}
+
+/*
+ * 6T: whether the clocks of step 5 run, from their control registers. On this controller the status bit reads (step 3
+ * saw ahb at 0x80000001, enabled and off, while CX had no power), so no frequency counter is needed: the SDM845's
+ * counter registers are not the reference phone's below (debugcc-yupik.c), and are left alone.
+ */
+static bool
+clocks_running(void)
+{
+	static const struct {
+		const char *name;
+		uint32_t cbcr;
+	} clocks[] = {
+		{ "cx_gmu", GPUCC_CX_GMU_CBCR }, { "cxo", GPUCC_CXO_CBCR }, { "ahb", GPUCC_AHB_CBCR },
+		{ "gx_gmu (the 3D core's half: should be off)", GPUCC_GX_GMU_CBCR },
+	};
+
+	announce("read the GPU block's clocks back: bit 31 of a clock's control register says it is off");
+	for (unsigned i = 0; i < sizeof(clocks) / sizeof(clocks[0]); i++) {
+		uint32_t cbcr = get(&gpucc, clocks[i].name, clocks[i].cbcr);
+
+		printf("adreno: %u: %s %s\n", step, clocks[i].name, cbcr & CBCR_OFF ? "is off" : "RUNS");
+	}
+	get(&gpucc, "gmu_clk_src command", GPUCC_GMU_RCGR);
+	get(&gpucc, "gmu_clk_src source", GPUCC_GMU_RCGR + 4);
+	if (rd(gpucc.base + GPUCC_AHB_CBCR) & CBCR_OFF) {
+		printf("adreno: %u: the GPU block's register bus has no clock: the GMU would not answer\n", step);
+		return false;
+	}
+	printf("adreno: %u: THE GMU AND THE GPU BLOCK'S REGISTER BUS HAVE THEIR CLOCKS\n", step);
+	return true;
 }
 
 /*
@@ -799,64 +828,6 @@ measure_quietly(uint32_t select)
 }
 
 /*
- * Measure the clocks step 5 has turned on. The crystal's comes first and aloud: its rate is known,
- * so it shows whether the counter can be believed; one that is off (the 3D core's) comes last.
- */
-static bool
-measure_clocks(void)
-{
-	static const struct {
-		const char *name;
-		uint32_t select;
-	} clocks[] = {
-		{ "cx_gmu (200 MHz was asked for)", GPUCC_DEBUG_CX_GMU }, { "hub_cx_int (from 150 MHz)", GPUCC_DEBUG_HUB_CX_INT },
-		{ "hub_aon", GPUCC_DEBUG_HUB_AON }, { "cb", GPUCC_DEBUG_CB }, { "cxo_aon", GPUCC_DEBUG_CXO_AON },
-		{ "gx_gmu (should be off)", GPUCC_DEBUG_GX_GMU }, { "ahb, THE ONE IN QUESTION,", GPUCC_DEBUG_AHB },
-	};
-	uint32_t hz, ahb_hz = MEASURE_FAILED;
-
-	announce("measure the GPU block's clocks with the SoC's frequency counter (debug registers at gcc 0x162000.., "
-	    "gpucc 0x3d910fc, 0x3d91100, 0x3d91568)");
-	hz = measure(GPUCC_DEBUG_CXO);
-	if (hz == MEASURE_FAILED) {
-		printf("adreno: %u: the counter did not finish: it cannot be used as it is set up here\n", step);
-		return false;
-	}
-	printf("adreno: %u: measured: cxo runs at %u Hz (the crystal: 19200000)\n", step, hz);
-	if (hz < 18600000 || hz > 19800000) {
-		printf("adreno: %u: the counter does not show the crystal's rate: nothing it says can be used\n", step);
-		return false;
-	}
-	for (unsigned i = 0; i < sizeof(clocks) / sizeof(clocks[0]); i++) {
-		hz = measure_quietly(clocks[i].select);
-		if (hz == MEASURE_FAILED) {
-			printf("adreno: %u: measured: %s: the counter did not finish\n", step, clocks[i].name);
-		} else {
-			printf("adreno: %u: measured: %s runs at %u Hz\n", step, clocks[i].name, hz);
-		}
-		if (clocks[i].select == GPUCC_DEBUG_AHB) {
-			ahb_hz = hz;
-		}
-	}
-	if (ahb_hz != MEASURE_FAILED && ahb_hz >= 1000000) {
-		printf("adreno: %u: THE REGISTER BUS OF THE GPU BLOCK HAS ITS CLOCK, whatever its control register says\n", step);
-		return true;
-	}
-	/* for study: what else is there in the clock controller that could be its switch */
-	printf("adreno: %u: the register bus of the GPU block has no clock; what is not 0 in gpucc 0x1000..0x15fc:\n", step);
-	for (uint32_t offset = 0x1000; offset < 0x1600; offset += 16) {
-		uint32_t row[4] = { rd(gpucc.base + offset), rd(gpucc.base + offset + 4), rd(gpucc.base + offset + 8),
-			            rd(gpucc.base + offset + 12) };
-
-		if (row[0] | row[1] | row[2] | row[3]) {
-			printf("adreno: %u: gpucc %#x: %#x %#x %#x %#x\n", step, gpucc.phys + offset, row[0], row[1], row[2],
-			    row[3]);
-		}
-	}
-	return false;
-}
-
-/*
  * What every later step stands on: CX powered, the GMU's clock running by its control register,
  * and the register bus's clock running by measurement (see above).
  */
@@ -874,14 +845,11 @@ cx_ready(void)
 		    cx_is_on() ? "on" : "off", gmu_clock);
 		return false;
 	}
-	ahb_hz = measure_quietly(GPUCC_DEBUG_AHB);
-	if (ahb_hz == MEASURE_FAILED) {
-		printf("adreno: %u: the frequency counter did not finish (step 5 shows whether it works)\n", step);
-	} else {
-		printf("adreno: %u: the GPU block's register bus clock (ahb) measures %u Hz\n", step, ahb_hz);
-	}
-	if (ahb_hz == MEASURE_FAILED || ahb_hz < 1000000) {
-		printf("adreno: %u: without that clock a register of the GPU block would not answer: not touching it\n", step);
+	/* 6T: the register bus's clock by its status bit (see clocks_running()) */
+	ahb_hz = rd(gpucc.base + GPUCC_AHB_CBCR);
+	if (ahb_hz & CBCR_OFF) {
+		printf("adreno: %u: the GPU block's register bus clock is off (ahb %#x): a register of the block would not answer: "
+		    "not touching it\n", step, ahb_hz);
 		return false;
 	}
 	return true;
@@ -935,7 +903,7 @@ step_first_words(void)
 	if (!cx_ready()) {
 		return false;
 	}
-	announce("read registers of the GMU (0x3d6a000): the first words from the GPU block itself");
+	announce("read registers of the GMU (0x506a000): the first words from the GPU block itself");
 	get(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET);
 	get(&gmu, "cm3_boot_config", GMU_CM3_BOOT_CONFIG);
 	get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT);
@@ -962,10 +930,11 @@ step_first_words(void)
 		get(&gmu, "dtcm, where firmware has its versions", GMU_DTCM_VERSIONS + 4 * i);
 	}
 
-	announce("read the GPU's bus interface (0x3d0f000) and the CX odds and ends (0x3d9e000)");
-	get(&gbif, "scache_cntl0", GBIF_SCACHE_CNTL0);
-	get(&gbif, "halt", GBIF_HALT);
-	get(&gbif, "halt_ack", GBIF_HALT_ACK);
+	/*
+	 * 6T: the A630 has no GBIF; at its place (words 0x3c00 of the 3D core's block) is the core's own half, which has no
+	 * power before the GMU gives it: not read. Its VBIF is in that half too.
+	 */
+	announce("read the CX odds and ends (0x509e000)");
 	get(&cx_misc, "system_cache_cntl_0", CX_MISC_SYSTEM_CACHE_CNTL_0);
 	get(&cx_misc, "system_cache_cntl_1", CX_MISC_SYSTEM_CACHE_CNTL_1);
 	return true;

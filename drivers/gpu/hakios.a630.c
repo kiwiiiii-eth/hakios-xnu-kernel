@@ -2814,9 +2814,13 @@ step_zap_load(void)
 	if (!cx_ready() || !core_is_on) {
 		return false;
 	}
-	announce("ask TrustZone to give up a zap shader that a kernel before this one may have left");
-	printf("adreno: %u: %s\n", step, zap_unload() ? "TrustZone has given up what it had (it says so with none, too)" :
-	    "TRUSTZONE DOES NOT GIVE IT UP: the next answers tell whether it keeps one");
+	/*
+	 * 6T: not the request to give up an earlier zap shader first. The SDM845's TrustZone, asked to shut down image 13
+	 * when it holds none, ends the whole phone in Qualcomm's crash dump mode (11-11: gpu=1, which skips step 12, did so
+	 * twice; adreno=22, where step 12 had given it a header, did not). Linux never asks it before a first load
+	 * (zap_shader_load_mdt), and every run here starts from a phone just restarted, so there is none to give up.
+	 */
+	printf("adreno: %u: (no request to give up an earlier zap shader: the SDM845's TrustZone does not survive it)\n", step);
 	segment = image_file("fw", "a630_zap.b02", &size);
 	if (segment == NULL || size == 0 || size > 0x1000) {
 		return false;
@@ -3347,7 +3351,7 @@ hakios_adreno_quiesce(void)
  * far it has got (a "fence": a submission's number, written by the core when it is through
  * with it). The caller holds one lock around all of these.
  */
-#define GPU_CHIP_ID             0x06030500ull   /* dt: qcom,chipid */
+#define GPU_CHIP_ID             0x06030002ull   /* 6T: Linux's 630.2 (the GMU is told the same, step 15) */
 #define GPU_ADDRESSES_START     0x20000000ull   /* above everything the steps use; below 4 GB, as Linux keeps them */
 #define GPU_ADDRESSES_SIZE      0xe0000000ull
 #define GPU_FENCE_AT            0x40            /* in the scratch page */
@@ -3378,9 +3382,8 @@ static struct {
 } gpu_free[1024];                       /* the addresses not in use, in order */
 static unsigned gpu_free_count;
 
-/* the 6T build has no HakiosGPU service yet (hakios.gpu.cpp stays the reference driver's until step G7 of the port) */
-static void HakiosGPUStart(void) {}
-static void HakiosGPUStop(void) { hakios_gpu_stop(); }
+extern void HakiosGPUStart(void);
+extern void HakiosGPUStop(void);       /* takes the clients' lock, then calls hakios_gpu_stop() */
 static void gpu_block_stop(void);
 
 /*
@@ -3437,16 +3440,20 @@ bool
 hakios_gpu_parameter(uint32_t which, uint64_t *value)
 {
 	switch (which) {
-	case 0x01:                              /* GPU_ID: none, the chip ID says it */
-	case 0x06:                              /* GMEM_BASE */
+	case 0x01:                              /* GPU_ID: 6T, the A630 has one (adreno_get_param: info->revn) */
+		*value = 630;
+		return true;
+	case 0x06:                              /* GMEM_BASE: 6T, 1M below the a650 family (adreno_get_param) */
+		*value = 0x100000;
+		return true;
 	case 0x08:                              /* PP_PGTABLE */
 	case 0x09:                              /* FAULTS */
 	case 0x0a:                              /* SUSPENDS */
 	case 0x11:                              /* RAYTRACING */
 		*value = 0;
 		return true;
-	case 0x02:                              /* GMEM_SIZE */
-		*value = 512 * 1024;
+	case 0x02:                              /* GMEM_SIZE: 6T, the A630's 1M */
+		*value = 1024 * 1024;
 		return true;
 	case 0x03:                              /* CHIP_ID, with the speed bin above it */
 		*value = GPU_CHIP_ID | (uint64_t)speed_bin << 32;
@@ -3460,14 +3467,14 @@ hakios_gpu_parameter(uint32_t which, uint64_t *value)
 	case 0x07:                              /* PRIORITIES */
 		*value = 1;
 		return true;
-	case 0x10:                              /* HIGHEST_BANK_BIT */
-		*value = 14;
+	case 0x10:                              /* HIGHEST_BANK_BIT: 6T, the SDM845's 15 */
+		*value = 15;
 		return true;
 	case 0x12:                              /* UBWC_SWIZZLE */
 		*value = 6;
 		return true;
-	case 0x13:                              /* MACROTILE_MODE */
-		*value = 1;
+	case 0x13:                              /* MACROTILE_MODE: 6T, none below UBWC 3.1 */
+		*value = 0;
 		return true;
 	default:                                /* among them VA_START, VA_SIZE: addresses are ours to give */
 		return false;
@@ -3909,12 +3916,8 @@ start_by_itself(void)
 	const char *missing = NULL;
 	uint64_t size;
 
-	if (A630_PORTED_STEPS != 0x3ffffeu) {
-		printf("adreno: THE GPU IS NOT STARTED: gpu=1 waits until the 6T port has all the steps (ported: mask %#x)\n",
-		    A630_PORTED_STEPS);
-		return false;
-	}
-	if (pe_arm_get_soc_base_phys() != HAKIOS_SOC_BASE) {
+	/* 6T: the driver is built for this phone alone (CONFIG_HAKIOS_A630 in fajita.config); redwood's SoC-base check is not */
+	if (false && pe_arm_get_soc_base_phys() != HAKIOS_SOC_BASE) {
 		printf("adreno: THE GPU IS NOT STARTED: gpu=1 is for the phone, and this is not it\n");
 		return false;
 	}
@@ -4018,6 +4021,18 @@ hakios_adreno_init(void)
 			quiet = true;
 			printf("adreno: THE GPU STAYS ON for the system to draw with: the service HakiosGPU\n");
 			HakiosGPUStart();
+			/* 6T, for finding what ends a run with the GPU kept: adreno_keep_watch=S holds the system's start S seconds */
+			only = 0;
+			PE_parse_boot_argn("adreno_keep_watch", &only, sizeof(only));
+			for (uint32_t second = 1; second <= only; second++) {
+				sleep_ms(1000);
+				if (second % 5 == 0) {
+					printf("adreno: kept %u s: rbbm %#x gx %#x sptprac %#x g2h %#x ao %#x\n", second,
+					    rd(gpu.base + RBBM_STATUS), rd(gpucc.base + GPUCC_GX_GDSCR),
+					    rd(gmu.base + GMU_SPTPRAC_PWR_CLK_STATUS), rd(gmu.base + GMU_GMU2HOST_INTR_INFO),
+					    rd(gmu.base + GMU_AO_HOST_INTERRUPT_STATUS));
+				}
+			}
 			return;
 		}
 		if (!by_itself) {

@@ -51,6 +51,8 @@ CONFIG_HAKIOS_SOCINFO=y
 
 # the Adreno 642L of the SC7280 woken step by step (adreno=N), and HakiosGPU, the IOKit service Mesa, Metal and the ... [hakios.adreno.c, hakios.gpu.cpp]
 CONFIG_HAKIOS_ADRENO=y
+# HakiosGPU, the IOKit service the GPU drivers keep the GPU for [hakios.gpu.cpp]
+CONFIG_HAKIOS_GPUSERVICE=y
 
 # the vibration motor: an Awinic AW86927 driving a linear resonant actuator (haptic=N), its waveforms from fw-haptic/ [hakios.haptic.c]
 CONFIG_HAKIOS_HAPTIC=y

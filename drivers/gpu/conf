@@ -2,13 +2,19 @@
 # CONFIG_HAKIOS_<NAME>=y in a defconfig builds a driver into the kernel; "standard" files are always built.
 # tools/hakios-config.py reads this file; docs/drivers-config.md says what each word means and how it reaches XNU.
 
+driver GPUSERVICE
+	file    iokit/Kernel/hakios.gpu.cpp iokitcpp
+	help    HakiosGPU, the IOKit service Mesa, Metal and the window server draw through; started by the GPU driver
+	help    built with it (ADRENO or A630) once the GPU is kept on (gpu=1)
+
 driver ADRENO
 	file    bsd/dev/hakios.adreno.c
-	file    iokit/Kernel/hakios.gpu.cpp iokitcpp
+	requires GPUSERVICE
 	help    the Adreno 642L of the SC7280 woken step by step (adreno=N), and HakiosGPU, the IOKit service Mesa, Metal and
 	help    the window server draw through (gpu=1, adreno_keep=1; docs/reference/metal.md). Needs the GPU's firmware from the phone (fw-gpu/)
 
 driver A630
 	file    bsd/dev/hakios.a630.c
+	requires GPUSERVICE
 	help    the OnePlus 6T's Adreno 630 (SDM845): the port of the ADRENO driver's steps (adreno=N), so far the first ones;
-	help    the same boot-args and entry points, so not built together with ADRENO. No HakiosGPU service yet
+	help    the same boot-args and entry points, so not built together with ADRENO

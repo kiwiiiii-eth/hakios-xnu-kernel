@@ -234,6 +234,16 @@ option(const char *name)
 	return PE_parse_boot_argn(name, &value, sizeof(value)) && value != 0;
 }
 
+/* (on unless name=0) */
+static bool
+option_default_on(const char *name)
+{
+	uint32_t value = 1;
+
+	PE_parse_boot_argn(name, &value, sizeof(value));
+	return value != 0;
+}
+
 /* ---- register access (as in hakios.wifi.c) ------------------------------------------------------- */
 
 static uint32_t __attribute__((noinline))
@@ -601,6 +611,95 @@ show_crash_reason(void)
 	} else {
 		printf("mpss: %u: THE MODEM'S LAST WORDS (item %u, %u bytes): \"%s\"\n", step, ITEM_CRASH_REASON, size, text);
 	}
+}
+
+/* ---- a black box that outlives the CrashDump (6T, 11-11) ------------------------------------------------ */
+
+/*
+ * The live log reaches the host every few seconds, so the last second before the phone goes to CrashDump is
+ * never seen. These lines go to RAM as well, at 0xa0100000 (inside U-Boot r6's hakios-mdata@a0000000: 2M,
+ * no-map, mapped FAULT by U-Boot, past the header's 16K), which a warm reset keeps: the next run's step 1
+ * says them before anything else, then clears them. modem_blackbox=0: not kept.
+ */
+#define BLACKBOX_PHYS           0xa0100000u
+#define BLACKBOX_SIZE           0x10000u
+#define BLACKBOX_MAGIC          0x48424b48u     /* "HKBH" */
+
+static volatile char *blackbox;                 /* +0 magic, +4 bytes used, +8 run's epoch, +16 the lines */
+
+static void
+bb_say(const char *format, ...)
+{
+	char line[192];
+	va_list arguments;
+	uint32_t used, n;
+
+	va_start(arguments, format);
+	n = (uint32_t)vsnprintf(line, sizeof(line), format, arguments);
+	va_end(arguments);
+	if (n >= sizeof(line)) {
+		n = sizeof(line) - 1;
+	}
+	if (!leaving) {
+		printf("mpss: bb: %s", line);
+	}
+	if (blackbox == NULL) {
+		return;
+	}
+	used = *(volatile uint32_t *)(blackbox + 4);
+	if (used > BLACKBOX_SIZE - 16 || used + n > BLACKBOX_SIZE - 16) {
+		return;
+	}
+	for (uint32_t i = 0; i < n; i++) {
+		blackbox[16 + used + i] = line[i];
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+	*(volatile uint32_t *)(blackbox + 4) = used + n;
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+
+/* Step 1: what the run before left, said; then a fresh box for this one. */
+static void
+bb_open(void)
+{
+	uint32_t magic, used, epoch = 0;
+
+	if (!option_default_on("modem_blackbox")) {
+		return;
+	}
+	blackbox = (volatile char *)ml_io_map_unmappable(BLACKBOX_PHYS, BLACKBOX_SIZE, VM_WIMG_WCOMB);
+	magic = *(volatile uint32_t *)blackbox;
+	used = *(volatile uint32_t *)(blackbox + 4);
+	if (magic == BLACKBOX_MAGIC && used <= BLACKBOX_SIZE - 16) {
+		char line[200];
+		uint32_t at = 0, l = 0;
+
+		tell("mpss: THE BLACK BOX OF THE RUN BEFORE (%u bytes, its epoch %u):\n", used, *(volatile uint32_t *)(blackbox + 8));
+		for (uint32_t i = 0; i < used; i++) {
+			char c = blackbox[16 + i];
+
+			if (c == '\n' || l == sizeof(line) - 1) {
+				line[l] = 0;
+				printf("mpss: bb<  %s\n", line);
+				l = 0;
+				at++;
+				continue;
+			}
+			line[l++] = (c >= 32 && c < 127) ? c : '.';
+		}
+		if (l != 0) {
+			line[l] = 0;
+			printf("mpss: bb<  %s\n", line);
+		}
+		(void)at;
+	} else {
+		printf("mpss: the black box at %#x: nothing of a run before (magic %#x)\n", BLACKBOX_PHYS, magic);
+	}
+	PE_parse_boot_argn("epoch", &epoch, sizeof(epoch));
+	*(volatile uint32_t *)(blackbox + 4) = 0;
+	*(volatile uint32_t *)(blackbox + 8) = epoch;
+	*(volatile uint32_t *)blackbox = BLACKBOX_MAGIC;
+	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
 /* ---- the doorbells, and the mailbox to the always-on processor (hakios.wifi.c, steps 2 and 7) ------ */
@@ -1064,6 +1163,7 @@ step_survey(void)
 	struct smp2p words;
 	uint32_t size = 0;
 
+	bb_open();
 	announce("read our partition with the modem in the shared memory, and its items");
 	printf("mpss: %u: the shared memory at %#x\n", step, smem_phys);
 	show_partition();
@@ -6478,7 +6578,7 @@ alive(const char *after)
 {
 	for (uint32_t i = 1; i <= tick_seconds; i++) {
 		sleep_ms(1000);
-		printf("mpss: %u: alive %u s after %s%s\n", step, i, after, mss_iface_on ? "" : "");
+		bb_say("%u: alive %u s after %s\n", step, i, after);
 		if (mss_iface_on && mss_active) {
 			printf("mpss: %u:   RMB PBL %#x, MBA status %#x, MSS status %#x\n", step, rd(rmb.base + RMB_PBL_STATUS),
 			    rd(rmb.base + RMB_MBA_STATUS), rd(rmb.base + RMB_MBA_MSS_STATUS));
@@ -6601,6 +6701,7 @@ step_mba(void)
 	rails_asked = true;
 	mss_touched = true;
 	announce("(5a) the rails are asked for; next the prng vote and the iface and snoc_axi clocks");
+	bb_say("5: %s\n", "(5a) the rails are asked for; next the prng vote and the iface and snoc_axi clocks");
 	/* proxy and reset clocks (xo is the always-on oscillator, held by this processor while it runs) */
 	vote(VOTE_PRNG, true);
 	branch(GCC_MSS_CFG_AHB, "iface", 0, true, true);
@@ -6614,8 +6715,10 @@ step_mba(void)
 	branch(GCC_MSS_SNOC_AXI, "snoc_axi", 1, true, true);
 	rmb_show("before its reset is let go");
 	announce("(5b) its reset clocks run; next its reset let go (PDC sync reset, RMB alt reset, AOSS MSS restart)");
+	bb_say("5: %s\n", "(5b) its reset clocks run; next its reset let go (PDC sync reset, RMB alt reset, AOSS MSS restart)");
 	mss_reset(true);
 	announce("(5c) its reset is let go; next the bus, mem, gpll0_mss and mnoc_axi clocks");
+	bb_say("5: %s\n", "(5c) its reset is let go; next the bus, mem, gpll0_mss and mnoc_axi clocks");
 	/* active clocks */
 	branch(GCC_MSS_Q6_MEMNOC_AXI, "bus", 2, true, false);
 	vote(VOTE_BOOT_ROM | VOTE_MSS_GPLL0_DIV, true);
@@ -6623,6 +6726,7 @@ step_mba(void)
 	mss_active = true;
 	rmb_show("its reset let go, its clocks on");
 	announce("(5d) its clocks run; next its memory and the MBA's handed to it by the hypervisor");
+	bb_say("5: %s\n", "(5d) its clocks run; next its memory and the MBA's handed to it by the hypervisor");
 	if (!mem_assign("the modem's memory handed to it (the MBA may clear it)", mpss_memory, MPSS_MEMORY_SIZE, &mpss_owners,
 	    OWNER_MSA)) {
 		goto out;
@@ -6633,6 +6737,7 @@ step_mba(void)
 	}
 	alive("the MBA's memory was handed to it");
 	announce("(5e) the memory is the modem's; next RMB_MBA_IMAGE and its boot ROM started");
+	bb_say("5: %s\n", "(5e) the memory is the modem's; next RMB_MBA_IMAGE and its boot ROM started");
 	put(&rmb, "MBA image", RMB_MBA_IMAGE, mba_phys);
 	alive("RMB_MBA_IMAGE");
 	/* q6v5proc_reset(), MSS_SDM845 */
@@ -6648,7 +6753,7 @@ step_mba(void)
 	put(&qdsp6, "boot core start", QDSP6SS_BOOT_CORE_START, 1);
 	alive("BOOT_CORE_START");
 	put(&qdsp6, "boot command", QDSP6SS_BOOT_CMD, 1);
-	printf("mpss: %u: the boot command is given\n", step);
+	bb_say("5: the boot command is given\n");
 	dsp_started = true;                     /* (from here on, stopping it is dsp_shutdown()) */
 	stopped_by_its_word = false;
 	status = rmb_wait(RMB_MBA_MSS_STATUS, 1, 10, &took);
@@ -6695,8 +6800,45 @@ step_mba(void)
 	put(&rmb, "meta data", RMB_PMI_META_DATA, mdata_phys);
 	alive("RMB_PMI_META_DATA");
 	put(&rmb, "MBA command", RMB_MBA_COMMAND, RMB_CMD_META_DATA_READY);
-	printf("mpss: %u: the MBA is told the header is ready\n", step);
-	status = rmb_wait(RMB_MBA_STATUS, MBA_META_DATA_AUTH_SUCCESS, 1000, &took);
+	bb_say("5: the MBA is told the header is ready (at %#x)\n", mdata_phys);
+	{
+		/* every 200 us for a second: RMB and the modem's last words, into the box when they change, and every 100 ms */
+		uint64_t began = now_us(), said = 0;
+		uint32_t last[3] = { ~0u, ~0u, ~0u };
+		bool words = false;
+
+		status = 0;
+		while (now_us() - began < 1000000) {
+			uint32_t now[3] = { rd(rmb.base + RMB_PBL_STATUS), rd(rmb.base + RMB_MBA_STATUS), rd(rmb.base + RMB_MBA_MSS_STATUS) };
+			uint64_t t = now_us() - began;
+
+			status = (int32_t)now[1];
+			if (memcmp(now, last, sizeof(now)) != 0 || t - said >= 100000) {
+				bb_say("5: +%llu us: PBL %#x, MBA %#x, MSS %#x\n", t, now[0], now[1], now[2]);
+				memcpy(last, now, sizeof(now));
+				said = t;
+			}
+			if (!words) {
+				uint32_t size = 0, at = smem_item(ITEM_CRASH_REASON, &size);
+
+				if (at != 0 && size != 0) {
+					char text[97];
+
+					bzero(text, sizeof(text));
+					smem_peek(at, text, size < sizeof(text) - 1 ? size : sizeof(text) - 1);
+					if (text[0] != 0) {
+						bb_say("5: +%llu us: THE MODEM'S LAST WORDS: %s\n", t, text);
+						words = true;
+					}
+				}
+			}
+			if (status < 0 || status == MBA_META_DATA_AUTH_SUCCESS) {
+				break;
+			}
+			sleep_us(200);
+		}
+		took = now_us() - began;
+	}
 	printf("mpss: %u: %s: the MBA says %d after %llu ms\n", step, status == MBA_META_DATA_AUTH_SUCCESS ?
 	    "THE MBA HAS AUTHENTICATED THE HEADER" : "THE HEADER IS NOT AUTHENTICATED", status, took / 1000);
 	if (!mem_assign("the header taken back", mdata_phys, (uint32_t)image.header_size, &mdata_owners, OWNER_HLOS)) {

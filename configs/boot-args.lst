@@ -160,6 +160,7 @@ m2v_utrace	u
 machine_name	k
 membench	k
 cpufreq_gov	k
+dsibl	k
 metal	ku
 metal_all	u
 metal_defer	u

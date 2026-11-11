@@ -28,6 +28,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <dispatch/dispatch.h>
+#include <math.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -1095,6 +1096,189 @@ utf8(id string)
 	return string != NULL ? ((const char *(*)(id, SEL))objc_msgSend)(string, sel_registerName("UTF8String")) : "(nil)";
 }
 
+/* ---- backboardd: the brightness slider, to the OnePlus 6T's panel ------------------------------------ */
+
+/*
+ * CoreBrightness (in backboardd) is told the brightness the user wants -- Control Center's slider, Settings --
+ * through -setProperty:forKey: of its brightness system, and on an iPhone it then sets the backlight's IOKit service.
+ * There is none here; on the OnePlus 6T the kernel's DSIBL driver sends the panel its brightness instead (sysctl
+ * kern.hakios.brightness, 0..1023). So the property "DisplayBrightness" (0..1, the slider's own scale) is caught on its
+ * way in, mapped to the panel's (gamma 2.2: the slider is perceptual, the panel's value linear in light), and handed
+ * to the kernel; the call goes on as it was. The first calls of every key are said in the log, to learn the protocol.
+ * Nothing happens on a kernel without the sysctl (it fails quietly after one line).
+ */
+static IMP orig_bs_set_property[2];
+static unsigned bs_said, bs_last = 0xffffffffu, bs_got_said;
+static double bs_level = -1;          /* the last level asked for, 0..1; -1 before any */
+static IMP orig_bs_copy_property[2];
+
+static double
+bs_number(CFTypeRef value, bool *found)
+{
+	double d = 0;
+
+	*found = false;
+	if (value == NULL) {
+		return 0;
+	}
+	if (CFGetTypeID(value) == CFNumberGetTypeID()) {
+		*found = CFNumberGetValue((CFNumberRef)value, kCFNumberDoubleType, &d);
+	} else if (CFGetTypeID(value) == CFDictionaryGetTypeID()) {
+		static const CFStringRef keys[] = { CFSTR("Brightness"), CFSTR("DisplayBrightness"), CFSTR("Value") };
+
+		for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]) && !*found; i++) {
+			CFTypeRef inner = CFDictionaryGetValue((CFDictionaryRef)value, keys[i]);
+
+			if (inner != NULL && CFGetTypeID(inner) == CFNumberGetTypeID()) {
+				*found = CFNumberGetValue((CFNumberRef)inner, kCFNumberDoubleType, &d);
+			} else if (inner != NULL && CFGetTypeID(inner) == CFStringGetTypeID()) {
+				d = CFStringGetDoubleValue((CFStringRef)inner);   /* (Control Center's slider: {Brightness = "0.50"; Commit = 0}) */
+				*found = true;
+			}
+		}
+	}
+	return d;
+}
+
+static void
+bs_set_property(id self, SEL selector, id value, id key, unsigned which)
+{
+	char name[64] = { 0 };
+
+	if (key != NULL && CFGetTypeID((CFTypeRef)key) == CFStringGetTypeID()) {
+		CFStringGetCString((CFStringRef)key, name, sizeof(name), kCFStringEncodingUTF8);
+	}
+	if (bs_said < 40) {
+		bs_said++;
+		say("hakios: brightness: %s %s = %s\n", which ? "BrightnessSystem" : "BrightnessSystemClient", name,
+		    value != NULL ? utf8(((id (*)(id, SEL))objc_msgSend)(value, sel_registerName("description"))) : "(nil)");
+	}
+	if (strcmp(name, "DisplayBrightness") == 0) {
+		bool found;
+		double level = bs_number((CFTypeRef)value, &found);
+
+		if (found) {
+			int raw;
+
+			level = level < 0 ? 0 : level > 1 ? 1 : level;
+			bs_level = level;
+			raw = (int)(1023.0 * pow(level, 2.2) + 0.5);
+			raw = raw < 4 ? 4 : raw;
+			if ((unsigned)raw != bs_last) {
+				if (sysctlbyname("kern.hakios.brightness", NULL, NULL, &raw, sizeof(raw)) == 0) {
+					bs_last = (unsigned)raw;
+				} else if (bs_last == 0xffffffffu) {
+					say("hakios: brightness: the kernel takes none (kern.hakios.brightness: %s)\n", strerror(errno));
+					bs_last = 0xfffffffeu;
+				}
+			}
+		}
+	}
+	((void (*)(id, SEL, id, id))orig_bs_set_property[which])(self, selector, value, key);
+}
+
+static void
+bs_set_property_client(id self, SEL selector, id value, id key)
+{
+	bs_set_property(self, selector, value, key, 0);
+}
+
+static void
+bs_set_property_system(id self, SEL selector, id value, id key)
+{
+	bs_set_property(self, selector, value, key, 1);
+}
+
+/*
+ * ... and on its way out: a slider that asked for a level was pulled back to the old one when it let go (11-11), the
+ * brightness system answering from what it believes the (absent) backlight to be. Once a level has been asked for,
+ * "DisplayBrightness" answers it, in the shape the original answer had (a number, or a dictionary whose "Brightness"
+ * is set). The first answers of every key are said in the log.
+ */
+static id
+bs_copy_property(id self, SEL selector, id key, unsigned which)
+{
+	id answer = ((id (*)(id, SEL, id))orig_bs_copy_property[which])(self, selector, key);
+	char name[64] = { 0 };
+
+	if (key != NULL && CFGetTypeID((CFTypeRef)key) == CFStringGetTypeID()) {
+		CFStringGetCString((CFStringRef)key, name, sizeof(name), kCFStringEncodingUTF8);
+	}
+	if (bs_got_said < 30) {
+		bs_got_said++;
+		say("hakios: brightness: %s gives %s = %s\n", which ? "BrightnessSystem" : "BrightnessSystemClient", name,
+		    answer != NULL ? utf8(((id (*)(id, SEL))objc_msgSend)(answer, sel_registerName("description"))) : "(nil)");
+	}
+	if (strcmp(name, "CBBrightnessControlAvailable") == 0 && answer == NULL) {
+		/* Control Center asks this before it lets its slider be moved: with no backlight there is no answer (11-11) */
+		return (id)CFRetain(kCFBooleanTrue);
+	}
+	if (bs_level >= 0 && strcmp(name, "DisplayBrightness") == 0 && answer != NULL) {
+		id number = ((id (*)(id, SEL, double))objc_msgSend)((id)objc_getClass("NSNumber"), sel_registerName("numberWithDouble:"),
+		    bs_level);
+
+		if (CFGetTypeID((CFTypeRef)answer) == CFNumberGetTypeID()) {
+			((void (*)(id, SEL))objc_msgSend)(answer, sel_registerName("release"));
+			answer = ((id (*)(id, SEL))objc_msgSend)(number, sel_registerName("retain"));
+		} else if (CFGetTypeID((CFTypeRef)answer) == CFDictionaryGetTypeID()) {
+			id copy = ((id (*)(id, SEL))objc_msgSend)(answer, sel_registerName("mutableCopy"));
+
+			((void (*)(id, SEL, id, id))objc_msgSend)(copy, sel_registerName("setObject:forKey:"), number,
+			    (id)CFSTR("Brightness"));
+			((void (*)(id, SEL))objc_msgSend)(answer, sel_registerName("release"));
+			answer = copy;
+		}
+	}
+	return answer;
+}
+
+static id
+bs_copy_property_client(id self, SEL selector, id key)
+{
+	return bs_copy_property(self, selector, key, 0);
+}
+
+static id
+bs_copy_property_system(id self, SEL selector, id key)
+{
+	return bs_copy_property(self, selector, key, 1);
+}
+
+static void
+brightness_bridge(void)
+{
+	/* CoreBrightness is loaded a moment after the start: look for its classes for half a minute */
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+		static const char *const classes[2] = { "BrightnessSystemClient", "BrightnessSystem" };
+		static const IMP ours[2] = { (IMP)bs_set_property_client, (IMP)bs_set_property_system };
+		static const IMP ours_get[2] = { (IMP)bs_copy_property_client, (IMP)bs_copy_property_system };
+		bool done[2] = { false, false };
+
+		for (int tries = 0; tries < 60 && !(done[0] && done[1]); tries++) {
+			for (unsigned i = 0; i < 2; i++) {
+				Class cls = done[i] ? NULL : objc_getClass(classes[i]);
+				Method method = cls ? class_getInstanceMethod(cls, sel_registerName("setProperty:forKey:")) : NULL;
+
+				if (method != NULL) {
+					Method getter = class_getInstanceMethod(cls, sel_registerName("copyPropertyForKey:"));
+
+					orig_bs_set_property[i] = method_setImplementation(method, ours[i]);
+					if (getter != NULL) {
+						orig_bs_copy_property[i] = method_setImplementation(getter, ours_get[i]);
+					}
+					done[i] = true;
+					say("hakios: brightness: -[%s setProperty:forKey:] caught%s\n", classes[i],
+					    getter != NULL ? ", and -copyPropertyForKey:" : "");
+				}
+			}
+			usleep(500000);
+		}
+		if (!done[0] && !done[1]) {
+			say("hakios: brightness: no brightness system found\n");
+		}
+	});
+}
+
 static id
 metallib_answer(id self, id name, id extension, id found)
 {
@@ -1220,6 +1404,7 @@ hakios_init(void)
 		}
 		opengl_es();
 		window_server_fixes();
+		brightness_bridge();            /* (the OnePlus 6T: the slider to the panel, through kern.hakios.brightness) */
 		/*
 		 * brightness_fixes() is not used for now: with it backboardd no longer took our touch
 		 * screen service for its own ("still waiting for a main screen digitizer"), whether the

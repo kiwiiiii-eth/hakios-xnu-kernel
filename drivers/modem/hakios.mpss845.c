@@ -6232,8 +6232,10 @@ nas_stop(void)
 #define MBA_PHYS_DEFAULT        0x96600000u     /* 6T: reserved-memory mba_region@0x96600000 (the phone's own tree; mainline 0x96500000) */
 #define MBA_SIZE                0x00200000u
 #define MBA_MAX                 0x00100000u     /* Linux: "MBA is restricted to a maximum size of 1M" */
-#define MDATA_PHYS_DEFAULT      0x95c00000u     /* the last megabyte of video_region@0x95800000 (the video DSP is never started here); within
-                                                   U-Boot r5's carve-out 0x8c400000..0x97c00000, as everything handed to the modem must be */
+#define MDATA_PHYS_DEFAULT      0xa0000000u     /* plain RAM, as Linux's mdata_mem (sdm845.dtsi: in 0xa0000000..0xc0000000, no-map);
+                                                   U-Boot r6 reserves it (hakios-mdata@a0000000, no-map) and maps it FAULT. Not a
+                                                   subsystem's region: at 0x95c00000 (video) and 0x9f780000 (splash) the modem's
+                                                   own read of the header put the phone in CrashDump (runs of 11-11) */
 #define MDATA_SIZE              0x4000u
 static uint32_t mba_phys = MBA_PHYS_DEFAULT, mdata_phys = MDATA_PHYS_DEFAULT;
 
@@ -6468,16 +6470,37 @@ mss_reclaim(void)
 	}
 }
 
+/* modem_tick=S (default 0): after each of the boot's actions, S seconds of "alive" once a second, for the live log */
+static uint32_t tick_seconds;
+
+static void
+alive(const char *after)
+{
+	for (uint32_t i = 1; i <= tick_seconds; i++) {
+		sleep_ms(1000);
+		printf("mpss: %u: alive %u s after %s%s\n", step, i, after, mss_iface_on ? "" : "");
+		if (mss_iface_on && mss_active) {
+			printf("mpss: %u:   RMB PBL %#x, MBA status %#x, MSS status %#x\n", step, rd(rmb.base + RMB_PBL_STATUS),
+			    rd(rmb.base + RMB_MBA_STATUS), rd(rmb.base + RMB_MBA_MSS_STATUS));
+		}
+	}
+}
+
 static int32_t
 rmb_wait(uint32_t offset, int32_t want, uint32_t ms, uint64_t *took)
 {
-	uint64_t began = now_us();
+	uint64_t began = now_us(), said = began;
 	int32_t value = 0;
 
 	for (;;) {
 		value = (int32_t)rd(rmb.base + offset);
 		if (value < 0 || (want == 0 && value != 0) || (want != 0 && value == want) || now_us() - began > ms * 1000ull) {
 			break;
+		}
+		if (tick_seconds && now_us() - said >= 1000000) {
+			said = now_us();
+			printf("mpss: %u: waiting at RMB +%#x for %d: %d after %llu ms (PBL %#x, MBA %#x, MSS %#x)\n", step, offset, want, value,
+			    (said - began) / 1000, rd(rmb.base + RMB_PBL_STATUS), rd(rmb.base + RMB_MBA_STATUS), rd(rmb.base + RMB_MBA_MSS_STATUS));
 		}
 		sleep_us(200);
 	}
@@ -6559,6 +6582,7 @@ step_mba(void)
 		return false;
 	}
 	PE_parse_boot_argn("modem_mba", &mba_phys, sizeof(mba_phys));
+	PE_parse_boot_argn("modem_tick", &tick_seconds, sizeof(tick_seconds));
 	PE_parse_boot_argn("modem_mdata", &mdata_phys, sizeof(mdata_phys));
 	announce("the MBA: mba.mbn into its memory; the always-on processor told \"modem: on\", RPMh asked for CX, MX and MSS; the "
 	    "modem's clocks on and its reset let go; its memory and the MBA's handed to it; its boot ROM started, and the MBA "
@@ -6600,11 +6624,17 @@ step_mba(void)
 	rmb_show("its reset let go, its clocks on");
 	announce("(5d) its clocks run; next its memory and the MBA's handed to it by the hypervisor");
 	if (!mem_assign("the modem's memory handed to it (the MBA may clear it)", mpss_memory, MPSS_MEMORY_SIZE, &mpss_owners,
-	    OWNER_MSA) || !mem_assign("the MBA's memory handed to the modem", mba_phys, MBA_SIZE, &mba_owners, OWNER_MSA)) {
+	    OWNER_MSA)) {
 		goto out;
 	}
+	alive("the modem's memory was handed to it");
+	if (!mem_assign("the MBA's memory handed to the modem", mba_phys, MBA_SIZE, &mba_owners, OWNER_MSA)) {
+		goto out;
+	}
+	alive("the MBA's memory was handed to it");
 	announce("(5e) the memory is the modem's; next RMB_MBA_IMAGE and its boot ROM started");
 	put(&rmb, "MBA image", RMB_MBA_IMAGE, mba_phys);
+	alive("RMB_MBA_IMAGE");
 	/* q6v5proc_reset(), MSS_SDM845 */
 	put(&qdsp6, "sleep clock", QDSP6SS_SLEEP, rd(qdsp6.base + QDSP6SS_SLEEP) | CBCR_ENABLE);
 	for (unsigned i = 0; i < 200 && ((value = rd(qdsp6.base + QDSP6SS_SLEEP)) & CBCR_OFF); i++) {
@@ -6614,8 +6644,11 @@ step_mba(void)
 		printf("mpss: %u: THE QDSP6'S SLEEP CLOCK DOES NOT RUN (%#x)\n", step, value);
 		goto out;
 	}
+	alive("the QDSP6's sleep clock");
 	put(&qdsp6, "boot core start", QDSP6SS_BOOT_CORE_START, 1);
+	alive("BOOT_CORE_START");
 	put(&qdsp6, "boot command", QDSP6SS_BOOT_CMD, 1);
+	printf("mpss: %u: the boot command is given\n", step);
 	dsp_started = true;                     /* (from here on, stopping it is dsp_shutdown()) */
 	stopped_by_its_word = false;
 	status = rmb_wait(RMB_MBA_MSS_STATUS, 1, 10, &took);
@@ -6626,6 +6659,7 @@ step_mba(void)
 	}
 	status = rmb_wait(RMB_PBL_STATUS, 0, 1000, &took);
 	printf("mpss: %u: the boot ROM (PBL) says %d after %llu ms%s\n", step, status, took / 1000, status == 1 ? ": SUCCESS" : "");
+	alive("the boot ROM's word");
 	if (status != 1) {
 		goto out;
 	}
@@ -6635,8 +6669,11 @@ step_mba(void)
 	if (status != MBA_XPU_UNLOCKED && status != MBA_XPU_UNLOCKED_SCRIBBLED) {
 		goto out;
 	}
+	alive("the MBA's word");
 	/* q6v5_mpss_load()'s start, and q6v5_mpss_init_image() */
 	put(&rmb, "code length", RMB_PMI_CODE_LENGTH, 0);
+	printf("mpss: %u: (5f) the header (%llu bytes) into its memory at %#x, through a mapping of ours taken away after\n", step,
+	    image.header_size, mdata_phys);
 	if (image.header_size > MDATA_SIZE) {
 		printf("mpss: %u: the header (%llu bytes) does not fit its %#x bytes\n", step, image.header_size, MDATA_SIZE);
 		goto out;
@@ -6650,11 +6687,15 @@ step_mba(void)
 		settle();
 		ml_io_unmap((vm_offset_t)window, MDATA_SIZE);
 	}
+	alive("the header was written (our mapping of it gone)");
 	if (!mem_assign("the header handed to the modem", mdata_phys, (uint32_t)image.header_size, &mdata_owners, OWNER_MSA)) {
 		goto out;
 	}
+	alive("the header's memory was handed to the modem");
 	put(&rmb, "meta data", RMB_PMI_META_DATA, mdata_phys);
+	alive("RMB_PMI_META_DATA");
 	put(&rmb, "MBA command", RMB_MBA_COMMAND, RMB_CMD_META_DATA_READY);
+	printf("mpss: %u: the MBA is told the header is ready\n", step);
 	status = rmb_wait(RMB_MBA_STATUS, MBA_META_DATA_AUTH_SUCCESS, 1000, &took);
 	printf("mpss: %u: %s: the MBA says %d after %llu ms\n", step, status == MBA_META_DATA_AUTH_SUCCESS ?
 	    "THE MBA HAS AUTHENTICATED THE HEADER" : "THE HEADER IS NOT AUTHENTICATED", status, took / 1000);

@@ -107,7 +107,7 @@ void hakios_adsp_stop(void) {}
 void hakios_adsp_quiesce(void) {}
 #endif
 
-#ifndef HAKIOS_MODEM
+#if !defined(HAKIOS_MODEM) && !defined(HAKIOS_MPSS845)
 void hakios_mpss_init(void) {}
 void hakios_mpss_stop(void) {}
 void hakios_mpss_quiesce(void) {}

@@ -69,8 +69,14 @@ CONFIG_HAKIOS_BUTTONS=y
 # QMI messages over the IPC router: how the Wi-Fi firmware's service and the modem's are spoken to [hakios.qmi.c]
 CONFIG_HAKIOS_QMI=y
 
-# the modem (modem=1): started, its file systems served from the flash, the IPA's data path as en1, the SIM and the ... [hakios.mpss.c, hakios.cell.c, hakios.nas.c, hakios.ipa.c; requires CONFIG_HAKIOS_QMI, CONFIG_HAKIOS_UFS]
+# what both modems' drivers use: the IPA's data path as en1, the network registration (NAS) [hakios.cell.c, hakios.nas.c, hakios.ipa.c; requires CONFIG_HAKIOS_QMI]
+CONFIG_HAKIOS_CELL=y
+
+# the modem (modem=1): started, its file systems served from the flash, the IPA's data path as en1, the SIM and the ... [hakios.mpss.c; requires CONFIG_HAKIOS_QMI, CONFIG_HAKIOS_UFS, CONFIG_HAKIOS_CELL]
 CONFIG_HAKIOS_MODEM=y
+
+# the SDM845's modem (OnePlus 6T): the reference phone's driver made the 6T's (modem_step=N) [hakios.mpss845.c; requires CONFIG_HAKIOS_QMI, CONFIG_HAKIOS_UFS, CONFIG_HAKIOS_CELL]
+# CONFIG_HAKIOS_MPSS845 is not set
 
 # QEMU's virtio network device as the link behind en0 (virtio_net=1). QEMU only [hakios.virtio_net.c]
 CONFIG_HAKIOS_VIRTIO_NET=y

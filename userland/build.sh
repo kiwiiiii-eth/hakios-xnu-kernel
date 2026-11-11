@@ -686,10 +686,16 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	# This stages the files; a separate XNU MPSS driver is still required to start the modem.
 	if [ -n "$MODEM" ]; then
 		[ -f ../fw-modem/modem.mdt ] || { echo "build.sh: MODEM=1 needs ../fw-modem/modem.mdt" >&2; exit 1; }
-		../devices/redwood/tools/modem_firmware.py --dtb ../devices/redwood/prebuilt/device-tree.dtb --firmware-dir ../fw-modem \
-			--node /soc/qcom,mss@4080000 >/dev/null
+		if [ -x ../devices/redwood/tools/modem_firmware.py ] && [ -f ../devices/redwood/prebuilt/device-tree.dtb ]; then
+			../devices/redwood/tools/modem_firmware.py --dtb ../devices/redwood/prebuilt/device-tree.dtb --firmware-dir ../fw-modem \
+				--node /soc/qcom,mss@4080000 >/dev/null
+		else
+			# (the OnePlus 6T, 11-11: no checking tool for it here; the kernel checks the segments against the header)
+			echo "build.sh: MODEM=1: no modem_firmware.py for this device; the firmware is staged unchecked" >&2
+		fi
 		mkdir -p sysroot/fw
 		cp ../fw-modem/modem.mdt ../fw-modem/modem.b[0-9][0-9] sysroot/fw/
+		if [ -f ../fw-modem/mba.mbn ]; then cp ../fw-modem/mba.mbn sysroot/fw/; fi   # (SDM845's self-authenticating modem: its MBA)
 		# ... and the firmware partition's image/ (its mcfg configurations and the registry's *.jsn, pulled from
 		# the phone's /vendor/firmware_mnt/image into ../fw-modem/image), which the modem reads over TFTP (hakios.mpss.c)
 		if [ -d ../fw-modem/image ]; then

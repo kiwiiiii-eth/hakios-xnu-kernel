@@ -62,6 +62,10 @@ void hakios_virtio_blk_init(void) {}
 bool hakios_virtio_blk_dev(__unused dev_t dev) { return false; }
 #endif
 
+#ifndef HAKIOS_FG8998
+void hakios_fg8998_init(void) {}
+#endif
+
 #ifndef HAKIOS_BATTERY
 void hakios_battery_init(void) {}
 int hakios_battery_temperature(void) { return -273; }      /* "not known", as the driver says before its first reading */

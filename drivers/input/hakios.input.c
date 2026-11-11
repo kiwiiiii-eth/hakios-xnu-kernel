@@ -287,6 +287,7 @@ hakios_input_init(void)
 	hakios_rmi4_init();
 	hakios_buttons_init();
 	hakios_battery_init();
+	hakios_fg8998_init();
 	hakios_ufs_init();
 	hakios_net_init();
 	hakios_adreno_init();

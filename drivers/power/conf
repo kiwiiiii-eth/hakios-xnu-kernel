@@ -24,3 +24,9 @@ driver PMIC
 driver BATTGUARD
 	file    bsd/dev/hakios.battguard.c
 	help    the run handed back to the loader before the battery is flat (battery_stop=<percent>)
+
+driver FG8998
+	file    bsd/dev/hakios.fg8998.c
+	requires BATTERY BUTTONS
+	help    the OnePlus 6T's battery: the PMI8998's fuel gauge and charger read through the PMIC arbiter (fg8998=0: off);
+	help    read only, handed to the BATTERY driver's power source

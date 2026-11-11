@@ -1,6 +1,6 @@
 /*
  * THE ONEPLUS 6T (fajita, SDM845) PORT of drivers/gpu/hakios.adreno.c: its GPU is an Adreno 630 (chip id 0x06030000 in
- * the phone's own device tree), where the reference phone's is a 642L. Ported so far: steps 1 to 17 (A630_PORTED_STEPS below);
+ * the phone's own device tree), where the reference phone's is a 642L. Ported so far: steps 1 to 22, all of them (A630_PORTED_STEPS below); gpu=1 still waits for the HakiosGPU service;
  * asking for more stops at the last ported step, and gpu=1 is refused, until the rest has been made to work here. The
  * 6T's addresses are from its own device tree (LineageOS 22.2's fajita DTB: qcom,kgsl-3d0@5000000, qcom,gmu with
  * 0x506a000 and the PDC at 0xb200000, qcom,kgsl-iommu at 0x5040000, qcom,gpucc@5090000, qcom,gdsc@0x509106c) and Linux's
@@ -119,8 +119,8 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
  * The steps made to work on the 6T, a bit each (bit 1 = step 1): 1 to 3, and TrustZone's (11, 12), which need no power
  * in the GPU block and say early whether the zap shader is this phone's. The others are left out, whatever is asked.
  */
-#define A630_PORTED_STEPS       0x3fffeu       /* 1 to 17 */
-#define A630_LAST_PORTED        17
+#define A630_PORTED_STEPS       0x7ffffeu      /* 1 to 22: all */
+#define A630_LAST_PORTED        22
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
@@ -2726,7 +2726,7 @@ step_core_space(void)
 {
 	const uint8_t *microcode;
 	uint64_t size = 0;
-	uint32_t stream1 = 1;
+	uint32_t stream1 = 0;           /* 6T: the A630 has no second command processor (LPAC): stream 0 alone */
 
 	if (!cx_ready() || !core_is_on) {
 		return false;
@@ -2789,7 +2789,7 @@ step_core_space(void)
  * (Step 21 is what tells whether the 3D core gets out of secure mode with it.) There was a
  * boot-arg adreno_zap=0 for the second and later runs of a started phone; nothing reads it now.
  */
-#define ZAP_MEMORY              0x8b71a000ull
+#define ZAP_MEMORY              0x8c415000ull   /* 6T: reserved-memory gpu_region@0x8c415000 (sdm845.dtsi gpu_mem) */
 #define ZAP_MEMORY_SIZE         0x2000u
 #define SCM_PAS_MEM_SETUP       SCM_CALL(2, 2)
 #define SCM_THREE_VALUES        3
@@ -2873,49 +2873,43 @@ step_core_start(void)
 	if (!cx_ready() || !core_is_on || !core_space_is_on) {
 		return false;
 	}
-	announce("write the 3D core's registers as Linux does before it starts the command processor: the first writes "
-	    "to the core itself");
-	put(&gbif, "halt", GBIF_HALT, 0);
-	put(&gpu, "rbbm_gbif_halt", RBBM_GBIF_HALT, 0);
+	announce("write the 3D core's registers as Linux's hw_init does for the A630, before it starts the command processor");
+	/* 6T: no GBIF to un-halt; the A630's values where they differ from redwood's (a6xx_gpu.c, a6xx_catalog.c, Mesa) */
 	put(&gpu, "rbbm_secvid_tsb_cntl", RBBM_SECVID_TSB_CNTL, 0);
 	put64(&gpu, "rbbm_secvid_tsb_trusted_base", RBBM_SECVID_TSB_TRUSTED_BASE, 0);
 	put(&gpu, "rbbm_secvid_tsb_trusted_size", RBBM_SECVID_TSB_TRUSTED_SIZE, 0);
 	for (unsigned i = 0; i < sizeof(address_modes) / sizeof(address_modes[0]); i++) {
 		put(&gpu, "address mode: 64 bits", GPU_WORD(address_modes[i]), 1);
 	}
-	for (unsigned i = 0; i < 4; i++) {
-		put(&gbif, "qsb_side", GBIF_QSB_SIDE0 + 4 * i, 0x00071620);
-	}
-	put(&gpu, "rbbm_gbif_client_qos_cntl", RBBM_GBIF_CLIENT_QOS_CNTL, 3);
+	put(&gpu, "rbbm_vbif_client_qos_cntl", GPU_WORD(0x0010), 3);
+	put(&gpu, "vbif_gate_off_wrreq_en", GPU_WORD(0x302a), 9);                /* the A630's */
 	put(&gpu, "rbbm_perfctr_gpu_busy_masked", RBBM_PERFCTR_GPU_BUSY_MASKED, 0xffffffff);
 	put64(&gpu, "uche_write_range_max", UCHE_WRITE_RANGE_MAX, 0x0001ffffffffffc0ull);
 	put64(&gpu, "uche_trap_base", UCHE_TRAP_BASE, 0x0001fffffffff000ull);
 	put64(&gpu, "uche_write_thru_base", UCHE_WRITE_THRU_BASE, 0x0001fffffffff000ull);
+	put64(&gpu, "uche_gmem_range_min", GPU_WORD(0x0e0b), 0x100000);           /* GMEM: 1M at 1M (the A630's gmem) */
+	put64(&gpu, "uche_gmem_range_max", GPU_WORD(0x0e0d), 0x1fffff);
 	put(&gpu, "uche_filter_cntl", UCHE_FILTER_CNTL, 0x804);
 	put(&gpu, "uche_cache_ways", UCHE_CACHE_WAYS, 0x4);
-	put(&gpu, "cp_roq_thresholds_2", CP_ROQ_THRESHOLDS_2, 0x02000140);
+	put(&gpu, "cp_roq_thresholds_2", CP_ROQ_THRESHOLDS_2, 0x010000c0);       /* the A630's */
 	put(&gpu, "cp_roq_thresholds_1", CP_ROQ_THRESHOLDS_1, 0x8040362c);
-	put(&gpu, "cp_lpac_prog_fifo_size", CP_LPAC_PROG_FIFO_SIZE, 0x20);
 	put(&gpu, "cp_mem_pool_size", CP_MEM_POOL_SIZE, 128);
-	put(&gpu, "pc_dbg_eco_cntl", PC_DBG_ECO_CNTL, 0x00200200);
+	put(&gpu, "pc_dbg_eco_cntl", PC_DBG_ECO_CNTL, 0x00180000);              /* the A630's prim_fifo_threshold */
 	put(&gpu, "cp_ahb_cntl", CP_AHB_CNTL, 1);
 	/*
-	 * How textures in the GPU's own tiled and compressed layouts are laid out in memory (Linux's
-	 * a6xx_calc_ubwc_config, a6xx_set_ubwc_config for this GPU: highest bank bit 14, and the
-	 * rest as below); Mesa is told the same (hakios_gpu_parameter()).
+	 * UBWC (a6xx_set_ubwc_config with the SDM845's ubwc_2_0_hbb15: highest bank bit 15, UBWC 2.0, no amsbc, level 2
+	 * swizzling on); Mesa's a630 says hbb 15 too.
 	 */
-	put(&gpu, "rb_nc_mode_cntl", GPU_WORD(0x8e08), 1u << 11 | 1u << 4 | 1u << 1);
-	put(&gpu, "tpl1_nc_mode_cntl", GPU_WORD(0xb604), 1u << 1);
-	put(&gpu, "sp_nc_mode_cntl", GPU_WORD(0xae02), 2u << 4 | 1u << 1);
-	put(&gpu, "uche_mode_cntl", GPU_WORD(0x0e01), 1u << 21);
-	put(&gpu, "rbbm_nc_mode_cntl", GPU_WORD(0x0534), 1);
+	put(&gpu, "rb_nc_mode_cntl", GPU_WORD(0x8e08), 2u << 1);
+	put(&gpu, "tpl1_nc_mode_cntl", GPU_WORD(0xb604), 2u << 1);
+	put(&gpu, "sp_nc_mode_cntl", GPU_WORD(0xae02), 2u << 1);
+	put(&gpu, "uche_mode_cntl", GPU_WORD(0x0e01), 2u << 21);
+	put(&gpu, "rbbm_nc_mode_cntl", GPU_WORD(0x0534), 0);
 	put(&gpu, "rbbm_perfctr_cntl", RBBM_PERFCTR_CNTL, 1);
 	put(&gpu, "rbbm_interface_hang_int_cntl", RBBM_INTERFACE_HANG_INT_CNTL, 1u << 30 | 0x1fffff);
 	put(&gpu, "uche_client_pf", UCHE_CLIENT_PF, 1u << 7 | 1);
-	put(&gpu, "cp_chicken_dbg", CP_CHICKEN_DBG, 1);
-	put(&gpu, "rbbm_gbif_client_qos_cntl", RBBM_GBIF_CLIENT_QOS_CNTL, 0);
-	put(&gpu, "cp_apriv_cntl", CP_APRIV_CNTL, 1u << 6 | 1u << 5 | 1u << 3 | 1u << 2 | 1u << 1);
-	put(&gpu, "rb_dbg_eco_cntl", RB_DBG_ECO_CNTL, 0x04100000);     /* Mesa's value for this GPU */
+	/* (no CP_CHICKEN_DBG, GBIF QoS, UCHE_CMDQ_CONFIG or CP_APRIV_CNTL: the a660 family's alone) */
+	put(&gpu, "rb_dbg_eco_cntl", RB_DBG_ECO_CNTL, 0x04100000);     /* Mesa's value for the A630 too */
 	/*
 	 * adreno_blind=1: the command processor is started with its microcode at an address where
 	 * nothing is. All it can do then is ask the SMMU for it, and the SMMU's record of the refusal
@@ -3025,7 +3019,7 @@ step_core_commands(void)
 #define EVENT_FLUSH_COLOR       0x1d
 #define EVENT_CACHE_FLUSH       0x04
 #define TARGET_WIDTH            1080
-#define TARGET_HEIGHT           2400
+#define TARGET_HEIGHT           2340         /* 6T: the panel's 1080 x 2340 */
 #define TARGET_ROW              4352            /* 1088 pixels: the next multiple of 64 bytes */
 
 extern void MiniIOMobileFramebufferShow(const uint8_t *pixels, uint32_t width, uint32_t height, uint32_t row_bytes);
@@ -3070,10 +3064,10 @@ step_frame(void)
 	}
 	ring_command(CP_SET_MARKER, 1);
 	ring(12);                               /* "2D blits follow" */
-	ring_register(RB_CCU_CNTL, 0x10000004); /* Mesa's for this GPU when it draws straight into memory */
-	ring_fill(0, 800, 255, 128, 0);         /* orange */
-	ring_fill(800, 1600, 255, 255, 255);
-	ring_fill(1600, TARGET_HEIGHT, 0, 128, 255);
+	ring_register(RB_CCU_CNTL, 0x10000000); /* 6T: the A630 (2 CCUs: the bypass offset 0x20000; no unk2 bit) */
+	ring_fill(0, 780, 255, 128, 0);         /* orange */
+	ring_fill(780, 1560, 255, 255, 255);
+	ring_fill(1560, TARGET_HEIGHT, 0, 128, 255);
 	/*
 	 * What it has drawn out of its caches into memory. Each of the two events is followed by an
 	 * address and a word that the core writes there when it is done (Linux's a6xx_submit; Mesa's
@@ -3101,11 +3095,11 @@ step_frame(void)
 	pixel = (const volatile uint8_t *)core_target.memory;
 	printf("adreno: %u: the picture's first pixel is %02x %02x %02x %02x (blue green red alpha; told: 00 80 ff ff), one in "
 	    "the middle %02x %02x %02x %02x, one in the last row %02x %02x %02x %02x\n", step, pixel[0], pixel[1], pixel[2],
-	    pixel[3], pixel[1200 * TARGET_ROW + 2160], pixel[1200 * TARGET_ROW + 2161], pixel[1200 * TARGET_ROW + 2162],
-	    pixel[1200 * TARGET_ROW + 2163], pixel[2399 * TARGET_ROW + 4316], pixel[2399 * TARGET_ROW + 4317],
-	    pixel[2399 * TARGET_ROW + 4318], pixel[2399 * TARGET_ROW + 4319]);
-	if ((pixel[0] | pixel[1] | pixel[2]) == 0 || pixel[1200 * TARGET_ROW + 2160] == 0 || (pixel[2399 * TARGET_ROW + 4316] |
-	    pixel[2399 * TARGET_ROW + 4317] | pixel[2399 * TARGET_ROW + 4318]) == 0) {
+	    pixel[3], pixel[1170 * TARGET_ROW + 2160], pixel[1170 * TARGET_ROW + 2161], pixel[1170 * TARGET_ROW + 2162],
+	    pixel[1170 * TARGET_ROW + 2163], pixel[2339 * TARGET_ROW + 4316], pixel[2339 * TARGET_ROW + 4317],
+	    pixel[2339 * TARGET_ROW + 4318], pixel[2339 * TARGET_ROW + 4319]);
+	if ((pixel[0] | pixel[1] | pixel[2]) == 0 || pixel[1170 * TARGET_ROW + 2160] == 0 || (pixel[2339 * TARGET_ROW + 4316] |
+	    pixel[2339 * TARGET_ROW + 4317] | pixel[2339 * TARGET_ROW + 4318]) == 0) {
 		printf("adreno: %u: the picture is not what the 3D core was told to draw\n", step);
 		return false;
 	}
@@ -3180,8 +3174,23 @@ stale_stop(void)
  * Otherwise the halt is lifted again at once, as Linux does: the GMU reaches its memory through
  * the same interface, and one that cannot read its messages does not answer "slumber".
  */
+/* 6T: the A630 has a VBIF, halted through its XIN ports (Linux a6xx_bus_clear_pending_transactions without a GBIF) */
+#define VBIF_XIN_HALT_CTRL0     GPU_WORD(0x3080)
+#define VBIF_XIN_HALT_CTRL1     GPU_WORD(0x3081)
+
 static void
 core_bus_halt(bool for_good)
+{
+	wr(gpu.base + VBIF_XIN_HALT_CTRL0, 0xf);
+	for (int i = 0; i < 100000 && (rd(gpu.base + VBIF_XIN_HALT_CTRL1) & 0xf) != 0xf; i++) {
+	}
+	if (!for_good) {
+		wr(gpu.base + VBIF_XIN_HALT_CTRL0, 0);
+	}
+}
+
+static void __unused
+core_bus_halt_gbif(bool for_good)
 {
 	if (for_good) {
 		wr(gpu.base + RBBM_GBIF_HALT, 1);
@@ -3215,9 +3224,8 @@ gpu_block_stop(void)
 		    "sees it busy: %#x\n", step, rd(gpu.base + RBBM_STATUS), rd(gpu.base + RBBM_INT_0_STATUS),
 		    rd(gpu.base + CP_RB_RPTR), ring_at, rd(gmu.base + GMU_AO_GPU_CX_BUSY_STATUS));
 		core_bus_halt(core_stuck);
-		printf("adreno: %u: the GPU block's bus has been halted%s (rbbm_gbif_halt_ack %#x, gbif halt_ack %#x)\n", step,
-		    core_stuck ? ", the 3D core's side too, and stays so" : " and let go again", rd(gpu.base + RBBM_GBIF_HALT_ACK),
-		    rd(gbif.base + GBIF_HALT_ACK));
+		printf("adreno: %u: the GPU block's bus has been halted%s (vbif xin_halt_ctrl1 %#x)\n", step,
+		    core_stuck ? ", and stays so" : " and let go again", rd(gpu.base + VBIF_XIN_HALT_CTRL1));
 	}
 	if (core_is_on) {
 		put(&gmu, "host2gmu_intr_set", GMU_HOST2GMU_INTR_SET, 1u << OOB_GPU_ACK);   /* 6T: the legacy GPU_SET clear */

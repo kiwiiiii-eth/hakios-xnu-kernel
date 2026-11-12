@@ -6762,6 +6762,20 @@ step_mba(void)
 	}
 	rails_asked = true;
 	mss_touched = true;
+	/*
+	 * modem_bcm=1 (default): the buses the MBA's checking needs, voted for as Linux has them at boot (its interconnect
+	 * providers hold every node at the maximum until all their consumers have probed): the crypto engine (CE0), the
+	 * memory controller (MC0), the shared and system NoCs (SH0, SN0), the config NoC (CN0), ACV. With none voted
+	 * (ddr=0) the MBA ran for 18 s but the phone went to CrashDump as soon as it was told to check the header.
+	 */
+	if (option_default_on("modem_bcm")) {
+		static const char *const bcms[] = { "CE0", "MC0", "SH0", "SN0", "CN0", "ACV" };
+
+		for (unsigned b = 0; b < sizeof(bcms) / sizeof(bcms[0]); b++) {
+			bb_say("5: BCM %s on\n", bcms[b]);
+			rpmh_command(bcms[b], BCM_VOTE(true, 0x3fffu));
+		}
+	}
 	announce("(5a) the rails are asked for; next the prng vote and the iface and snoc_axi clocks");
 	bb_say("5: %s\n", "(5a) the rails are asked for; next the prng vote and the iface and snoc_axi clocks");
 	/* proxy and reset clocks (xo is the always-on oscillator, held by this processor while it runs) */

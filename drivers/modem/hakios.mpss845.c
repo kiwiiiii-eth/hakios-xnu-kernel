@@ -65,7 +65,8 @@
  *   9  writes  our side of GLINK: the versions, the channel "IPCRTR" opened both ways, our intents;
  *              from here a thread of ours listens to the modem
  *  10  talks   QRTR on that channel: hello both ways, and the services the modem tells of
- *  11  talks   QMI: DMS "operating mode online" (modem_online=0: not), then NAS "serving system"
+ *  11  talks   WLFW, the Wi-Fi firmware's service on the modem: ath10k's qmi.c exchange by hand (MSA, board data)
+ *  12  talks   QMI: DMS "operating mode online" (modem_online=0: not), then NAS "serving system"
  *              and "signal info" every second for modem_nas_wait seconds (default 30), or until
  *              the modem says it is registered and how strong the signal is
  *
@@ -128,8 +129,8 @@ static bool rmtfs_share(bool in);
 static bool rmtfs_start(void);
 static void rmtfs_stop(void);
 
-#define STEPS                   11
-#define MPSS845_PORTED          10      /* the steps made the 6T's: the others are not attempted */
+#define STEPS                   12
+#define MPSS845_PORTED          11      /* the steps made the 6T's: the others are not attempted */
 #define HAKIOS_SOC_BASE        0x00400000ul    /* where the loader says the phone's peripherals begin */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
@@ -1597,11 +1598,15 @@ static void link_stop(void);
  */
 static void mss_reclaim(void);
 
+static void wlfw_stop(void);
+static void wlfw_msa_back(void);
+
 static bool
 dsp_shutdown(const char *why)
 {
 	printf("mpss: %u: %s: the modem is asked to stop, then halted and put back in reset\n", step, why);
 	if (!leaving) {
+		wlfw_stop();
 		link_stop();
 	}
 	stopped_by_its_word = dsp_ask_to_stop(leaving ? 2000 : 5000);
@@ -1609,6 +1614,7 @@ dsp_shutdown(const char *why)
 	printf("mpss: %u: THE MODEM IS SHUT DOWN\n", step);
 	if (!leaving) {
 		rmtfs_share(false);
+		wlfw_msa_back();
 	}
 	dsp_started = false;
 	if (rails_asked) {
@@ -3740,6 +3746,7 @@ link_stop(void)
 #define VMID_MSS_MSA            15
 #define VMID_NAV                0x2b            /* the modem's navigation side; dt: qcom,vm-nav-path of qcom,rmtfs_sharedmem@0 */
 #define VM_PERM_RW              6
+#define VM_PERM_RWX             7
 
 static struct {
 	const char *path, *partition;
@@ -5289,7 +5296,477 @@ step_qrtr(void)
 	return qrtr_hellos != 0;
 }
 
-/* ---- step 11: the modem's services: online, and what the network says ------------------------------ */
+/* ---- step 11: WLFW, the Wi-Fi firmware's service on the modem ---------------------------------------- */
+
+/*
+ * The WCN3990's firmware (wlanmdsp.mbn, which the modem reads over TFTP once the locator names msm/modem/wlan_pd)
+ * offers "WLFW" (service 0x45, run 27). Before ath10k's snoc.c touches the radio, its qmi.c has an exchange with it;
+ * this step makes that exchange by hand, in qmi.c's order and with its values (ath10k_qmi_event_server_arrive(), then
+ * on "MSA ready" ath10k_qmi_event_msa_ready()): A STAND-IN, to learn from the phone, as drivers/wifi/hakios.wlfw.c
+ * is for ath11k. The indications wanted; the host's capabilities (the 6T's dt: qcom,snoc-host-cap-8bit-quirk); the
+ * MSA memory (dt: wlan_msa_mem, 0x8df00000, 1M) and the regions of it the firmware names, handed by the hypervisor to
+ * the modem and the Wi-Fi as qcom_scm_assign_mem() does for ath10k; "MSA ready"; the chip's capabilities; on the
+ * firmware's "MSA ready" the board's data file (fw/image/bdwlan.*, as the phone's own driver names it by board id) in
+ * pieces; the calibration report; then "firmware ready" is waited for. Nothing here powers the radio (its five LDOs
+ * and RF_CLK2 are W4b's): whether "ready" comes without them is one thing this learns.
+ * The regions go back to us alone after the modem is in reset (dsp_shutdown()), not before: the Wi-Fi uses them.
+ * The messages' structures and tables are ath10k's (qmi_wlfw_v01.[ch], ISC), put into the build by tools/mk-wlfw10.sh
+ * and not kept here; without them the step says so. Boot-args: modem_wlfw_wait=S (the service, default 60),
+ * modem_wlfw_ready=S ("ready", default 15).
+ */
+#define WLFW_MSA_PHYS           0x8df00000ull   /* dt: wlan_msa_mem */
+#define WLFW_MSA_SIZE           0x100000u
+#define VMID_WLAN               0x18
+#define VMID_WLAN_CE            0x19
+
+static struct {
+	uint64_t address;
+	uint32_t size;
+	bool secure, ours;              /* ours: handed by us to the modem and the Wi-Fi, to be taken back when it stops */
+} wlfw_region[2];
+static unsigned wlfw_regions;
+
+/* The hypervisor's MP_ASSIGN with lists, as qcom_scm_assign_mem(): from these VMIDs to these (VMID, permission). */
+static bool
+scm_assign(const char *what, uint64_t pa, uint32_t size, const uint32_t *from, unsigned from_count, const uint32_t (*to)[2],
+    unsigned to_count)
+{
+	struct {
+		uint64_t address, size;
+		uint64_t pad0[6];
+		uint32_t sources[4];
+		uint32_t pad1[12];
+		struct {
+			uint32_t vmid, permission;
+			uint64_t context;
+			uint32_t context_size, unused;
+		} destinations[4];
+		uint8_t pad2[16];
+		uint64_t more[7];                       /* +240 */
+	} *page;
+	vm_offset_t memory = 0;
+	uint64_t answer = ~0ull, page_pa;
+	int32_t result;
+
+	_Static_assert(__builtin_offsetof(__typeof__(*page), sources) == 64, "sources");
+	_Static_assert(__builtin_offsetof(__typeof__(*page), destinations) == 128, "destinations");
+	_Static_assert(__builtin_offsetof(__typeof__(*page), more) == 240, "more");
+	if (from_count == 0 || from_count > 4 || to_count == 0 || to_count > 4 ||
+	    kmem_alloc(kernel_map, &memory, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		return false;
+	}
+	page = (void *)memory;
+	page->address = pa;
+	page->size = (size + 0xfffu) & ~0xfffu;
+	for (unsigned i = 0; i < from_count; i++) {
+		page->sources[i] = from[i];
+	}
+	for (unsigned i = 0; i < to_count; i++) {
+		page->destinations[i].vmid = to[i][0];
+		page->destinations[i].permission = to[i][1];
+	}
+	page_pa = kvtophys(memory);
+	page->more[0] = from_count * 4;
+	page->more[1] = page_pa + 128;
+	page->more[2] = to_count * sizeof(page->destinations[0]);
+	page->more[3] = 0;
+	for (vm_offset_t line = memory; line < memory + PAGE_SIZE; line += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (line));
+	}
+	settle();
+	printf("mpss: %u: %s: %#llx, %#x bytes, from VMIDs %#x %#x %#x to %#x %#x %#x\n", step, what, pa, size, from[0],
+	    from_count > 1 ? from[1] : 0, from_count > 2 ? from[2] : 0, to[0][0], to_count > 1 ? to[1][0] : 0,
+	    to_count > 2 ? to[2][0] : 0);
+	result = scm(what, SCM_MP_ASSIGN, SCM_ASSIGN_ARGUMENTS, page_pa, 16, page_pa + 64, page_pa + 240, &answer);
+	kmem_free(kernel_map, memory, PAGE_SIZE);
+	if (result != 0 || answer != 0) {
+		printf("mpss: %u: THE HYPERVISOR DOES NOT HAND IT OVER: the call returns %d, its answer is %#llx\n", step, result, answer);
+		return false;
+	}
+	return true;
+}
+
+/* qmi.c's ath10k_qmi_remove_msa_permission(), once the modem is in reset: each region of the MSA back to us alone. */
+static void
+wlfw_msa_back(void)
+{
+	static const uint32_t us[1][2] = { { VMID_HLOS, VM_PERM_RWX } };
+
+	for (unsigned i = 0; i < wlfw_regions; i++) {
+		uint32_t from[3] = { VMID_MSS_MSA, VMID_WLAN, VMID_WLAN_CE };
+
+		if (!wlfw_region[i].ours) {
+			continue;
+		}
+		if (scm_assign("the Wi-Fi's MSA region taken back", wlfw_region[i].address, wlfw_region[i].size, from,
+		    wlfw_region[i].secure ? 2 : 3, us, 1)) {
+			wlfw_region[i].ours = false;
+		}
+	}
+	wlfw_regions = 0;
+}
+
+#if !__has_include("hakios.wlfw_ath10k.h")
+
+static void
+wlfw_stop(void)
+{
+}
+
+static bool
+step_wlfw(void)
+{
+	printf("mpss: %u: THE WLFW EXCHANGE IS NOT BUILT IN: ath10k's message descriptions were not there when this kernel was "
+	    "built (tools/mk-wlfw10.sh, then build again)\n", step);
+	return false;
+}
+
+#else
+
+#define HAKIOS_QMI_NO_KERNEL_CONNECT
+#include <sys/hakios.qmi.h>
+#include "hakios.wlfw_ath10k.h"
+
+#define WLFW_CLIENT_ID          0x4b4e454c      /* qmi.c: ATH10K_QMI_CLIENT_ID */
+#define WLFW_TIMEOUT_MS         30000           /* qmi.c: ATH10K_QMI_TIMEOUT, 30 s */
+
+static struct qmi_handle wlfw_handle;
+static bool wlfw_open;
+static struct {
+	volatile bool server, gone, msa_ready, fw_ready;
+	uint64_t began;
+} wlfw;
+
+static uint64_t
+wlfw_ms(void)
+{
+	return (now_us() - wlfw.began) / 1000;
+}
+
+static int
+wlfw_new_server(struct qmi_handle *qmi, struct qmi_service *service)
+{
+	int error = hakios_qmi_connect(qmi->sock, service->node, service->port);
+
+	printf("mpss: wlfw: +%llu ms: the service is at node %u port %u (version %u, instance %u)%s\n", wlfw_ms(), service->node,
+	    service->port, service->version, service->instance, error ? ": CANNOT BE CONNECTED TO" : "");
+	wlfw.server = error == 0;
+	return error;
+}
+
+static void
+wlfw_del_server(__unused struct qmi_handle *qmi, struct qmi_service *service)
+{
+	printf("mpss: wlfw: +%llu ms: THE SERVICE AT NODE %u PORT %u HAS GONE\n", wlfw_ms(), service->node, service->port);
+	wlfw.gone = true;
+}
+
+static void
+wlfw_fw_ready(__unused struct qmi_handle *qmi, __unused struct sockaddr_qrtr *sq, __unused struct qmi_txn *txn,
+    __unused const void *decoded)
+{
+	printf("mpss: wlfw: +%llu ms: THE FIRMWARE SAYS \"READY\"\n", wlfw_ms());
+	wlfw.fw_ready = true;
+}
+
+static void
+wlfw_msa_ready(__unused struct qmi_handle *qmi, __unused struct sockaddr_qrtr *sq, __unused struct qmi_txn *txn,
+    __unused const void *decoded)
+{
+	printf("mpss: wlfw: +%llu ms: the firmware says \"MSA ready\"\n", wlfw_ms());
+	wlfw.msa_ready = true;
+}
+
+static const struct qmi_ops wlfw_ops = { .new_server = wlfw_new_server, .del_server = wlfw_del_server };
+static const struct qmi_msg_handler wlfw_handlers[] = {
+	{ QMI_INDICATION, QMI_WLFW_FW_READY_IND_V01, wlfw_fw_ready_ind_msg_v01_ei, sizeof(struct wlfw_fw_ready_ind_msg_v01),
+	  wlfw_fw_ready },
+	{ QMI_INDICATION, QMI_WLFW_MSA_READY_IND_V01, wlfw_msa_ready_ind_msg_v01_ei, sizeof(struct wlfw_msa_ready_ind_msg_v01),
+	  wlfw_msa_ready },
+	{ 0 },
+};
+
+/* One request and its reply, as each of qmi.c's goes. True: an answer came (its result is the reply's first field). */
+static bool
+wlfw_ask(const char *what, int message, size_t largest, const struct qmi_elem_info *request_ei, const void *request,
+    const struct qmi_elem_info *reply_ei, void *reply, bool quiet)
+{
+	const struct qmi_response_type_v01 *result = reply;
+	struct qmi_txn txn;
+	uint64_t began = now_us();
+	int ret = qmi_txn_init(&wlfw_handle, &txn, reply_ei, reply);
+
+	if (ret >= 0) {
+		ret = qmi_send_request(&wlfw_handle, NULL, &txn, message, largest, request_ei, request);
+		if (ret < 0) {
+			qmi_txn_cancel(&txn);
+		} else {
+			ret = hakios_qmi_txn_wait_ms(&txn, WLFW_TIMEOUT_MS);
+		}
+	}
+	if (ret < 0) {
+		printf("mpss: wlfw: %s (message %#x): NO ANSWER THAT CAN BE READ: %d, after %llu ms\n", what, message, ret,
+		    (now_us() - began) / 1000);
+		return false;
+	}
+	if (!quiet || result->result != QMI_RESULT_SUCCESS_V01) {
+		printf("mpss: wlfw: %s (message %#x): %s (result %u, error %u), after %llu ms\n", what, message,
+		    result->result == QMI_RESULT_SUCCESS_V01 ? "success" : "REFUSED", result->result, result->error,
+		    (now_us() - began) / 1000);
+	}
+	return true;
+}
+
+static void
+wlfw_stop(void)
+{
+	if (wlfw_open) {
+		qmi_handle_release(&wlfw_handle);
+		wlfw_open = false;
+	}
+}
+
+/* qmi.c's ath10k_qmi_bdf_dnld_send_sync(): the whole length as the total of every piece, "end" on the last. */
+static bool
+wlfw_board_data(uint32_t board_id)
+{
+	static struct wlfw_bdf_download_req_msg_v01 request;
+	struct wlfw_bdf_download_resp_msg_v01 reply;
+	char name[48];
+	uint64_t size = 0, began = now_us();
+	const uint8_t *data = NULL, *at;
+	uint32_t left, pieces = 0;
+	bool ok = true;
+
+	if (board_id < 0x100) {
+		snprintf(name, sizeof(name), "image/bdwlan.b%02x", board_id);
+	} else {
+		snprintf(name, sizeof(name), "image/bdwlan.%03x", board_id & 0xfff);
+	}
+	if (board_id == 0xff || (data = root_file(name, &size)) == NULL) {
+		strlcpy(name, "image/bdwlan.bin", sizeof(name));
+		data = root_file(name, &size);
+	}
+	if (data == NULL || size == 0) {
+		printf("mpss: wlfw: the board's data: no fw/%s\n", name);
+		return false;
+	}
+	printf("mpss: wlfw: the board's data: fw/%s, %llu bytes, beginning %02x %02x %02x %02x, for board id %#x\n", name, size,
+	    data[0], data[1], data[2], data[3], board_id);
+	bzero(&request, sizeof(request));
+	for (at = data, left = (uint32_t)size; left > 0 && ok; pieces++) {
+		request.valid = 1;
+		request.file_id_valid = 1;
+		request.file_id = 0;
+		request.total_size_valid = 1;
+		request.total_size = (uint32_t)size;
+		request.seg_id_valid = 1;
+		request.data_valid = 1;
+		request.end_valid = 1;
+		request.end = left <= QMI_WLFW_MAX_DATA_SIZE_V01;
+		request.data_len = request.end ? left : QMI_WLFW_MAX_DATA_SIZE_V01;
+		memcpy(request.data, at, request.data_len);
+		bzero(&reply, sizeof(reply));
+		if (!wlfw_ask("the board's data", QMI_WLFW_BDF_DOWNLOAD_REQ_V01, WLFW_BDF_DOWNLOAD_REQ_MSG_V01_MAX_MSG_LEN,
+		    wlfw_bdf_download_req_msg_v01_ei, &request, wlfw_bdf_download_resp_msg_v01_ei, &reply, true)) {
+			ok = false;
+		} else if (reply.resp.result != QMI_RESULT_SUCCESS_V01) {
+			/* qmi.c: "end" makes the firmware check a CRC; a malformed-message answer then is not fatal */
+			ok = request.end && reply.resp.error == QMI_ERR_MALFORMED_MSG_V01;
+			printf("mpss: wlfw: the board's data: piece %u REFUSED (error %u)%s\n", pieces, reply.resp.error,
+			    ok ? ", the last, its CRC: taken as qmi.c takes it" : "");
+		}
+		left -= request.data_len;
+		at += request.data_len;
+		request.seg_id++;
+	}
+	{
+		uint8_t *gone = __DECONST(uint8_t *, data);
+
+		kfree_data(gone, size);
+	}
+	printf("mpss: wlfw: the board's data: %s, %u pieces in %llu ms\n", ok ? "ACCEPTED" : "NOT ACCEPTED", pieces,
+	    (now_us() - began) / 1000);
+	return ok;
+}
+
+static bool
+step_wlfw(void)
+{
+	static struct wlfw_cap_resp_msg_v01 cap_reply;
+	struct wlfw_ind_register_req_msg_v01 reg;
+	struct wlfw_ind_register_resp_msg_v01 reg_reply;
+	struct wlfw_host_cap_req_msg_v01 host;
+	struct wlfw_host_cap_resp_msg_v01 host_reply;
+	struct wlfw_msa_info_req_msg_v01 msa;
+	struct wlfw_msa_info_resp_msg_v01 msa_reply;
+	struct wlfw_msa_ready_req_msg_v01 ready;
+	struct wlfw_msa_ready_resp_msg_v01 ready_reply;
+	struct wlfw_cap_req_msg_v01 cap;
+	struct wlfw_cal_report_req_msg_v01 cal;
+	struct wlfw_cal_report_resp_msg_v01 cal_reply;
+	const struct hakios_qrtr_ops *transport = hakios_mpss_qrtr();
+	uint32_t wait_s = 60, ready_s = 15, board_id = 0xff;
+	int ret;
+
+	if (transport == NULL) {
+		printf("mpss: %u: the modem's QRTR is not up\n", step);
+		return false;
+	}
+	PE_parse_boot_argn("modem_wlfw_wait", &wait_s, sizeof(wait_s));
+	PE_parse_boot_argn("modem_wlfw_ready", &ready_s, sizeof(ready_s));
+	announce("WLFW, the Wi-Fi firmware's service on the modem (0x45): ath10k's qmi.c exchange by hand, up to the board's data "
+	    "and \"firmware ready\"; the radio is not powered here");
+	bzero(&wlfw, sizeof(wlfw));
+	wlfw.began = now_us();
+	ret = hakios_qmi_handle_init_transport(&wlfw_handle, WLFW_BDF_DOWNLOAD_REQ_MSG_V01_MAX_MSG_LEN, &wlfw_ops, wlfw_handlers,
+	    transport);
+	if (ret < 0) {
+		printf("mpss: %u: no QMI handle: %d\n", step, ret);
+		return false;
+	}
+	wlfw_open = true;
+	ret = qmi_add_lookup(&wlfw_handle, WLFW_SERVICE_ID_V01, WLFW_SERVICE_VERS_V01, 0);
+	for (uint32_t ms = 0; ret == 0 && ms < wait_s * 1000 && !wlfw.server && !wlfw.gone; ms += 10) {
+		sleep_ms(10);
+	}
+	if (!wlfw.server) {
+		printf("mpss: %u: THE SERVICE HAS NOT APPEARED in %u s (lookup %d)\n", step, wait_s, ret);
+		return false;
+	}
+
+	/* qmi.c: ath10k_qmi_ind_register_send_sync_msg() */
+	bzero(&reg, sizeof(reg));
+	bzero(&reg_reply, sizeof(reg_reply));
+	reg.client_id_valid = 1;
+	reg.client_id = WLFW_CLIENT_ID;
+	reg.fw_ready_enable_valid = 1;
+	reg.fw_ready_enable = 1;
+	reg.msa_ready_enable_valid = 1;
+	reg.msa_ready_enable = 1;
+	if (!wlfw_ask("the indications wanted", QMI_WLFW_IND_REGISTER_REQ_V01, WLFW_IND_REGISTER_REQ_MSG_V01_MAX_MSG_LEN,
+	    wlfw_ind_register_req_msg_v01_ei, &reg, wlfw_ind_register_resp_msg_v01_ei, &reg_reply, false) ||
+	    reg_reply.resp.result != QMI_RESULT_SUCCESS_V01) {
+		return false;
+	}
+	if (reg_reply.fw_status_valid) {
+		printf("mpss: wlfw: the firmware's status %#llx%s\n", reg_reply.fw_status,
+		    reg_reply.fw_status & QMI_WLFW_FW_READY_V01 ? ": READY ALREADY" : "");
+		if (reg_reply.fw_status & QMI_WLFW_FW_READY_V01) {
+			wlfw.fw_ready = true;
+			return true;
+		}
+	}
+
+	/* qmi.c: ath10k_qmi_host_cap_send_sync(), the 8-bit form (ATH10K_SNOC_FLAG_8BIT_HOST_CAP_QUIRK) */
+	bzero(&host, sizeof(host));
+	bzero(&host_reply, sizeof(host_reply));
+	host.daemon_support_valid = 1;
+	host.daemon_support = 0;
+	if (!wlfw_ask("the host's capabilities (8-bit)", QMI_WLFW_HOST_CAP_REQ_V01, WLFW_HOST_CAP_REQ_MSG_V01_MAX_MSG_LEN,
+	    wlfw_host_cap_8bit_req_msg_v01_ei, &host, wlfw_host_cap_resp_msg_v01_ei, &host_reply, false) ||
+	    (host_reply.resp.result != QMI_RESULT_SUCCESS_V01 && host_reply.resp.error != QMI_ERR_NOT_SUPPORTED_V01)) {
+		return false;
+	}
+
+	/* qmi.c: ath10k_qmi_msa_mem_info_send_sync_msg() */
+	bzero(&msa, sizeof(msa));
+	bzero(&msa_reply, sizeof(msa_reply));
+	msa.msa_addr = WLFW_MSA_PHYS;
+	msa.size = WLFW_MSA_SIZE;
+	if (!wlfw_ask("the MSA memory", QMI_WLFW_MSA_INFO_REQ_V01, WLFW_MSA_INFO_REQ_MSG_V01_MAX_MSG_LEN,
+	    wlfw_msa_info_req_msg_v01_ei, &msa, wlfw_msa_info_resp_msg_v01_ei, &msa_reply, false) ||
+	    msa_reply.resp.result != QMI_RESULT_SUCCESS_V01) {
+		return false;
+	}
+	if (msa_reply.mem_region_info_len > QMI_WLFW_MAX_MEM_REG_V01) {
+		printf("mpss: wlfw: %u regions named: more than %u\n", msa_reply.mem_region_info_len, QMI_WLFW_MAX_MEM_REG_V01);
+		return false;
+	}
+	for (unsigned i = 0; i < msa_reply.mem_region_info_len; i++) {
+		const struct wlfw_memory_region_info_s_v01 *r = &msa_reply.mem_region_info[i];
+		bool inside = r->region_addr >= WLFW_MSA_PHYS && r->size <= WLFW_MSA_SIZE &&
+		    r->region_addr + r->size <= WLFW_MSA_PHYS + WLFW_MSA_SIZE;
+
+		printf("mpss: wlfw: MSA region %u: %#llx, %#x bytes, %s%s\n", i, r->region_addr, r->size,
+		    r->secure_flag ? "secure" : "not secure", inside ? "" : ": OUTSIDE THE MSA MEMORY, refused");
+		if (!inside) {
+			return false;
+		}
+		wlfw_region[i].address = r->region_addr;
+		wlfw_region[i].size = r->size;
+		wlfw_region[i].secure = r->secure_flag != 0;
+		wlfw_region[i].ours = false;
+	}
+	wlfw_regions = msa_reply.mem_region_info_len;
+	/* qmi.c: "HACK: sleep for a while between receiving the msa info response and the XPU update to prevent SDM845 from
+	 * crashing due to a security violation" */
+	sleep_ms(20);
+	/* qmi.c: ath10k_qmi_setup_msa_permissions(): from us to the modem's MSA, the Wi-Fi and (not secure) its copy engines */
+	for (unsigned i = 0; i < wlfw_regions; i++) {
+		static const uint32_t from[1] = { VMID_HLOS };
+		static const uint32_t to[3][2] = { { VMID_MSS_MSA, VM_PERM_RW }, { VMID_WLAN, VM_PERM_RW }, { VMID_WLAN_CE, VM_PERM_RW } };
+
+		if (!scm_assign("the Wi-Fi's MSA region handed over", wlfw_region[i].address, wlfw_region[i].size, from, 1, to,
+		    wlfw_region[i].secure ? 2 : 3)) {
+			return false;
+		}
+		wlfw_region[i].ours = true;
+	}
+
+	/* qmi.c: ath10k_qmi_msa_ready_send_sync_msg() */
+	bzero(&ready, sizeof(ready));
+	bzero(&ready_reply, sizeof(ready_reply));
+	if (!wlfw_ask("MSA ready", QMI_WLFW_MSA_READY_REQ_V01, WLFW_MSA_READY_REQ_MSG_V01_MAX_MSG_LEN, wlfw_msa_ready_req_msg_v01_ei,
+	    &ready, wlfw_msa_ready_resp_msg_v01_ei, &ready_reply, false) || ready_reply.resp.result != QMI_RESULT_SUCCESS_V01) {
+		return false;
+	}
+
+	/* qmi.c: ath10k_qmi_cap_send_sync_msg() */
+	bzero(&cap, sizeof(cap));
+	bzero(&cap_reply, sizeof(cap_reply));
+	if (!wlfw_ask("the chip's capabilities", QMI_WLFW_CAP_REQ_V01, WLFW_CAP_REQ_MSG_V01_MAX_MSG_LEN, wlfw_cap_req_msg_v01_ei, &cap,
+	    wlfw_cap_resp_msg_v01_ei, &cap_reply, false) || cap_reply.resp.result != QMI_RESULT_SUCCESS_V01) {
+		return false;
+	}
+	if (cap_reply.board_info_valid) {
+		board_id = cap_reply.board_info.board_id;
+	}
+	tell("mpss: %u: THE WI-FI FIRMWARE: chip id %#x family %#x, board id %#x, soc id %#x, version %#x of %s, build \"%s\", "
+	    "%u MACs\n", step, cap_reply.chip_info_valid ? cap_reply.chip_info.chip_id : 0xff,
+	    cap_reply.chip_info_valid ? cap_reply.chip_info.chip_family : 0, board_id,
+	    cap_reply.soc_info_valid ? cap_reply.soc_info.soc_id : 0, cap_reply.fw_version_info_valid ? cap_reply.fw_version_info.fw_version : 0,
+	    cap_reply.fw_version_info_valid ? cap_reply.fw_version_info.fw_build_timestamp : "-",
+	    cap_reply.fw_build_id_valid ? cap_reply.fw_build_id : "-", cap_reply.num_macs_valid ? cap_reply.num_macs : 0);
+
+	/* qmi.c: the board's data and the calibration report follow the firmware's "MSA ready" (ath10k_qmi_event_msa_ready()) */
+	for (unsigned ms = 0; ms < 5000 && !wlfw.msa_ready && !wlfw.gone; ms += 10) {
+		sleep_ms(10);
+	}
+	if (!wlfw.msa_ready) {
+		printf("mpss: wlfw: no \"MSA ready\" from the firmware in 5 s: the board's data is sent all the same\n");
+	}
+	if (!wlfw_board_data(board_id)) {
+		return false;
+	}
+	bzero(&cal, sizeof(cal));
+	bzero(&cal_reply, sizeof(cal_reply));
+	if (!wlfw_ask("the calibration report (none)", QMI_WLFW_CAL_REPORT_REQ_V01, WLFW_CAL_REPORT_REQ_MSG_V01_MAX_MSG_LEN,
+	    wlfw_cal_report_req_msg_v01_ei, &cal, wlfw_cal_report_resp_msg_v01_ei, &cal_reply, false) ||
+	    cal_reply.resp.result != QMI_RESULT_SUCCESS_V01) {
+		return false;
+	}
+	for (uint32_t ms = 0; ms < ready_s * 1000 && !wlfw.fw_ready && !wlfw.gone; ms += 10) {
+		sleep_ms(10);
+	}
+	tell("mpss: %u: %s after %llu ms of the exchange\n", step, wlfw.fw_ready ? "THE WI-FI FIRMWARE IS READY" :
+	    wlfw.gone ? "THE WI-FI FIRMWARE'S SERVICE HAS GONE" : "no \"firmware ready\" (the radio is not powered)", wlfw_ms());
+	return true;
+}
+
+#endif
+
+/* ---- step 12: the modem's services: online, and what the network says ------------------------------ */
 
 /*
  * QMI, by hand: a message is a byte of flags (0 a request, 2 an answer, 4 a notice), a transaction
@@ -6437,7 +6914,6 @@ static struct block pdc_global = { "pdc_global", 0x0b2e0000, 0x1000 };   /* pdc_
 #define AXI_HALTACK             0x4
 #define AXI_IDLE                0x8
 
-#define VM_PERM_RWX             7
 #define OWNER_HLOS              1u
 #define OWNER_MSA               2u
 
@@ -7149,7 +7625,7 @@ step_start845(void)
  */
 static bool (*const steps[STEPS])(void) = {
 	step_survey, step_firmware, step_mailbox, step_our_item, step_mba, step_image845, step_start845, step_queues, step_link,
-	step_qrtr, step_nas,
+	step_qrtr, step_wlfw, step_nas,
 };
 
 static bool keep;                       /* the DSP and the link stay up while the system runs (modem_keep, modem=1) */

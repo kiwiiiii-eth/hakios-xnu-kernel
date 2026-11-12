@@ -701,6 +701,10 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		if [ -d ../fw-modem/image ]; then
 			rm -rf sysroot/fw/image && cp -R ../fw-modem/image sysroot/fw/image
 		fi
+		# ... and, for the 6T's ath10k (WCN3990), linux-firmware's ath10k/WCN3990/hw1.0 (firmware-5.bin, board-2.bin)
+		if [ -d ../fw-modem/ath10k ]; then
+			rm -rf sysroot/fw/ath10k && cp -R ../fw-modem/ath10k sysroot/fw/ath10k
+		fi
 	fi
 	# ... and the speaker amplifiers' configuration, the phone's /vendor/etc/aw882xx_acf.bin (drivers/audio/hakios.speaker.c,
 	# for sound=3): Android's own register values, which are not in the repository either

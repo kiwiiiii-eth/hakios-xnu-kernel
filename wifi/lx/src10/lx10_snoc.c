@@ -56,9 +56,13 @@ extern unsigned int ath10k_debug_mask;
 /* ---- the node: sdm845.dtsi's wifi@18800000 with sdm845-oneplus-common.dtsi's &wifi --------------------- */
 
 static const char compatible[] = "qcom,wcn3990-wifi";
+/* (board-2.bin of linux-firmware has "bus=snoc,qmi-board-id=ff,qmi-chip-id=30214,variant=oneplus_sdm845": the 6T's
+ * firmware says board id 0xff and chip id 0x30214, run 28) */
+static const char variant[] = "oneplus_sdm845";
 static const struct property wifi_properties[] = {
 	{ "compatible", sizeof(compatible), compatible },
 	{ "qcom,snoc-host-cap-8bit-quirk", 0, "" },
+	{ "qcom,calibration-variant", sizeof(variant), variant },
 };
 static struct device_node wifi_node = {
 	.name = "wifi",

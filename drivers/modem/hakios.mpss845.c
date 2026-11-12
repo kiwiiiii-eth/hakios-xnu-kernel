@@ -1920,7 +1920,8 @@ step_our_item(void)
 	 * (modem_ipa_item=0: not; our SMMU context maps all of DDR, so the item needs no mapping of its own).
 	 */
 	{
-		uint32_t ipa_item = 497, ipa_size = 0;
+		/* 6T: 0 (none): run 25 with ours of 0x9000 made the modem assert in ipa_ipfltr.c (smem_alloc_ex failed); Linux without an IPA driver lets the modem make it */
+		uint32_t ipa_item = 0, ipa_size = 0;
 
 		PE_parse_boot_argn("modem_ipa_item", &ipa_item, sizeof(ipa_item));
 		if (ipa_item != 0) {
@@ -4729,7 +4730,9 @@ jsn_string(const char *from, const char *end, const char *key, char *out, size_t
 static void
 servreg_load(void)
 {
-	static const char *const files[] = { "modemr.jsn", "adspr.jsn", "adsps.jsn", "adspua.jsn", "battmgr.jsn", "cdspr.jsn", "wpssr.jsn" };
+	/* 6T: modemuw.jsn is msm/modem/wlan_pd (kernel/elf_loader, wlan/fw): the modem starts its Wi-Fi side when the locator names it */
+	static const char *const files[] = { "modemr.jsn", "modemuw.jsn", "adspr.jsn", "adsps.jsn", "adspua.jsn", "battmgr.jsn", "cdspr.jsn",
+		"slpir.jsn", "slpius.jsn", "wpssr.jsn" };
 
 	servreg_maps = 0;
 	for (unsigned f = 0; f < sizeof(files) / sizeof(files[0]); f++) {

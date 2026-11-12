@@ -129,7 +129,7 @@ static bool rmtfs_start(void);
 static void rmtfs_stop(void);
 
 #define STEPS                   11
-#define MPSS845_PORTED          7       /* the steps made the 6T's: the others are not attempted */
+#define MPSS845_PORTED          10      /* the steps made the 6T's: the others are not attempted */
 #define HAKIOS_SOC_BASE        0x00400000ul    /* where the loader says the phone's peripherals begin */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;

@@ -6426,6 +6426,7 @@ static bool mss_iface_on;                       /* its registers may be read */
 static bool mss_touched;                        /* clocks or reset have been changed: mss_reclaim() puts them back */
 static bool mss_load_state_on;
 static bool mss_active;                         /* reset let go and active clocks on: the QDSP6's own registers may be read */
+static bool mss_locked;                         /* the header is the MBA's: it has locked the QDSP6's registers away (XPU); reading one is a NoC error */
 
 /* Linux's q6v5_xfer_mem_ownership(): memory handed by the hypervisor between us (HLOS, rwx) and the modem (MSA, rw). */
 static bool
@@ -6592,6 +6593,7 @@ mss_reclaim(void)
 	vote(VOTE_BOOT_ROM | VOTE_MSS_GPLL0_DIV | VOTE_PRNG, false);
 	mss_iface_on = false;
 	mss_active = false;
+	mss_locked = false;
 	branch(GCC_MSS_SNOC_AXI, "snoc_axi", 1, false, false);
 	branch(GCC_MSS_CFG_AHB, "iface", 0, false, false);
 	if (!mem_assign("the MBA's memory taken back", mba_phys, mba_part, &mba_owners, OWNER_HLOS)) {
@@ -6676,7 +6678,7 @@ rmb_show(const char *when)
 	    "status %#x, alt reset %#x; QDSP6SS sleep %#x\n", step, when, rd(rmb.base + RMB_MBA_IMAGE), rd(rmb.base + RMB_PBL_STATUS),
 	    rd(rmb.base + RMB_MBA_COMMAND), rd(rmb.base + RMB_MBA_STATUS), rd(rmb.base + RMB_PMI_META_DATA),
 	    rd(rmb.base + RMB_PMI_CODE_START), rd(rmb.base + RMB_PMI_CODE_LENGTH), rd(rmb.base + RMB_MBA_MSS_STATUS),
-	    rd(rmb.base + RMB_MBA_ALT_RESET), rd(qdsp6.base + QDSP6SS_SLEEP));
+	    rd(rmb.base + RMB_MBA_ALT_RESET), mss_locked ? 0xdeadu : rd(qdsp6.base + QDSP6SS_SLEEP));
 }
 
 /* mba.mbn into the MBA's memory, whole, as Linux's q6v5_load() copies it. */
@@ -6904,6 +6906,8 @@ step_mba(void)
 	put(&rmb, "meta data", RMB_PMI_META_DATA, mdata_phys);
 	alive("RMB_PMI_META_DATA");
 	put(&rmb, "MBA command", RMB_MBA_COMMAND, RMB_CMD_META_DATA_READY);
+	/* from here the MBA locks the QDSP6SS registers away from us: run 21 and 22's CONFIG_NOC error was our read of QDSP6SS_SLEEP (0x0408003c) */
+	mss_locked = true;
 	bb_say("5: the MBA is told the header is ready (at %#x)\n", mdata_phys);
 	{
 		/* modem_meta_quiet=S: S seconds without touching a register of the modem (its RMB included) before looking */

@@ -1933,6 +1933,23 @@ step_our_item(void)
 			}
 		}
 	}
+	/*
+	 * 6T: GLINK's descriptor (478, 32 bytes) and our queue (479, 16K) are ours to make before the modem starts, as
+	 * Linux's qcom_glink_smem_register() makes them at its probe; the modem makes only its own queue (480). Run 24:
+	 * without them the modem made 478 and 480 itself and our side of the link had no queue.
+	 */
+	{
+		uint32_t size = 0;
+
+		if (smem_item(478u, &size) == 0 && our_item_make(partition, 478u, 32)) {
+			printf("mpss: %u: GLINK's descriptor (item %u) made, 32 bytes, zeroed\n", step, 478u);
+		}
+		if (smem_item(479u, &size) == 0 && our_item_make(partition, 479u, 0x4000)) {
+			printf("mpss: %u: our GLINK queue (item %u) made, 0x4000 bytes, zeroed\n", step, 479u);
+		}
+		printf("mpss: %u: GLINK's descriptor (478): %s, our queue (479): %s\n", step,
+		    smem_item(478u, &size) ? "there" : "NOT THERE", smem_item(479u, &size) ? "there" : "NOT THERE");
+	}
 	glink_reset();
 	return true;
 }

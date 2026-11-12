@@ -115,14 +115,14 @@ compile() {		# compile SOURCE OBJECT [FLAGS]: only when the object is older than
 	$CC $CFLAGS "$@" -MMD -MF "$obj.d" -c "$src" -o "$obj" 2> "$obj.err" || rm -f "$obj"
 }
 for f in $DRIVER; do compile src/$f.c obj/ath10k_$f.o $DFLAGS & done
-for f in "$W"/src/lx_base.c; do [ -f "$f" ] && compile "$f" obj/lx_$(basename "$f" .c).o $DFLAGS -I$W/src & done
+for f in "$W"/src/lx_base.c "$W"/src10/*.c; do [ -f "$f" ] && compile "$f" obj/lx_$(basename "$f" .c).o $DFLAGS -I$W/src & done
 wait
 bad=
 for f in obj/*.err; do
 	[ -s "$f" ] && [ ! -f "${f%.err}" ] && { echo "--- $(basename "$f" .o.err)"; grep -m6 -A3 "error:" "$f"; bad=1; }
 done
 [ -z "$bad" ] || exit 1
-OBJECTS=$(for f in $DRIVER; do echo obj/ath10k_$f.o; done; echo obj/lx_lx_base.o)
+OBJECTS=$(for f in $DRIVER; do echo obj/ath10k_$f.o; done; echo obj/lx_lx_base.o; for f in "$W"/src10/*.c; do echo obj/lx_$(basename "$f" .c).o; done)
 
 # --- tie it all into one object. What it then still wants is one of three things: a call of the
 # kernel's (hakios.lx.h; the QMI helpers; the handful of C library functions XNU has under the same
@@ -143,6 +143,10 @@ for s in $(cat out/undefined.txt); do
 	lx_os_*|qmi_*|hakios_qmi_*|section\$*) continue ;;
 	ath10k_*|__ath10k_*) ;;
 	ath_*|__ath_*) ;;
+	# W4c's: the 802.11 side (mac80211 as LinuxKPI names it, NAPI, the network device), stubs until it is written
+	linuxkpi_ieee80211_*|linuxkpi_cfg80211_*|linuxkpi_wiphy_*|linuxkpi_80211_*|linuxkpi_set_ieee80211_dev|\
+	lkpi_get_linuxkpi_ieee80211_regdomain|linuxkpi_napi_*|linuxkpi_netif_napi_*|linuxkpi_alloc_netdev|linuxkpi_free_netdev|\
+	netif_threaded_enable|linuxkpi_skb_copy|linuxkpi_device_get_mac_address) ;;
 	*) echo $s >> out/missing.txt; continue ;;
 	esac
 	echo $s >> out/stubs.txt

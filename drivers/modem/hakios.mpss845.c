@@ -1316,6 +1316,18 @@ image_forget(void)
 static unsigned rmtfs_load(void);
 static void servreg_load(void);
 
+/* FNV-1a, 32 bits: what this kernel holds of a file, to be compared with the file itself (tools: python, same sum) */
+static uint32_t
+fnv1a(const uint8_t *data, uint64_t size)
+{
+	uint32_t h = 0x811c9dc5u;
+
+	for (uint64_t i = 0; i < size; i++) {
+		h = (h ^ data[i]) * 0x01000193u;
+	}
+	return h;
+}
+
 static bool
 step_firmware(void)
 {
@@ -1386,6 +1398,18 @@ step_firmware(void)
 	image.header = header;
 	image.header_size = size;
 	image.size = ((highest + 0xfff) & ~0xfffu) - mpss_memory;
+	{
+		char sums[400];
+		int at = snprintf(sums, sizeof(sums), "mpss: %u: FNV-1a: modem.mdt %#x", step, fnv1a(header, size));
+
+		for (unsigned s2 = 0; s2 < image.segments && s2 < 6; s2++) {
+			if (image.segment[s2].file != NULL) {
+				at += snprintf(sums + at, sizeof(sums) - (size_t)at, ", seg %u %#x", s2, fnv1a(image.segment[s2].file,
+				    image.segment[s2].file_size));
+			}
+		}
+		printf("%s\n", sums);
+	}
 	printf("mpss: %u: the image is whole (%s): a header of %llu bytes (%u of hashes), %u segments, %llu bytes of files, %#x "
 	    "bytes of the DSP's %#x from %#x\n", step, from_root ? "from /fw on the root" : "from the small image", size, hashes,
 	    image.segments, files, image.size, MPSS_MEMORY_SIZE, mpss_memory);
@@ -6685,8 +6709,8 @@ mba_put(void)
 	for (uint64_t i = 0; i < size; i++) {
 		wrong += window[i] != mba[i];
 	}
-	printf("mpss: %u: the MBA (%llu bytes, %02x %02x %02x %02x) written at %#x; read back, %llu bytes differ\n", step, size,
-	    mba[0], mba[1], mba[2], mba[3], mba_phys, wrong);
+	printf("mpss: %u: the MBA (%llu bytes, %02x %02x %02x %02x, FNV-1a %#x) written at %#x; read back, %llu bytes differ\n", step,
+	    size, mba[0], mba[1], mba[2], mba[3], fnv1a(mba, size), mba_phys, wrong);
 	ml_io_unmap((vm_offset_t)window, MBA_SIZE);
 	if (ours) {
 		uint8_t *gone = __DECONST(uint8_t *, mba);

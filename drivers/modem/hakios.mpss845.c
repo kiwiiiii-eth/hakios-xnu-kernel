@@ -1885,7 +1885,7 @@ step_our_item(void)
 	 * driver here). Off unless modem_ipa=1 (valid, off) or 3 (on): with the entry the run of 23 October hung.
 	 */
 	{
-		uint32_t ipa = 1;                       /* 6T: valid, the IPA's clock off (no IPA driver here; the reference phone's 3 is "on") */
+		uint32_t ipa = 0;                       /* 6T: no entry, as Linux without ipa.ko (run 26: an IPA spoken of made the modem give up) */
 
 		PE_parse_boot_argn("modem_ipa", &ipa, sizeof(ipa));
 		if (ipa != 0) {
@@ -5142,7 +5142,9 @@ ipa_client_server(__unused void *context, bool arrived, uint32_t service, __unus
 static bool
 ipa_qmi_start(void)
 {
-	if (option("modem_no_ipa_qmi")) {
+	/* 6T: off unless modem_ipa_qmi=1. No IPA is brought up here; run 26: told of an IPA, the modem set up its GSI
+	 * channels and gave up ("Failed to initialize GSI channel: CHID 1 errval 5"). Linux without ipa.ko runs it fine. */
+	if (!option("modem_ipa_qmi") || option("modem_no_ipa_qmi")) {
 		return false;
 	}
 	if (ipa_host_port == NULL) {

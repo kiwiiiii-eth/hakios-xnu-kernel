@@ -3704,7 +3704,7 @@ link_stop(void)
 #define RMTFS_VERSION           1
 #define RMTFS_INSTANCE          0
 #define RMTFS_SECTOR            512
-#define RMTFS_BUFFER_SIZE       0x280000u       /* dt: reg of qcom,rmtfs_sharedmem@0 */
+#define RMTFS_BUFFER_SIZE       0x200000u       /* 6T: rmtfs_mem@f5b01000, 2M (0x280000 on the reference phone) */
 #define RMTFS_OPEN              1
 #define RMTFS_CLOSE             2
 #define RMTFS_RW_IOVEC          3
@@ -3781,7 +3781,7 @@ rmtfs_load(void)
  * no-map: nothing of ours uses it, and the CDSP is never started here), through an uncached
  * window, as the modem reads it.
  */
-#define RMTFS_BUFFER_PA_DEFAULT 0x9c700000ull   /* dt: a window into reserved-memory cdsp@... (the CDSP is not started here) */
+#define RMTFS_BUFFER_PA_DEFAULT 0xf5b01000ull   /* 6T: sdm845-oneplus-common.dtsi rmtfs_mem (between 4K guards): "where the modem firmware expects it" */
 
 static bool
 rmtfs_buffer_make(void)
@@ -3849,12 +3849,12 @@ rmtfs_share(bool in)
 		page->destinations[1].permission = VM_PERM_RW;
 		page->destinations[2].vmid = VMID_NAV;
 		page->destinations[2].permission = VM_PERM_RW;
-		destinations = option("modem_no_nav") ? 2 : 3;
+		destinations = option_default_on("modem_no_nav") ? 2 : 3;
 	} else {
 		page->sources[0] = VMID_HLOS;
 		page->sources[1] = VMID_MSS_MSA;
 		page->sources[2] = VMID_NAV;
-		sources = option("modem_no_nav") ? 2 : 3;
+		sources = option_default_on("modem_no_nav") ? 2 : 3;
 		page->destinations[0].vmid = VMID_HLOS;
 		page->destinations[0].permission = VM_PERM_RW;
 		destinations = 1;
@@ -6368,6 +6368,7 @@ nas_stop(void)
                                                    mba_mem_dev_fixed); elsewhere (0x9f780000, 0x95c00000, 0xa0000000) the
                                                    phone went to CrashDump when the MBA was told of it (runs of 11-11) */
 #define MBA_PART                0x00100000u     /* the MBA's own part of its region, handed to the modem (pil-msa.c: SZ_1M) */
+static uint32_t mba_part = MBA_PART;        /* modem_mba_part=0x200000: the whole region, as Linux mainline */
 #define MDATA_SIZE              0x4000u
 static uint32_t mba_phys = MBA_PHYS_DEFAULT, mdata_phys = MDATA_PHYS_DEFAULT;
 
@@ -6592,7 +6593,7 @@ mss_reclaim(void)
 	mss_active = false;
 	branch(GCC_MSS_SNOC_AXI, "snoc_axi", 1, false, false);
 	branch(GCC_MSS_CFG_AHB, "iface", 0, false, false);
-	if (!mem_assign("the MBA's memory taken back", mba_phys, MBA_PART, &mba_owners, OWNER_HLOS)) {
+	if (!mem_assign("the MBA's memory taken back", mba_phys, mba_part, &mba_owners, OWNER_HLOS)) {
 		printf("mpss: %u: THE MBA'S MEMORY STAYS THE MODEM'S\n", step);
 	}
 	mss_touched = false;
@@ -6733,9 +6734,16 @@ step_mba(void)
 	}
 	PE_parse_boot_argn("modem_mba", &mba_phys, sizeof(mba_phys));
 	PE_parse_boot_argn("modem_tick", &tick_seconds, sizeof(tick_seconds));
+	PE_parse_boot_argn("modem_mba_part", &mba_part, sizeof(mba_part));
 	PE_parse_boot_argn("modem_mdata", &mdata_phys, sizeof(mdata_phys));
 	if (mdata_phys == 0) {
 		mdata_phys = mba_phys + MBA_PART;
+	}
+	/* (Linux's rmtfs_mem shares its buffer with the modem when Linux boots, long before the modem starts) */
+	if (option("modem_rmtfs_early")) {
+		if (!rmtfs_buffer_make() || !rmtfs_share(true)) {
+			printf("mpss: %u: the buffer for the modem's files is not shared\n", step);
+		}
 	}
 	announce("the MBA: mba.mbn into its memory; the always-on processor told \"modem: on\", RPMh asked for CX, MX and MSS; the "
 	    "modem's clocks on and its reset let go; its memory and the MBA's handed to it; its boot ROM started, and the MBA "
@@ -6796,7 +6804,7 @@ step_mba(void)
 	} else {
 		bb_say("5: the modem's memory stays ours until the header is checked (as Android)\n");
 	}
-	if (!mem_assign("the MBA's memory handed to the modem", mba_phys, MBA_PART, &mba_owners, OWNER_MSA)) {
+	if (!mem_assign("the MBA's memory handed to the modem", mba_phys, mba_part, &mba_owners, OWNER_MSA)) {
 		goto out;
 	}
 	alive("the MBA's memory was handed to it");
@@ -7032,7 +7040,7 @@ step_start845(void)
 				tell("mpss: %u: THE MODEM SAYS IT IS UP: \"slave-kernel\" says %#x, %llu.%03llu ms after the watch began\n", step,
 				    state, (now - started) / 1000, (now - started) % 1000);
 				lck_mtx_lock(&dsp_lock);
-				(void)mem_assign("the MBA's memory taken back (it has done its work)", mba_phys, MBA_PART, &mba_owners, OWNER_HLOS);
+				(void)mem_assign("the MBA's memory taken back (it has done its work)", mba_phys, mba_part, &mba_owners, OWNER_HLOS);
 				lck_mtx_unlock(&dsp_lock);
 			}
 			if ((state & DSP_HANDOVER) && !handed_over) {

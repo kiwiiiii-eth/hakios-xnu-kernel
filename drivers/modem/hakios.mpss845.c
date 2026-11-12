@@ -6849,6 +6849,21 @@ step_mba(void)
 	if (status != MBA_XPU_UNLOCKED && status != MBA_XPU_UNLOCKED_SCRIBBLED) {
 		goto out;
 	}
+	{
+		/* modem_mba_only=S: the MBA runs, and nothing more is asked of it for S seconds; then it is shut down */
+		uint32_t only = 0;
+
+		if (PE_parse_boot_argn("modem_mba_only", &only, sizeof(only)) && only != 0) {
+			tell("mpss: %u: THE MBA RUNS; nothing more is asked of it for %u s\n", step, only);
+			for (uint32_t i = 1; i <= only; i++) {
+				sleep_ms(1000);
+				tell("mpss: %u: the MBA left alone %u s: PBL %#x, MBA %#x, MSS %#x\n", step, i, rd(rmb.base + RMB_PBL_STATUS),
+				    rd(rmb.base + RMB_MBA_STATUS), rd(rmb.base + RMB_MBA_MSS_STATUS));
+			}
+			tell("mpss: %u: THE PHONE LIVED %u s WITH THE MBA RUNNING AND NO HEADER\n", step, only);
+			goto out;
+		}
+	}
 	alive("the MBA's word");
 	/* q6v5_mpss_load()'s start, and q6v5_mpss_init_image() */
 	put(&rmb, "code length", RMB_PMI_CODE_LENGTH, 0);

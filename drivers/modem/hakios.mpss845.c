@@ -6578,7 +6578,25 @@ static void
 alive(const char *after)
 {
 	for (uint32_t i = 1; i <= tick_seconds; i++) {
-		sleep_ms(1000);
+		/* (into the black box every 50 ms, which outlives the CrashDump; the log once a second) */
+		for (uint32_t f = 1; f < 20; f++) {
+			sleep_ms(50);
+			if (blackbox != NULL) {
+				uint32_t used = *(volatile uint32_t *)(blackbox + 4);
+				char tick[48];
+				int n = snprintf(tick, sizeof(tick), "%u: +%u ms after %.16s\n", step, (i - 1) * 1000 + f * 50, after);
+
+				if (n > 0 && used + (uint32_t)n < BLACKBOX_SIZE - 16) {
+					for (int c = 0; c < n; c++) {
+						blackbox[16 + used + (uint32_t)c] = tick[c];
+					}
+					__asm__ volatile ("dsb sy" ::: "memory");
+					*(volatile uint32_t *)(blackbox + 4) = used + (uint32_t)n;
+					__asm__ volatile ("dsb sy" ::: "memory");
+				}
+			}
+		}
+		sleep_ms(50);
 		bb_say("%u: alive %u s after %s\n", step, i, after);
 		if (mss_iface_on && mss_active) {
 			printf("mpss: %u:   RMB PBL %#x, MBA status %#x, MSS status %#x\n", step, rd(rmb.base + RMB_PBL_STATUS),
@@ -6817,7 +6835,7 @@ step_mba(void)
 			uint64_t t = now_us() - began;
 
 			status = (int32_t)now[1];
-			if (memcmp(now, last, sizeof(now)) != 0 || t - said >= 100000) {
+			if (memcmp(now, last, sizeof(now)) != 0 || t - said >= 10000) {
 				bb_say("5: +%llu us: PBL %#x, MBA %#x, MSS %#x\n", t, now[0], now[1], now[2]);
 				memcpy(last, now, sizeof(now));
 				said = t;

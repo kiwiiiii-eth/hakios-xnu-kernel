@@ -287,10 +287,13 @@ hold(void)
 	}
 }
 
+static void bb_say(const char *format, ...) __printflike(1, 2);
+
 static void
 announce(const char *what)
 {
 	printf("mpss: step %u: %s\n", step, what);
+	bb_say("step %u: %.120s\n", step, what);
 	hold();
 }
 
@@ -300,6 +303,7 @@ get(struct block *b, const char *name, uint32_t offset)
 	uint32_t value;
 
 	need(b);
+	bb_say("%u: read %s %s (%#x)\n", step, b->name, name, b->phys + offset);
 	value = rd(b->base + offset);
 	printf("mpss: %u: %s %s (%#x) = %#x\n", step, b->name, name, b->phys + offset, value);
 	return value;
@@ -310,6 +314,7 @@ put(struct block *b, const char *name, uint32_t offset, uint32_t value)
 {
 	need(b);
 	printf("mpss: %u: about to write %s %s at %#x: %#x\n", step, b->name, name, b->phys + offset, value);
+	bb_say("%u: write %s %s (%#x) = %#x\n", step, b->name, name, b->phys + offset, value);
 	snprintf(last_write, sizeof(last_write), "step %u wrote %#x to %s %s at %#x", step, value, b->name, name, b->phys + offset);
 	wr(b->base + offset, value);
 }
@@ -747,6 +752,7 @@ static void
 apss_ring(unsigned bit)
 {
 	need(&apss);
+	bb_say("%u: ring apss_shared bit %u\n", step, bit);
 	wr(apss.base + APSS_IPC, 1u << bit);
 }
 
@@ -875,6 +881,7 @@ mailbox_send(const char *text)
 	}
 	strlcpy((char *)words, text, sizeof(words));
 	printf("mpss: %u: about to tell the always-on processor \"%s\"\n", step, text);
+	bb_say("%u: to the always-on processor: %.60s\n", step, text);
 	snprintf(last_write, sizeof(last_write), "step %u sent the always-on processor a message", step);
 	if (rd(aoss.base + our_box) != 0) {
 		printf("mpss: %u: our mailbox still holds a message of %u bytes: not sent\n", step, rd(aoss.base + our_box));

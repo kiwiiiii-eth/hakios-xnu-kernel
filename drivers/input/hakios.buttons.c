@@ -229,7 +229,7 @@ find_channel(struct peripheral *p, uint32_t channels)
  * hakios_pmic_reader, for the other drivers: any peripheral, its channel found the first time it is asked for. Called from
  * one thread at a time (the touch screen's), so the table needs no lock; the transfers take the arbiter's lock as ours do.
  */
-#define OTHER_PERIPHERALS       4
+#define OTHER_PERIPHERALS       32      /* (the battery's few, and the 6T modem driver's look at the Wi-Fi's supplies: 14) */
 static struct peripheral others[OTHER_PERIPHERALS];
 static uint32_t arb_channels;
 

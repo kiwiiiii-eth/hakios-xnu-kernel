@@ -5406,6 +5406,53 @@ wlfw_msa_back(void)
 	wlfw_regions = 0;
 }
 
+/*
+ * The radio's supplies as they are, READ ONLY (W4b's question before it asks RPMh for them): the five LDOs of the
+ * PM8998 the 6T's dt gives the WCN3990 (vdd-0.8-cx-mx l5, vdd-1.8-xo l7, vdd-1.3-rfa l17, vdd-3.3-ch1 l23,
+ * vdd-3.3-ch0 l25) and its RF_CLK2. Their peripherals on both of the PMIC's SPMI ids, since which id has them is
+ * not written down here: type and subtype (+4), status (+8), the set point in mV (+0x40, +0x41), mode (+0x45),
+ * enable (+0x46). Off with modem_rails_look=0.
+ */
+static void
+wlfw_rails_look(void)
+{
+	static const struct {
+		const char *name;
+		uint8_t peripheral;
+	} rails[] = {
+		{ "l5 (0.8 V, cx-mx)", 0x44 }, { "l7 (1.8 V, xo)", 0x46 }, { "l17 (1.304 V, rfa)", 0x50 },
+		{ "l23 (3.3 V, ch1)", 0x56 }, { "l25 (3.3 V, ch0)", 0x58 }, { "rf_clk1", 0x54 }, { "rf_clk2", 0x55 },
+	};
+	uint32_t look = 1;
+
+	PE_parse_boot_argn("modem_rails_look", &look, sizeof(look));
+	if (look == 0) {
+		return;
+	}
+	if (hakios_pmic_reader == NULL) {
+		printf("mpss: %u: the Wi-Fi's supplies: no PMIC reader (buttons=1 gives it)\n", step);
+		return;
+	}
+	for (unsigned sid = 0; sid < 2; sid++) {
+		for (unsigned i = 0; i < sizeof(rails) / sizeof(rails[0]); i++) {
+			uint16_t id = (uint16_t)(sid << 8 | rails[i].peripheral);
+			uint8_t type[2] = { 0 }, status = 0, vset[2] = { 0 }, mode = 0, enable = 0;
+			int bad = 0;
+
+			/* (each read takes the arbiter's lock itself) */
+			bad |= hakios_pmic_reader(id, 0x04, type, 2);
+			bad |= hakios_pmic_reader(id, 0x08, &status, 1);
+			bad |= hakios_pmic_reader(id, 0x40, vset, 2);
+			bad |= hakios_pmic_reader(id, 0x45, &mode, 1);
+			bad |= hakios_pmic_reader(id, 0x46, &enable, 1);
+			printf("mpss: %u: the Wi-Fi's supplies (read only): sid %u %#06x %s: %s type %#04x/%#04x, status %#04x, set %u mV, "
+			    "mode %#04x, enable %#04x%s\n", step, sid, sid << 16 | rails[i].peripheral << 8, rails[i].name,
+			    bad ? "NOT READ;" : "", type[0], type[1], status, vset[1] << 8 | vset[0], mode, enable,
+			    !bad && type[0] != 0 ? ((enable & 0x80) ? ": ON" : ": off") : "");
+		}
+	}
+}
+
 #if !__has_include("hakios.wlfw_ath10k.h")
 
 static void
@@ -5617,6 +5664,7 @@ step_wlfw(void)
 	PE_parse_boot_argn("modem_wlfw_ready", &ready_s, sizeof(ready_s));
 	announce("WLFW, the Wi-Fi firmware's service on the modem (0x45): ath10k's qmi.c exchange by hand, up to the board's data "
 	    "and \"firmware ready\"; the radio is not powered here");
+	wlfw_rails_look();
 	bzero(&wlfw, sizeof(wlfw));
 	wlfw.began = now_us();
 	ret = hakios_qmi_handle_init_transport(&wlfw_handle, WLFW_BDF_DOWNLOAD_REQ_MSG_V01_MAX_MSG_LEN, &wlfw_ops, wlfw_handlers,

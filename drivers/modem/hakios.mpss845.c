@@ -6780,11 +6780,22 @@ step_mba(void)
 	rmb_show("its reset let go, its clocks on");
 	announce("(5d) its clocks run; next its memory and the MBA's handed to it by the hypervisor");
 	bb_say("5: %s\n", "(5d) its clocks run; next its memory and the MBA's handed to it by the hypervisor");
-	if (!mem_assign("the modem's memory handed to it (the MBA may clear it)", mpss_memory, MPSS_MEMORY_SIZE, &mpss_owners,
-	    OWNER_MSA)) {
-		goto out;
+	/*
+	 * The phone's own Android (peripheral-loader.c, pil_boot) keeps the modem's memory ours while the MBA boots and
+	 * checks the header ("after cold boot linux already owns it ... modem memory has to be released after MBA is
+	 * booted"), shares it for the segments, then gives it to the modem alone. Linux mainline hands it over first;
+	 * that is modem_mpss_early=1. Runs of 11-11..13: with it first handed over, the MBA says 2 (it scribbled the
+	 * memory) and the phone goes to CrashDump when it is told of the header.
+	 */
+	if (option("modem_mpss_early")) {
+		if (!mem_assign("the modem's memory handed to it (the MBA may clear it)", mpss_memory, MPSS_MEMORY_SIZE, &mpss_owners,
+		    OWNER_MSA)) {
+			goto out;
+		}
+		alive("the modem's memory was handed to it");
+	} else {
+		bb_say("5: the modem's memory stays ours until the header is checked (as Android)\n");
 	}
-	alive("the modem's memory was handed to it");
 	if (!mem_assign("the MBA's memory handed to the modem", mba_phys, MBA_PART, &mba_owners, OWNER_MSA)) {
 		goto out;
 	}
@@ -6792,6 +6803,8 @@ step_mba(void)
 	announce("(5e) the memory is the modem's; next RMB_MBA_IMAGE and its boot ROM started");
 	bb_say("5: %s\n", "(5e) the memory is the modem's; next RMB_MBA_IMAGE and its boot ROM started");
 	put(&rmb, "MBA image", RMB_MBA_IMAGE, mba_phys);
+	put(&rmb, "code start (no debug policy)", RMB_PMI_CODE_START, 0);      /* pil_mss_reset() */
+	put(&rmb, "code length (no debug policy)", RMB_PMI_CODE_LENGTH, 0);
 	alive("RMB_MBA_IMAGE");
 	/* q6v5proc_reset(), MSS_SDM845 */
 	put(&qdsp6, "sleep clock", QDSP6SS_SLEEP, rd(qdsp6.base + QDSP6SS_SLEEP) | CBCR_ENABLE);

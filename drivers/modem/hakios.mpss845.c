@@ -7158,6 +7158,15 @@ hakios_mpss_quiesce(void)
 	if (!dsp_started) {
 		return;
 	}
+	/* modem_quiesce_off=1: a panic leaves the modem as it is (is the CrashDump the panic's quiesce, not the modem?) */
+	if (option("modem_quiesce_off")) {
+		const char *say = "mpss: a panic: the modem is left as it is (modem_quiesce_off)\n";
+
+		for (const char *c = say; *c != 0; c++) {
+			loader_log_putc(*c);
+		}
+		return;
+	}
 	leaving = true;
 	new_from = ~0u;
 	dsp_shutdown("the kernel is on its way back to the loader");

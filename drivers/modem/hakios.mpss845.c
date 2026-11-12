@@ -672,7 +672,8 @@ bb_open(void)
 	if (!option_default_on("modem_blackbox")) {
 		return;
 	}
-	blackbox = (volatile char *)ml_io_map_unmappable(BLACKBOX_PHYS, BLACKBOX_SIZE, VM_WIMG_WCOMB);
+	/* (device memory, not write-combined: the last lines of run 14 never left the system cache before the reset) */
+	blackbox = (volatile char *)ml_io_map(BLACKBOX_PHYS, BLACKBOX_SIZE);
 	magic = *(volatile uint32_t *)blackbox;
 	used = *(volatile uint32_t *)(blackbox + 4);
 	if (magic == BLACKBOX_MAGIC && used <= BLACKBOX_SIZE - 16) {

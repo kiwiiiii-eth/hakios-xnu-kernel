@@ -6906,6 +6906,19 @@ step_mba(void)
 	put(&rmb, "MBA command", RMB_MBA_COMMAND, RMB_CMD_META_DATA_READY);
 	bb_say("5: the MBA is told the header is ready (at %#x)\n", mdata_phys);
 	{
+		/* modem_meta_quiet=S: S seconds without touching a register of the modem (its RMB included) before looking */
+		uint32_t quiet_s = 0;
+
+		if (PE_parse_boot_argn("modem_meta_quiet", &quiet_s, sizeof(quiet_s)) && quiet_s != 0) {
+			bb_say("5: quiet for %u s: no register of the modem is read\n", quiet_s);
+			for (uint32_t i = 1; i <= quiet_s; i++) {
+				sleep_ms(1000);
+				bb_say("5: quiet %u s, alive\n", i);
+			}
+			tell("mpss: %u: ALIVE %u s AFTER THE HEADER WITHOUT LOOKING; now the MBA's word is read\n", step, quiet_s);
+		}
+	}
+	{
 		/* every 200 us for a second: RMB and the modem's last words, into the box when they change, and every 100 ms */
 		uint64_t began = now_us(), said = 0;
 		uint32_t last[3] = { ~0u, ~0u, ~0u };

@@ -162,7 +162,7 @@ GPU_LOG	arg	gpu_log	GPU and display	k	hakios.a630.c,hakios.adreno.c
 HAPTIC_EFFECT	arg	haptic_effect	Haptics and torch	k	hakios.haptic.c	
 HAPTIC_MS	arg	haptic_ms	User space	k	hakios.haptic8998.c	
 HAPTIC_STRENGTH	arg	haptic_strength	User space	k	hakios.haptic8998.c	
-IPA8	arg	ipa8	User space	k	hakios.mpss845.c	
+IPA8	arg	ipa8	User space	k	hakios.mpss845.c	the IPA 3.5.1 is set up before the modem (its firmware, memory, hardware, our data path): the entry
 IPA_GSI_LOOK	arg	ipa_gsi_look	User space	k	hakios.mpss845.c	
 IPA_IRAM_LOOK	arg	ipa_iram_look	User space	k	hakios.mpss845.c	
 M2V_UTRACE	arg	m2v_utrace	User space	u	HakiosMetalCA.m	Turnip's GPU trace of every render pass (u_trace) into a file, printed during the run
@@ -238,6 +238,7 @@ MODEM_STEP	arg	modem_step	Cellular	k	hakios.mpss.c,hakios.mpss845.c	the steps on
 MODEM_TICK	arg	modem_tick	User space	k	hakios.mpss845.c	
 MODEM_WAIT	arg	modem_wait	Cellular	k	hakios.mpss.c,hakios.mpss845.c	
 MODEM_WDA_OFF	arg	modem_wda_off	Cellular	k	hakios.mpss.c,hakios.mpss845.c	
+MODEM_WDS_SUB	arg	modem_wds_sub	User space	k	hakios.mpss845.c	
 MODEM_WLFW_READY	arg	modem_wlfw_ready	User space	k	hakios.mpss845.c	
 MODEM_WLFW_WAIT	arg	modem_wlfw_wait	User space	k	hakios.mpss845.c	
 PMIC_LIST	arg	pmic_list	Chip, thermal and PMIC	k	hakios.pmic.c	only the clock, not the inventory of every block

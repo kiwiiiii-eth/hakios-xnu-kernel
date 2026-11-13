@@ -256,6 +256,7 @@ modem_step	k
 modem_tick	k
 modem_wait	k
 modem_wda_off	k
+modem_wds_sub	k
 modem_wlfw_ready	k
 modem_wlfw_wait	k
 net_names	k

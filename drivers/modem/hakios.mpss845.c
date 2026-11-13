@@ -6536,6 +6536,7 @@ static volatile bool wds_started, wds_up, wds_bound, wda_set;
 static volatile bool dpm_done, dpm_open, wda_sent, wda_done;  /* the port mapped, the data format asked and answered */
 static uint64_t data_setup_began;       /* when WDS was first seen: the mapping and the format get 20 s before the bind goes ahead */
 static volatile bool wds_bind_sent, wds_start_pending;
+static unsigned wds_refusals;          /* data sessions refused other than for want of attachment */
 static uint64_t wds_last_try;           /* when the bind or the session was last sent, for the retry */
 static uint32_t wds_handle;
 static void wds_send_start(void);
@@ -6714,6 +6715,9 @@ wds_receive(__unused void *context, __unused uint32_t node, __unused uint32_t po
 			tell("mpss: wds: the data session is refused for now: result %u, error %u%s, call end reason %u (will retry)\n",
 			    result, error, error == 70 ? " (invalid operation: the packet domain is not attached yet)" : "", reason);
 			wds_start_pending = false;      /* retried by wds_advance() after a few seconds */
+			if (error != 70) {
+				wds_refusals++;
+			}
 			wds_last_try = now_us();
 		}
 	} else if (m[0] == 2 && message == WDS_BIND_MUX_DATA_PORT) {
@@ -6872,7 +6876,12 @@ wds_send_start(void)
 	request[0] = 0; request[1] = 0x41; request[2] = 0;
 	request[3] = WDS_START_NETWORK_INTERFACE & 0xff; request[4] = WDS_START_NETWORK_INTERFACE >> 8;
 	request[at++] = 0x19; request[at++] = 1; request[at++] = 0; request[at++] = 4;      /* IPv4 */
-	if (PE_parse_boot_argn("modem_apn", apn, sizeof(apn)) && apn[0] != 0) {
+	/* (no modem_apn: the default profile, and after a refusal every other try the APN most Taiwanese carriers use,
+	 * FarEasTone's among them: "internet") */
+	if (!PE_parse_boot_argn("modem_apn", apn, sizeof(apn)) && (wds_refusals & 1)) {
+		strlcpy(apn, "internet", sizeof(apn));
+	}
+	if (apn[0] != 0) {
 		size_t n = strlen(apn);
 
 		request[at++] = 0x14; request[at++] = (uint8_t)n; request[at++] = 0;

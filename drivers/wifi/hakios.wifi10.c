@@ -251,13 +251,17 @@ hakios_wifi_init(void)
 	tell("wifi: the 6T's radio (WCN3990, ath10k) waits for the modem's link, beside the system's start (wifi=1)\n");
 }
 
-/* Where a run ends in order, before the modem is stopped: the driver down, the radio's stream put back. */
+/*
+ * Where a run ends in order, before the modem is stopped (or when the phone is hot): the driver down. The radio's
+ * stream stays in the SMMU: the radio's firmware runs on the modem and may still write what it was receiving after
+ * the driver is down, and a write of a stream the SMMU does not know is fatal (run 65, the QCOM screen at a run's end
+ * under a video's traffic); hakios_mpss_stop() puts it back once the modem is off.
+ */
 void
 hakios_wifi_stop(void)
 {
 	if (wifi10_started) {
 		hakios_lx_stop();
-		hakios_mpss_wifi_space_off();
 		wifi10_started = false;
 	}
 }

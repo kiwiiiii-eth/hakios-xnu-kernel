@@ -235,6 +235,16 @@ option(const char *name)
 	return PE_parse_boot_argn(name, &value, sizeof(value)) && value != 0;
 }
 
+/* ipa8=N (the IPA's bring-up stages, below), read whenever wanted */
+static uint32_t
+ipa8_asked(void)
+{
+	uint32_t value = 0;
+
+	PE_parse_boot_argn("ipa8", &value, sizeof(value));
+	return value;
+}
+
 /* (on unless name=0) */
 static bool
 option_default_on(const char *name)
@@ -1141,6 +1151,7 @@ rpmh_command(const char *name, uint32_t value)
 	return done != 0;
 }
 
+static uint32_t ipa8_asked(void);
 static uint32_t ipa_stage;              /* ipa8=N: 2 the clock and the SMMU, 3 and the image put in place, 4 all with the SDM845's bus votes, 1 all without */
 #define BCM_VOTE(on, vote)      (1u << 30 | (uint32_t)(on) << 29 | ((vote) & 0x3fffu))
 
@@ -1925,6 +1936,11 @@ step_our_item(void)
 	{
 		uint32_t ipa = 0;                       /* 6T: no entry, as Linux without ipa.ko (run 26: an IPA spoken of made the modem give up) */
 
+		/* ipa8=9: the IPA 3.5.1 is set up before the modem (its firmware, memory, hardware, our data path): the entry
+		 * says its clock is on and the answer valid (bit 1, bit 0), as Linux's ipa_smp2p.c once its IPA is powered */
+		if (ipa8_asked() >= 9) {
+			ipa = 3;
+		}
 		PE_parse_boot_argn("modem_ipa", &ipa, sizeof(ipa));
 		if (ipa != 0) {
 			bzero(name, sizeof(name));
@@ -5291,7 +5307,8 @@ ipa_qmi_result(struct hakios_qrtr_port *from, uint32_t node, uint32_t port, uint
 static void
 ipa_init_complete(void)
 {
-	if (ipa_indication_wanted && !ipa_indication_sent && ipa_driver_ready) {
+	/* (Linux's ipa_qmi_ready(): the modem registered for it, its DRIVER_INIT_COMPLETE came, and our INIT_DRIVER was answered) */
+	if (ipa_indication_wanted && !ipa_indication_sent && ipa_driver_ready && (ipa_uc_ready || ipa8_asked() < 9)) {
 		ipa_qmi_result(ipa_host_port, ipa_register_node, ipa_register_port, QMI_INDICATION, 0, IPA_QMI_INIT_COMPLETE);
 		ipa_indication_sent = true;
 		tell("mpss: ipa: the modem is told that the IPA is all set up (indication %#x)\n", IPA_QMI_INIT_COMPLETE);
@@ -5433,6 +5450,30 @@ ipa_init_driver(void)
 	packet[3] = IPA_QMI_INIT_DRIVER;
 	packet[4] = 0;
 	at += qmi_put_u32(packet + at, 0x10, 3);                                /* platform: 3 = MSM Android (Android's log: "platform_type 3"; 1 is a data card) */
+	if (ipa8_asked() >= 9) {
+		/*
+		 * IPA 3.5.1's layout (Linux's ipa_qmi.c init_modem_driver_req() with data/ipa_data-v3.5.1.c; the parallel lane's
+		 * lane-b-notes/ipa351-modem-handshake.md): 14 TLVs, no zip table (0x1a) and no statistics (0x1f..0x22, IPA 4.0+);
+		 * skip_uc_load always sent, 0 on the first boot.
+		 */
+		at += qmi_put_pair(packet + at, 0x11, o + 0x0688, o + 0x0688 + 0x0140 - 1); /* the modem's headers: 0x688..0x7c7 */
+		at += qmi_put_pair(packet + at, 0x12, o + 0x0508, routes - 1);
+		at += qmi_put_pair(packet + at, 0x13, o + 0x0608, routes - 1);
+		at += qmi_put_u32(packet + at, 0x14, o + 0x0308);
+		at += qmi_put_u32(packet + at, 0x15, o + 0x0408);
+		at += qmi_put_pair(packet + at, 0x16, o + 0x0bd8, 0x1024);      /* the modem's own region: start and size */
+		at += qmi_put_u32(packet + at, 0x17, 10);                       /* AP_MODEM_RX: endpoint 10 on 3.5.1 */
+		packet[at++] = 0x18;
+		packet[at++] = 1;
+		packet[at++] = 0;
+		packet[at++] = 0;                                               /* skip_uc_load: 0 */
+		at += qmi_put_pair(packet + at, 0x19, o + 0x07d0, o + 0x07d0 + 0x0200 - 1); /* processing contexts: 0x7d0..0x9cf */
+		at += qmi_put_pair(packet + at, 0x1b, o + 0x0488, routes - 1);
+		at += qmi_put_pair(packet + at, 0x1c, o + 0x0588, routes - 1);
+		at += qmi_put_u32(packet + at, 0x1d, o + 0x0288);
+		at += qmi_put_u32(packet + at, 0x1e, o + 0x0388);
+		goto layout_put;
+	}
 	at += qmi_put_pair(packet + at, 0x11, o + 0x0688, o + 0x0688 + 0x0240 - 1); /* the modem's headers */
 	at += qmi_put_pair(packet + at, 0x12, o + 0x0508, routes - 1);          /* IPv4 routes */
 	at += qmi_put_pair(packet + at, 0x13, o + 0x0608, routes - 1);          /* IPv6 routes */
@@ -5466,6 +5507,7 @@ ipa_init_driver(void)
 	at += qmi_put_u32(packet + at, 0x20, 0x30);
 	at += qmi_put_u32(packet + at, 0x21, o + 0x27b0);                       /* drop statistics (Android: stats_drop 0x27b0, 0x20) */
 	at += qmi_put_u32(packet + at, 0x22, 0x20);
+layout_put:
 	packet[5] = (uint8_t)(at - 7);
 	packet[6] = (uint8_t)((at - 7) >> 8);
 	printf("mpss: ipa: about to ask the modem's IPA driver (node %u port %u) to initialize with the IPA's memory layout (%u bytes, "
@@ -5509,7 +5551,7 @@ ipa_qmi_start(void)
 {
 	/* 6T: off unless modem_ipa_qmi=1. No IPA is brought up here; run 26: told of an IPA, the modem set up its GSI
 	 * channels and gave up ("Failed to initialize GSI channel: CHID 1 errval 5"). Linux without ipa.ko runs it fine. */
-	if (!option("modem_ipa_qmi") || option("modem_no_ipa_qmi")) {
+	if ((!option("modem_ipa_qmi") && ipa8_asked() < 9) || option("modem_no_ipa_qmi")) {
 		return false;
 	}
 	if (ipa_host_port == NULL) {
@@ -8253,6 +8295,10 @@ hakios_mpss_stop(void)
 		    "DID NOT SAY IT HAD STOPPED", down ? "has shut it down" : "DID NOT SHUT IT DOWN");
 	}
 	lck_mtx_unlock(&dsp_lock);
+	/* the radio's stream is put back only now, its firmware (the modem's) gone: put back while the radio still received
+	 * (run 65: a run ended under a video's traffic), its next write met no match in the SMMU, an unidentified stream
+	 * (stream 0x40, NSGFSR 0x80000002), which TrustZone takes for fatal: the QCOM screen */
+	hakios_mpss_wifi_space_off();
 }
 
 /* The same on a panic's way back to the loader: one processor, interrupts off, no lock, no sleep. */

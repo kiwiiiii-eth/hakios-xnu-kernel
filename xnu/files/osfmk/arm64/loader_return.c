@@ -360,6 +360,27 @@ loader_log_append_msgbuf(void)
 	}
 }
 
+/*
+ * A panic's text, put in the loader's log at once, before the quiesces: one of those can hang in a panic (the 6T's
+ * Bluetooth runs 80 and 81: the log ended in the quiesces after the modem's, the panic's text never said).
+ */
+static bool loader_panic_text_said;
+
+static void
+loader_log_panic_text(void)
+{
+	if (loader_panic_text_said || debug_buf_base == NULL || debug_buf_ptr <= debug_buf_base ||
+	    (size_t)(debug_buf_ptr - debug_buf_base) >= 256 * 1024) {
+		return;
+	}
+	loader_panic_text_said = true;
+	loader_log_puts("\n--- panic buffer (before the quiesces) ---\n");
+	for (const char *c = debug_buf_base; c < debug_buf_ptr; c++) {
+		loader_log_putc(*c);
+	}
+	loader_log_puts("\n--- end of the panic buffer ---\n");
+}
+
 void
 loader_return(void)
 {
@@ -371,6 +392,9 @@ loader_return(void)
 	 */
 	psci_smp_stop_others();
 #endif
+	if (!loader_return_entered) {
+		loader_log_panic_text();
+	}
 	hakios_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
 	hakios_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
 	hakios_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
@@ -390,7 +414,7 @@ loader_return(void)
 	if (!loader_return_entered) {
 		loader_log_append_msgbuf();
 	}
-	if (!loader_return_entered && debug_buf_base != NULL && debug_buf_ptr > debug_buf_base &&
+	if (!loader_return_entered && !loader_panic_text_said && debug_buf_base != NULL && debug_buf_ptr > debug_buf_base &&
 	    (size_t)(debug_buf_ptr - debug_buf_base) < 256 * 1024) {
 		loader_log_puts("\n--- panic buffer ---\n");
 		for (const char *c = debug_buf_base; c < debug_buf_ptr; c++) {

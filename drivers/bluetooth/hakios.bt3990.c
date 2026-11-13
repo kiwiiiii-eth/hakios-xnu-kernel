@@ -887,8 +887,11 @@ static bool
 map_all(void)
 {
 	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
+	say("mapped: the GCC at %#lx\n", (unsigned long)gcc);
 	tlmm_east = ml_io_map(TLMM_EAST_PHYS, TLMM_EAST_SIZE);
+	say("mapped: the TLMM's east tile at %#lx\n", (unsigned long)tlmm_east);
 	se = ml_io_map(SE_PHYS, SE_SIZE);
+	say("mapped: engine 6 at %#lx\n", (unsigned long)se);
 	if (gcc == 0 || tlmm_east == 0 || se == 0) {
 		say("could not map the GCC, the TLMM or the engine\n");
 		return false;
@@ -902,6 +905,7 @@ bt_thread(__unused void *arg, __unused wait_result_t w)
 	uint8_t bt_address[6] = { 0 };
 	bool have_address = false;
 
+	say("level %u: the thread runs; the GCC, the TLMM's east tile and engine 6 to be mapped\n", level);
 	if (!map_all()) {
 		goto out;
 	}

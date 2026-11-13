@@ -83,15 +83,16 @@ BIG_CATALOGS = ('System/Library/PrivateFrameworks/SFSymbols.framework/',)
 # (/Library is the wallpapers and a few tables of regional settings, apart from the sounds)
 HEALTH = 'System/Library/Health/'
 SKIP_PREFIX = ('usr/share/tokenizer/', 'usr/share/firmware/', 'usr/share/mecabra/',
-               'usr/standalone/', 'Library/Audio/', 'Library/Ringtones/',
+               'usr/standalone/', 'Library/Audio/',
                HEALTH + 'Assets/FitnessUIAssets.bundle/') + \
     tuple(f'System/Library/{name}/' for name in SKIP_SYSTEM_LIBRARY)
 BIG_PROGRAM = 10 << 20           # daemons bigger than this (locationd, lskdd, ...) are not on the way to the screen
 # sound, outside the directories above: the virtual audio device, a plug-in that all of mediaserverd's
 # audio goes through, with its tunings (signal processing chains) for this model and for any, and the
-# system's own sounds. Not the neural networks among the tunings, nor the sounds of the watch.
+# system's own sounds, and the ringtones (18 MB: without them Settings' ringtone list neither plays nor
+# changes one, 6T r100). Not the neural networks among the tunings, nor the sounds of the watch.
 AUDIO = ('Library/Audio/Plug-Ins/', 'Library/Audio/Tunings/D22/', 'Library/Audio/Tunings/Generic/',
-         'System/Library/Audio/UISounds/')
+         'System/Library/Audio/UISounds/', 'Library/Ringtones/')
 SKIP_AUDIO = ('System/Library/Audio/UISounds/nano/',)
 KEEP_LANG = ('en', 'Base', 'English', 'en_US', 'en_GB')
 

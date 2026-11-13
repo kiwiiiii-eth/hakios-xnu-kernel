@@ -851,6 +851,29 @@ management(struct lx_radio *radio, uint8_t *frame, unsigned kind)
  * network has WMM; marked protected once there is a key, which the driver is given with it and whose header its
  * hardware makes (ath10k's keys say "generate the IV": no room for it here); LLC and SNAP, then the frame's payload.
  */
+/*
+ * ARP, both ways, said (the first 64, then every 64th; wifi_arp_quiet=1 leaves it out): 11-13, on a home network the Mac's
+ * "who has" for the phone's address went unanswered, while the hotspot's had been heard. An Ethernet frame.
+ */
+static void
+arp_noted(const char *way, const uint8_t *e, unsigned length)
+{
+	static unsigned said;
+	const uint8_t *a = e + 14;
+
+	if (length < 42 || e[12] != 0x08 || e[13] != 0x06 || lx_os_option("wifi_arp_quiet") != 0) {
+		return;
+	}
+	if (++said <= 64 || said % 64 == 0) {
+		unsigned op = (unsigned)a[6] << 8 | a[7];
+
+		lx_tell("lx: ARP %s (%u): %s %u.%u.%u.%u (%02x:%02x:%02x:%02x:%02x:%02x) %s %u.%u.%u.%u%s\n", way, said,
+		    op == 1 ? "who has" : op == 2 ? "is-at:" : "?", op == 1 ? a[24] : a[14], op == 1 ? a[25] : a[15],
+		    op == 1 ? a[26] : a[16], op == 1 ? a[27] : a[17], a[8], a[9], a[10], a[11], a[12], a[13],
+		    op == 1 ? "asks; tell" : "is", a[14], a[15], a[16], a[17], e[0] & 1 ? " (to everybody)" : "");
+	}
+}
+
 static bool
 ethernet_send(struct lx_radio *radio, const uint8_t *frame, unsigned length)
 {
@@ -884,6 +907,7 @@ ethernet_send(struct lx_radio *radio, const uint8_t *frame, unsigned length)
 	}
 	IEEE80211_SKB_CB(skb)->control.hw_key = radio->pairwise_key;
 	radio->sent++;
+	arp_noted("out", frame, length);
 	frame_send(radio, skb);
 	return (true);
 }
@@ -974,6 +998,7 @@ ethernet_received(struct lx_radio *radio, struct sk_buff *skb)
 		handshake_message(radio, skb->data, skb->len);
 	} else if (radio->joined && skb->len >= 14) {
 		*(skb->data[0] & 1 ? &radio->received_group : &radio->received) += 1;
+		arp_noted("in", skb->data, skb->len);
 		lx_os_net_input(skb->data, skb->len);
 	}
 }

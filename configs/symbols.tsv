@@ -152,6 +152,7 @@ GPU_EXACT	arg	gpu_exact	GPU and display	k	hakios.a630.c,hakios.adreno.c
 GPU_KEEP	arg	gpu_keep	GPU and display	k	hakios.gpu.cpp	
 GPU_LOG	arg	gpu_log	GPU and display	k	hakios.a630.c,hakios.adreno.c	
 HAPTIC_EFFECT	arg	haptic_effect	Haptics and torch	k	hakios.haptic.c	
+HAPTIC_MS	arg	haptic_ms	User space	k	hakios.haptic8998.c	
 M2V_UTRACE	arg	m2v_utrace	User space	u	HakiosMetalCA.m	Turnip's GPU trace of every render pass (u_trace) into a file, printed during the run
 MACHINE_NAME	arg	machine_name	CPU, memory and boot	k	GenericARMPE.cpp	
 MEMBENCH	arg	membench	CPU, memory and boot	k	hakios.cpufreq.c	
@@ -213,7 +214,6 @@ MODEM_QUIESCE_OFF	arg	modem_quiesce_off	User space	k	hakios.mpss845.c	a panic le
 MODEM_RAILS_LOOK	arg	modem_rails_look	User space	k	hakios.mpss845.c	
 MODEM_RETURN	arg	modem_return	Cellular	k	hakios.mpss.c,hakios.mpss845.c	
 MODEM_RMTFS_DELAY	arg	modem_rmtfs_delay	Cellular	k	hakios.mpss.c,hakios.mpss845.c	
-MODEM_RMTFS_EARLY	arg	modem_rmtfs_early	User space	k	hakios.mpss845.c	
 MODEM_RMTFS_RW_FAKE	arg	modem_rmtfs_rw_fake	Cellular	k	hakios.mpss.c,hakios.mpss845.c	
 MODEM_RMTFS_RW_OFF	arg	modem_rmtfs_rw_off	Cellular	k	hakios.mpss.c,hakios.mpss845.c	
 MODEM_SHARE_OFF	arg	modem_share_off	Cellular	k	hakios.mpss.c,hakios.mpss845.c	
@@ -324,6 +324,7 @@ VIRTIO_SOUND	arg	virtio_sound	Audio and battery	k	hakios.virtio_sound.c
 WALLPAPER_CACHE	arg	wallpaper_cache	User space	u	inject_sb.c	the window that shows the wallpaper rasterized by the window server (CALayer's shouldRasterize), drawn from one texture instead of composed again
 WALLPAPER_FREEZE	arg	wallpaper_freeze	User space	u	inject_sb.c	the wallpaper as one still picture
 WIFI_AGAIN	arg	wifi_again	Wi-Fi	k	hakios.wifi.c	start the DSP although the one before it was shut down without having acknowledged a stop: THAT HAS RESET THE PHONE, twice of two
+WIFI_ARP_QUIET	arg	wifi_arp_quiet	Wi-Fi	k	lx_80211.c	
 WIFI_ASK	arg	wifi_ask	Wi-Fi	k	hakios.wifi.c	step 14 also asks that service a question (its capabilities) and writes down the beginning of an answer
 WIFI_BA	arg	wifi_ba	Wi-Fi	k	lx_80211.c	
 WIFI_CAL	arg	wifi_cal	Wi-Fi	k	hakios.wlfw.c	

@@ -164,6 +164,7 @@ gpu_log	k
 hakios_kver	k
 haptic	k
 haptic_effect	k
+haptic_ms	k
 hv_wdt_pet	k
 loader_return_after	kl
 m2v_utrace	u
@@ -231,7 +232,6 @@ modem_quiesce_off	k
 modem_rails_look	k
 modem_return	k
 modem_rmtfs_delay	k
-modem_rmtfs_early	k
 modem_rmtfs_rw_fake	k
 modem_rmtfs_rw_off	k
 modem_share_off	k
@@ -358,6 +358,7 @@ wallpaper_cache	u
 wallpaper_freeze	u
 wifi	k
 wifi_again	k
+wifi_arp_quiet	k
 wifi_ask	k
 wifi_ba	k
 wifi_cal	k

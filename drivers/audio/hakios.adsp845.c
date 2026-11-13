@@ -6177,6 +6177,14 @@ step_mic_capture(void)
 	if (!s5_command("the device path routed to session 2", S_ADM, 0, ADM_CMD_MATRIX_MAP_ROUTINGS_V5, &route, sizeof(route), 0, NULL)) {
 		goto out;
 	}
+	{
+		uint32_t run[3] = { 0, 0, 0 };
+
+		/* (r116: every command done, but without the session run no buffer was ever filled) */
+		if (!s5_command("the session (2), run", S_ASM, MIC_ASM_PORT, ASM_SESSION_CMD_RUN_V2, run, sizeof(run), 0, NULL)) {
+			goto out;
+		}
+	}
 	hakios_adsp_apr_events(mic_events);
 	mic_returned = 0;
 	mic_reads = mic_read_errors = 0;

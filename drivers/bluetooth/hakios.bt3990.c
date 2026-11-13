@@ -88,24 +88,24 @@ ms_now(void)
 /* ---- clocks: GCC ------------------------------------------------------------------------------------ */
 #define GCC_PHYS                0x00100000UL
 #define GCC_SIZE                0x60000UL
-static vm_offset_t gcc;
-#define GCC_GPLL0_MODE          (gcc + 0x00000)         /* bit 31: locked */
-#define GCC_GPLL0_USER_CTL      (gcc + 0x0000c)         /* its outputs (said, not written) */
-#define GCC_VOTE                (gcc + 0x5200c)
+static vm_offset_t gcc_pll, gcc_qup, gcc_vote;   /* three pages of the GCC, not its 384 KB (run 82: kmem_alloc of 0x60000 failed, a panic) */
+#define GCC_GPLL0_MODE          (gcc_pll + 0x00000)         /* bit 31: locked */
+#define GCC_GPLL0_USER_CTL      (gcc_pll + 0x0000c)         /* its outputs (said, not written) */
+#define GCC_VOTE                (gcc_vote + 0x0000c)
 #define VOTE_QUP0_M_AHB         (1u << 6)
 #define VOTE_QUP0_S_AHB         (1u << 7)
 #define VOTE_QUP0_CORE          (1u << 8)
 #define VOTE_QUP0_CORE_2X       (1u << 9)
 #define VOTE_QUP0_S6            (1u << 16)
 #define VOTES                   (VOTE_QUP0_M_AHB | VOTE_QUP0_S_AHB | VOTE_QUP0_CORE | VOTE_QUP0_CORE_2X | VOTE_QUP0_S6)
-#define GCC_QUP0_M_AHB_CBCR     (gcc + 0x17004)
-#define GCC_QUP0_S_AHB_CBCR     (gcc + 0x17008)
-#define GCC_QUP0_S6_CBCR        (gcc + 0x17750)         /* bit 31: the clock is off */
-#define GCC_QUP0_S6_CMD         (gcc + 0x17754)         /* [0] update, [1] root enable */
-#define GCC_QUP0_S6_CFG         (gcc + 0x17758)         /* [4:0] divider (2n-1), [10:8] source (0 XO, 6 GPLL0 even), [13:12] mode (2: M/N) */
-#define GCC_QUP0_S6_M           (gcc + 0x1775c)
-#define GCC_QUP0_S6_N           (gcc + 0x17760)         /* ~(N - M) */
-#define GCC_QUP0_S6_D           (gcc + 0x17764)         /* ~(2D), 2D = N: half the time high */
+#define GCC_QUP0_M_AHB_CBCR     (gcc_qup + 0x00004)
+#define GCC_QUP0_S_AHB_CBCR     (gcc_qup + 0x00008)
+#define GCC_QUP0_S6_CBCR        (gcc_qup + 0x00750)         /* bit 31: the clock is off */
+#define GCC_QUP0_S6_CMD         (gcc_qup + 0x00754)         /* [0] update, [1] root enable */
+#define GCC_QUP0_S6_CFG         (gcc_qup + 0x00758)         /* [4:0] divider (2n-1), [10:8] source (0 XO, 6 GPLL0 even), [13:12] mode (2: M/N) */
+#define GCC_QUP0_S6_M           (gcc_qup + 0x0075c)
+#define GCC_QUP0_S6_N           (gcc_qup + 0x00760)         /* ~(N - M) */
+#define GCC_QUP0_S6_D           (gcc_qup + 0x00764)         /* ~(2D), 2D = N: half the time high */
 #define S6_CLOCK_HZ             7372800u
 #define S6_M                    384u
 #define S6_N                    15625u
@@ -886,13 +886,18 @@ static thread_call_t start_call;
 static bool
 map_all(void)
 {
-	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
-	say("mapped: the GCC at %#lx\n", (unsigned long)gcc);
-	tlmm_east = ml_io_map(TLMM_EAST_PHYS, TLMM_EAST_SIZE);
-	say("mapped: the TLMM's east tile at %#lx\n", (unsigned long)tlmm_east);
+	vm_offset_t pins_page;
+
+	/* only the pages used: the kernel's room for mappings is short this late (run 82: 384 KB of the GCC refused) */
+	gcc_pll = ml_io_map(GCC_PHYS, 0x1000);
+	gcc_qup = ml_io_map(GCC_PHYS + 0x17000, 0x1000);
+	gcc_vote = ml_io_map(GCC_PHYS + 0x52000, 0x1000);
+	pins_page = ml_io_map(TLMM_EAST_PHYS + 0x1000UL * 45, 0x1000UL * 4);     /* GPIO45..48's own pages */
+	tlmm_east = pins_page != 0 ? pins_page - 0x1000UL * 45 : 0;              /* (so that tlmm_east + 0x1000 * n still holds) */
 	se = ml_io_map(SE_PHYS, SE_SIZE);
-	say("mapped: engine 6 at %#lx\n", (unsigned long)se);
-	if (gcc == 0 || tlmm_east == 0 || se == 0) {
+	say("mapped: the GCC's PLL, QUP and vote pages, GPIO45..48, engine 6: %s\n",
+	    gcc_pll && gcc_qup && gcc_vote && pins_page && se ? "all" : "NOT ALL");
+	if (gcc_pll == 0 || gcc_qup == 0 || gcc_vote == 0 || pins_page == 0 || se == 0) {
 		say("could not map the GCC, the TLMM or the engine\n");
 		return false;
 	}

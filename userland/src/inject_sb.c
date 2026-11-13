@@ -55,6 +55,10 @@
 #include <string.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
 /* where what is said goes: the standard error, which is the console's for SpringBoard (an application's is nowhere) */
 static int say_fd = 2;
@@ -434,7 +438,9 @@ update_signal_item(id self, SEL sel, long item, void *data, id sim, void *getter
 	if (shown > 5) {
 		shown = 5;
 	}
-	if ((up > 0 || registered > 0) && shown > 0 && setter != NULL && data != NULL) {
+	/* (only the item with SIM info: the primary's; run 75 turned the secondary's on too, and the status bar drew the
+	 * dual-SIM view, _UIStatusBarDualCellularSignalView, two small rows that looked empty) */
+	if ((up > 0 || registered > 0) && shown > 0 && setter != NULL && data != NULL && sim != nil) {
 		BLOCK_CALL(setter, void (*)(void *, void *, int), data, shown);
 		((void (*)(id, SEL, long, BOOL))objc_msgSend)(self, sel_registerName("_setItem:enabled:"), item, YES);
 		if (shown != cellular_last_bars) {
@@ -544,6 +550,25 @@ signal_view_hook(void)
  */
 static void (*original_update_data_network_item)(id self, SEL sel, long item, void *data, BOOL primary, void *getter, void *setter);
 
+/* Wi-Fi carries the data when en0 is up with an IPv4 address (the system prefers it to en1, the modem's) */
+static bool
+wifi_carries_data(void)
+{
+	struct ifaddrs *list = NULL;
+	bool found = false;
+
+	if (getifaddrs(&list) != 0) {
+		return false;
+	}
+	for (struct ifaddrs *a = list; a != NULL && !found; a = a->ifa_next) {
+		found = a->ifa_name != NULL && strcmp(a->ifa_name, "en0") == 0 && a->ifa_addr != NULL && a->ifa_addr->sa_family == AF_INET &&
+		    (a->ifa_flags & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING) &&
+		    ((const struct sockaddr_in *)(const void *)a->ifa_addr)->sin_addr.s_addr != 0;
+	}
+	freeifaddrs(list);
+	return found;
+}
+
 static void
 update_data_network_item(id self, SEL sel, long item, void *data, BOOL primary, void *getter, void *setter)
 {
@@ -553,13 +578,14 @@ update_data_network_item(id self, SEL sel, long item, void *data, BOOL primary, 
 	if (original_update_data_network_item) {
 		original_update_data_network_item(self, sel, item, data, primary, getter, setter);
 	}
-	if (getter != NULL && data != NULL) {
-		before = BLOCK_CALL(getter, int (*)(void *, void *), data);
+	if (said++ < 12) {
+		say("hakios: cellular: data network item %ld (primary %d); the kernel's data session %d; Wi-Fi carries the data %d\n", item, primary,
+		    up, wifi_carries_data());
 	}
-	if (said++ < 8) {
-		say("hakios: cellular: data network item %ld (primary %d): type %d; the kernel's data session %d\n", item, primary, before, up);
-	}
-	if (primary && up > 0 && before != 5 && setter != NULL && data != NULL) {
+	/* (run 75: the getter's value is not to be trusted -- Wi-Fi off, the item was hidden with its type left at Wi-Fi's,
+	 * and nothing came back: whether Wi-Fi carries the data is looked at on en0 itself) */
+	(void)before;
+	if (primary && up > 0 && !wifi_carries_data() && setter != NULL && data != NULL) {
 		BLOCK_CALL(setter, void (*)(void *, void *, int), data, 4);
 		((void (*)(id, SEL, long, BOOL))objc_msgSend)(self, sel_registerName("_setItem:enabled:"), item, YES);
 	}
@@ -596,7 +622,8 @@ cellular_apply_update(id self, SEL sel, id update, id item)
 	static int said;
 	id result = original_apply_update(self, sel, update, item);
 	id data = responds(update, "data") ? ((id (*)(id, SEL))objc_msgSend)(update, sel_registerName("data")) : nil;
-	id entry = responds(data, "mainCellularEntry") ? ((id (*)(id, SEL))objc_msgSend)(data, sel_registerName("mainCellularEntry")) : nil;
+	id entry = responds(data, "mainCellularEntry") ? ((id (*)(id, SEL))objc_msgSend)(data, sel_registerName("mainCellularEntry")) :
+	    responds(data, "cellularEntry") ? ((id (*)(id, SEL))objc_msgSend)(data, sel_registerName("cellularEntry")) : nil;
 	id view = responds(item, "view") ? ((id (*)(id, SEL))objc_msgSend)(item, sel_registerName("view")) : nil;
 	long mode = responds(view, "signalMode") ? ((long (*)(id, SEL))objc_msgSend)(view, sel_registerName("signalMode")) : -1;
 
@@ -707,10 +734,14 @@ cellular_hook(void)
 		int registered = sysctl_int("kern.hakios.cellular_registered"), bars = sysctl_int("kern.hakios.cellular_bars");
 		int data_up = sysctl_int("kern.hakios.cellular_data");
 
-		if (data_up != last_data && cellular_aggregator != nil) {
+		static int last_wifi = -2;
+		int wifi_now = wifi_carries_data();
+
+		if ((data_up != last_data || wifi_now != last_wifi) && cellular_aggregator != nil) {
 			static const char *const updaters[] = { "_updateDataNetworkItem", "_updateServiceItem" };
 
 			last_data = data_up;
+			last_wifi = wifi_now;
 			for (unsigned u = 0; u < 2; u++) {
 				SEL update = sel_registerName(updaters[u]);
 

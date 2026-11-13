@@ -1138,6 +1138,7 @@ rpmh_command(const char *name, uint32_t value)
 	return done != 0;
 }
 
+static uint32_t ipa_stage;              /* ipa845=N: 2 the clock and the SMMU, 3 and the image put in place, 4 all with the SDM845's bus votes, 1 all without */
 #define BCM_VOTE(on, vote)      (1u << 30 | (uint32_t)(on) << 29 | ((vote) & 0x3fffu))
 
 /* The IPA's clock, on or off: the BCM "IP0" (dt of Linux: clocks = <&rpmhcc RPMH_IPA_CLK>). */
@@ -1158,6 +1159,23 @@ ipa_clock(bool on)
 	 * (Not on the 6T, run 55: these are the SC7280's BCMs on the IPA's way; the SDM845's command database has the same
 	 * names for other things, and its ACV voted at 0x3fff sent the phone to CrashDump. modem_ipa_bus=1: voted all the same.)
 	 */
+	/*
+	 * ipa845=4: the SDM845's own, as Linux's interconnect driver has them for the IPA's three paths (sdm845.c): the
+	 * processor to its registers through the config NoC (CN0), the IPA to IMEM (SN1), the IPA to memory through
+	 * aggre2 and the system NoC (SN11, SN0) to the memory controller (MC0, and ACV, whose vote is a mask of masters:
+	 * the SDM845's is bit 3, as y, x 0 -- never 0x3fff); small votes, as for a low bandwidth.
+	 */
+	if (ipa_stage >= 4) {
+		static const struct {
+			const char *name;
+			uint32_t vote;
+		} paths[] = { { "CN0", 1 }, { "SN1", 1 }, { "SN11", 1 }, { "SN0", 1 }, { "MC0", 1 }, { "ACV", 8 } };
+
+		for (unsigned b = 0; b < sizeof(paths) / sizeof(paths[0]); b++) {
+			bb_say("ipa: bus %s %s\n", paths[b].name, on ? "on" : "off");
+			rpmh_command(paths[b].name, BCM_VOTE(on, on ? paths[b].vote : 0));
+		}
+	}
 	if (option("modem_ipa_bus")) {
 		static const char *const buses[] = { "SN8", "SH0", "MC0", "ACV" };
 
@@ -1993,7 +2011,6 @@ static uint32_t pas_ipa = PAS_IPA_DEFAULT;
  * which starts it, never answered INIT_DRIVER. Should the microcontroller fetch its code from DDR at
  * the address Android uses, this is why. modem_ipa_fw_at=ADDRESS chooses (0x8b700000 allows 0x1a000).
  */
-static uint32_t ipa_stage;              /* ipa845=N: 2 the clock and the SMMU, 3 and the image put in place, else all */
 static uint32_t ipa_fw_memory = 0x8c400000u, ipa_fw_size = 0x10000u;      /* the 6T: dt ipa_fw_mem, ipa-fw@8c400000 (64 KB) */
 
 

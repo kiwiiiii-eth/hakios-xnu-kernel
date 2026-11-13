@@ -5682,6 +5682,40 @@ wlfw_rails_look(void)
 	}
 }
 
+/*
+ * The same supplies in one line (slave 1, where the PM8998's LDOs answer; read only), said with `why': at NAS's
+ * registration and every two minutes after (run 50: the modem registered on LTE, and soon after ath10k's firmware
+ * stopped answering -- did the modem's own votes move a rail the radio shares, which nothing of ours votes for?).
+ */
+static void
+wlfw_rails_line(const char *why)
+{
+	static const struct {
+		const char *name;
+		uint8_t peripheral;
+	} rails[] = {
+		{ "l5", 0x44 }, { "l7", 0x46 }, { "l17", 0x50 }, { "l23", 0x56 }, { "l25", 0x58 }, { "rf_clk1", 0x54 },
+		{ "rf_clk2", 0x55 },
+	};
+	char line[400];
+	int n;
+
+	if (hakios_pmic_reader == NULL) {
+		return;
+	}
+	n = snprintf(line, sizeof(line), "mpss: the Wi-Fi's supplies (%s):", why);
+	for (unsigned i = 0; i < sizeof(rails) / sizeof(rails[0]) && n < (int)sizeof(line); i++) {
+		uint16_t id = (uint16_t)(1 << 8 | rails[i].peripheral);
+		uint8_t vset[2] = { 0 }, enable = 0, status = 0, mode = 0;
+		int bad = hakios_pmic_reader(id, 0x40, vset, 2) | hakios_pmic_reader(id, 0x46, &enable, 1) |
+		    hakios_pmic_reader(id, 0x08, &status, 1) | hakios_pmic_reader(id, 0x45, &mode, 1);
+
+		n += snprintf(line + n, sizeof(line) - (size_t)n, bad ? " %s ?" : " %s %s %u mV st %#x md %#x", rails[i].name,
+		    (enable & 0x80) ? "ON" : "off", vset[1] << 8 | vset[0], status, mode);
+	}
+	tell("%s\n", line);
+}
+
 #if !__has_include("hakios.wlfw_ath10k.h")
 
 static void
@@ -7032,6 +7066,7 @@ step_nas(void)
 		if (nas.state.registered && nas.state.has_signal) {
 			if (!registered) {
 				registered = true;
+				wlfw_rails_line("NAS registered");
 				data_deadline = now_us() + (uint64_t)data_wait * 1000000ull;
 				tell("mpss: nas: registered; the data session is given up to %u s to come up\n", data_wait);
 			}
@@ -7072,9 +7107,14 @@ static volatile bool nas_wanted, nas_runs;
 static void
 nas_thread(__unused void *parameter, __unused wait_result_t result)
 {
+	unsigned rounds = 0;
+
 	while (nas_wanted) {
 		if (nas_opened && nas.connected) {
 			nas_polls += hakios_nas_client_poll(&nas) == 0;
+		}
+		if (++rounds % 60 == 1) {
+			wlfw_rails_line(nas.state.registered ? "registered, now" : "not registered, now");     /* (every two minutes) */
 		}
 		for (unsigned ms = 0; ms < 2000 && nas_wanted; ms += 100) {
 			sleep_ms(100);

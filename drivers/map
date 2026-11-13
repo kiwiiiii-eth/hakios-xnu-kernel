@@ -14,6 +14,8 @@ input    bsd/dev/hakios.input.c
 input    bsd/dev/hakios.buttons.c
 input    bsd/dev/hakios.rmi4.c
 input    bsd/dev/hakios.virtio_input.c
+input    bsd/dev/hakios.hidres.c
+input    iokit/Kernel/hakios.hidresource.cpp
 
 storage  bsd/dev/hakios.ufs.c
 storage  bsd/dev/hakios.ufshc.c

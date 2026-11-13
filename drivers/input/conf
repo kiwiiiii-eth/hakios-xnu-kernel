@@ -22,3 +22,10 @@ driver RMI4
 driver BUTTONS
 	file    bsd/dev/hakios.buttons.c
 	help    the power and volume keys, read from the PMIC through the SPMI arbiter (buttons=1)
+
+driver HIDRESOURCE
+	file    bsd/dev/hakios.hidres.c
+	file    iokit/Kernel/hakios.hidresource.cpp iokitcpp
+	default n
+	help    IOHIDFamily's IOHIDResource as bluetoothd uses it to make a HID device of a Bluetooth keyboard or mouse, and
+	help    /dev/hakios-hid, where what it is handed goes for backboardd to post (hid_resource=0: neither)

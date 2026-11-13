@@ -756,6 +756,8 @@ static const struct virtual_service_callbacks service_callbacks = {
  * how fast the machine is and on how many processors it has, so no fixed delay avoids it:
  * the service is made again until the server has opened it.
  */
+static bool service_external;   /* make_service(): a Bluetooth device's, not built in (hid_thread()) */
+
 static IOHIDServiceClientRef
 make_service(IOHIDEventSystemClientRef client, const char *product, int page, int usage, bool display)
 {
@@ -777,8 +779,8 @@ make_service(IOHIDEventSystemClientRef client, const char *product, int page, in
 	CFDictionarySetValue(properties, CFSTR("DeviceUsagePage"), page_number);
 	CFDictionarySetValue(properties, CFSTR("DeviceUsage"), usage_number);
 	CFDictionarySetValue(properties, CFSTR("DeviceUsagePairs"), pairs);
-	CFDictionarySetValue(properties, CFSTR("Built-In"), kCFBooleanTrue);
-	CFDictionarySetValue(properties, CFSTR("Transport"), CFSTR("SPI"));
+	CFDictionarySetValue(properties, CFSTR("Built-In"), service_external ? kCFBooleanFalse : kCFBooleanTrue);
+	CFDictionarySetValue(properties, CFSTR("Transport"), service_external ? CFSTR("Bluetooth Low Energy") : CFSTR("SPI"));
 	CFDictionarySetValue(properties, CFSTR("Manufacturer"), CFSTR("redwood"));
 	CFDictionarySetValue(properties, CFSTR("Product"), name);
 	CFDictionarySetValue(properties, CFSTR("VendorID"), zero);
@@ -986,6 +988,186 @@ input_thread(__unused void *arg)
 	return NULL;
 }
 
+/*
+ * Bluetooth keyboards (the 6T, run 91: an ESP32 as a BLE keyboard connected and typed nothing). bluetoothd makes a HID
+ * device of one through IOHIDResource, which the kernel stands in for (drivers/input/hakios.hidresource.cpp) and queues
+ * what it is handed on /dev/hakios-hid: a device made (its report descriptor), its input reports, a device gone. Here
+ * each keyboard report -- the boot keyboard's layout: modifiers, a reserved byte, six keys, after the report id if the
+ * descriptor has ids -- is compared with the one before, and the keys that went down or up are posted as keyboard events
+ * (page 7) through a virtual service of a keyboard that is not built in.
+ */
+#define HAKIOS_HID_DEVICE       "/dev/hakios-hid"
+#define HID_PAGE_GENERIC_DESKTOP 0x01
+#define HID_USAGE_KEYBOARD      0x06
+#define HID_PAGE_KEYBOARD       0x07
+
+struct hid_record {
+	uint16_t type, device;
+	uint32_t length;
+};
+
+/* the report id of the keyboard collection (Generic Desktop / Keyboard), 0 if the descriptor has no ids, -1 if no keyboard */
+static int
+keyboard_report_id(const uint8_t *d, uint32_t length)
+{
+	uint32_t page = 0;
+	bool in_keyboard = false, any_id = false;
+
+	for (uint32_t i = 0; i < length;) {
+		uint8_t prefix = d[i], size = prefix & 3;
+		uint32_t value = 0;
+
+		if (prefix == 0xfe) {           /* a long item */
+			i += 3 + (i + 1 < length ? d[i + 1] : 0);
+			continue;
+		}
+		size = size == 3 ? 4 : size;
+		for (uint8_t b = 0; b < size && i + 1 + b < length; b++) {
+			value |= (uint32_t)d[i + 1 + b] << (8 * b);
+		}
+		switch (prefix & 0xfc) {
+		case 0x04: page = value; break;                                 /* Usage Page */
+		case 0x08: if (page == HID_PAGE_GENERIC_DESKTOP && value == HID_USAGE_KEYBOARD) { in_keyboard = true; } break;
+		case 0x84:                                                      /* Report ID */
+			any_id = true;
+			if (in_keyboard) {
+				return (int)value;
+			}
+			break;
+		}
+		i += 1 + size;
+	}
+	return in_keyboard ? (any_id ? -1 : 0) : -1;
+}
+
+static void
+send_key(IOHIDServiceClientRef keyboard, uint32_t usage, bool down)
+{
+	IOHIDEventRef event = IOHIDEventCreateKeyboardEvent(NULL, mach_absolute_time(), HID_PAGE_KEYBOARD, usage, down, 0);
+
+	if (event != NULL) {
+		IOHIDEventSetIntegerValue(event, FIELD_IS_BUILT_IN, 0);
+		IOHIDVirtualServiceClientDispatchEvent(keyboard, event);
+		CFRelease(event);
+	}
+}
+
+static void *
+hid_thread(__unused void *arg)
+{
+	static uint8_t buffer[8192];
+	IOHIDEventSystemClientRef client;
+	IOHIDServiceClientRef keyboard = NULL;
+	uint8_t held[8] = { 0 };                /* the modifiers, a reserved byte, six keys: the last report */
+	int report_id = -1, device = -1;
+	unsigned said = 0;
+
+	pthread_setname_np("hakios bluetooth keys");
+	for (int tries = 0; tries < 120 && (device = open(HAKIOS_HID_DEVICE, O_RDONLY)) < 0; tries++) {
+		sleep(1);
+	}
+	if (device < 0) {
+		say("hakios: keys: %s: %s\n", HAKIOS_HID_DEVICE, strerror(errno));
+		return NULL;
+	}
+	if (input_services_made != NULL) {
+		dispatch_semaphore_wait(input_services_made, dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC));
+		dispatch_semaphore_signal(input_services_made);         /* (for whoever else waits on it) */
+	}
+	client = IOHIDEventSystemClientCreateWithType(NULL, HID_CLIENT_SIMPLE, NULL);
+	if (client == NULL) {
+		say("hakios: keys: no HID client\n");
+		return NULL;
+	}
+	IOHIDEventSystemClientScheduleWithDispatchQueue(client, dispatch_queue_create("hakios.keys", NULL));
+	for (;;) {
+		ssize_t got = read(device, buffer, sizeof(buffer));
+
+		if (got <= 0) {
+			if (got < 0 && errno == EINTR) {
+				continue;
+			}
+			say("hakios: keys: reading %s: %s\n", HAKIOS_HID_DEVICE, got < 0 ? strerror(errno) : "end");
+			break;
+		}
+		for (ssize_t at = 0; at + (ssize_t)sizeof(struct hid_record) <= got;) {
+			struct hid_record r;
+			const uint8_t *data = buffer + at + sizeof(r);
+
+			memcpy(&r, buffer + at, sizeof(r));
+			at += (ssize_t)sizeof(r) + r.length;
+			if (at > got) {
+				break;
+			}
+			if (r.type == 1) {
+				report_id = keyboard_report_id(data, r.length);
+				say("hakios: keys: device %u: a %u-byte report descriptor; the keyboard's report id %d (-1: no keyboard)\n",
+				    r.device, r.length, report_id);
+				if (report_id >= 0 && keyboard == NULL) {
+					service_external = true;
+					keyboard = make_service(client, "Bluetooth keyboard", HID_PAGE_GENERIC_DESKTOP, HID_USAGE_KEYBOARD, false);
+					service_external = false;
+					say("hakios: keys: the keyboard service %p\n", (void *)keyboard);
+				}
+				memset(held, 0, sizeof(held));
+			} else if (r.type == 2 && keyboard != NULL && report_id >= 0) {
+				const uint8_t *k = data;
+				uint32_t n = r.length;
+
+				if (report_id > 0) {
+					if (n < 1 || k[0] != report_id) {
+						continue;               /* another collection's report (media keys and the like) */
+					}
+					k++;
+					n--;
+				}
+				if (n < 8) {
+					continue;
+				}
+				if (said++ < 6) {
+					say("hakios: keys: report %02x %02x %02x %02x %02x %02x %02x %02x\n", k[0], k[1], k[2], k[3], k[4], k[5],
+					    k[6], k[7]);
+				}
+				for (int bit = 0; bit < 8; bit++) {     /* the modifiers: 0xe0 left control .. 0xe7 right GUI */
+					bool was = held[0] & (1 << bit), is = k[0] & (1 << bit);
+
+					if (was != is) {
+						send_key(keyboard, 0xe0 + (uint32_t)bit, is);
+					}
+				}
+				for (int i = 2; i < 8; i++) {           /* keys let go */
+					if (held[i] > 1 && memchr(k + 2, held[i], 6) == NULL) {
+						send_key(keyboard, held[i], false);
+					}
+				}
+				for (int i = 2; i < 8; i++) {           /* keys pressed */
+					if (k[i] > 1 && memchr(held + 2, k[i], 6) == NULL) {
+						send_key(keyboard, k[i], true);
+					}
+				}
+				memcpy(held, k, 8);
+			} else if (r.type == 3) {
+				if (keyboard != NULL) {
+					for (int bit = 0; bit < 8; bit++) {
+						if (held[0] & (1 << bit)) {
+							send_key(keyboard, 0xe0 + (uint32_t)bit, false);
+						}
+					}
+					for (int i = 2; i < 8; i++) {
+						if (held[i] > 1) {
+							send_key(keyboard, held[i], false);
+						}
+					}
+				}
+				memset(held, 0, sizeof(held));
+				say("hakios: keys: device %u gone\n", r.device);
+			}
+		}
+	}
+	close(device);
+	return NULL;
+}
+
 static void
 input_start(void)
 {
@@ -993,6 +1175,9 @@ input_start(void)
 
 	input_services_made = dispatch_semaphore_create(0);
 	if (pthread_create(&thread, NULL, input_thread, NULL) == 0) {
+		pthread_detach(thread);
+	}
+	if (pthread_create(&thread, NULL, hid_thread, NULL) == 0) {
 		pthread_detach(thread);
 	}
 }

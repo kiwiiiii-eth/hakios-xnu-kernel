@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **423 arguments**: 351 read by the kernel, 14 by the loader, 69 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **424 arguments**: 352 read by the kernel, 14 by the loader, 69 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
@@ -195,7 +195,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `soc_pas_mpss` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_SOC_PAS_MPSS` |  |
 | `soc_smem` | K | `hakios.mpss.c`, `hakios.mpss845.c`, `hakios.socinfo.c` | `CONFIG_SOC_SMEM` |  |
 
-## Audio and battery (43)
+## Audio and battery (44)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -208,6 +208,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `adsp8_keep` | K | `hakios.adsp845.c` | `CONFIG_ADSP8_KEEP` |  |
 | `adsp8_listen` | K | `hakios.adsp845.c` | `CONFIG_ADSP8_LISTEN` |  |
 | `adsp8_pause` | K | `hakios.adsp845.c` | `CONFIG_ADSP8_PAUSE` |  |
+| `adsp8_se4` | K | `hakios.adsp845.c` | `CONFIG_ADSP8_SE4` |  |
 | `adsp8_wait` | K | `hakios.adsp845.c` | `CONFIG_ADSP8_WAIT` |  |
 | `adsp_again` | K | `hakios.adsp.c` | `CONFIG_ADSP_AGAIN` |  |
 | `adsp_apr_wait` | K | `hakios.adsp.c` | `CONFIG_ADSP_APR_WAIT` |  |

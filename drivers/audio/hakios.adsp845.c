@@ -3546,6 +3546,20 @@ step_tfa(void)
 		printf("adsp845: %u: engine 4 is not an I2C engine with a FIFO: nothing more is done\n", step);
 		return false;
 	}
+	/*
+	 * (S0, the lane's sound-shortest-path.md: writing engine 4 is a kind of write the user has not agreed to on the 6T, and
+	 * the plan goes by a bit-banged I2C instead; so it waits for adsp8_se4=1, given only once agreed)
+	 */
+	{
+		uint32_t se4 = 0;
+
+		PE_parse_boot_argn("adsp8_se4", &se4, sizeof(se4));
+		if (se4 == 0) {
+			printf("adsp845: %u: engine 4's registers would be written next: not without adsp8_se4=1 (not agreed to): nothing more is done\n",
+			    step);
+			return false;
+		}
+	}
 	printf("adsp845: %u: about to write engine 4's own setup registers (as hakios.rmi4.c does the touch engine's): FIFO mode, 100 kHz at 19.2 MHz\n",
 	    step);
 	snprintf(last_write, sizeof(last_write), "step %u set up engine 4's registers (0x890000) and read 0x34 reg 0x03", step);

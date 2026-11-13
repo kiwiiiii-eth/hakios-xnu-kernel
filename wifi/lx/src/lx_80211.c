@@ -532,10 +532,25 @@ linuxkpi_ieee80211_beacon_loss(struct ieee80211_vif *vif)
 	printf("lx: the driver reports beacons lost\n");
 }
 
+/*
+ * The access point's beacons gone for good (ath10k: its beacon-miss work, 3 s after it said "beacons lost"): as when the
+ * access point shows us the door, the system is told the link is down, so that wifid leaves and may join again (run 43:
+ * the hotspot moved to 5 GHz, this was said every 3 s and the system still thought it was joined). No lock is taken:
+ * the driver calls this from its work, which a leave cancels while holding the wiphy's (cancel_delayed_work_sync()).
+ */
 void
 linuxkpi_ieee80211_connection_loss(struct ieee80211_vif *vif)
 {
-	printf("lx: the driver reports the connection lost\n");
+	struct lx_radio *radio = the_radio;
+
+	if (radio == NULL || !radio->joined) {
+		return;
+	}
+	lx_tell("lx: THE CONNECTION IS LOST: the access point's beacons are gone; the system is told\n");
+	radio->joined = false;
+	radio->last_error = ECONNRESET;
+	lx_os_net_link(0);
+	lx_os_station_lost(ECONNRESET);
 }
 
 /* (the driver's recovery after its firmware has died, which nothing here goes through) */

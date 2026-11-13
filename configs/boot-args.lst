@@ -194,6 +194,7 @@ modem	k
 modem_again	k
 modem_apn	k
 modem_buffer	k
+modem_data	k
 modem_data_nobind	k
 modem_data_off	k
 modem_data_wait	k

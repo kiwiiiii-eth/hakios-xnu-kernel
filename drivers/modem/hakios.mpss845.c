@@ -130,7 +130,7 @@ static bool rmtfs_start(void);
 static void rmtfs_stop(void);
 
 #define STEPS                   12
-#define MPSS845_PORTED          11      /* the steps made the 6T's: the others are not attempted */
+#define MPSS845_PORTED          12      /* the steps made the 6T's: the others are not attempted */
 #define HAKIOS_SOC_BASE        0x00400000ul    /* where the loader says the phone's peripherals begin */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
@@ -5870,6 +5870,12 @@ static bool
 step_wlfw(void)
 {
 	static struct wlfw_cap_resp_msg_v01 cap_reply;
+
+	/* (with wifi=1 ath10k's own qmi.c makes this exchange, once the link is up: two at once would fight) */
+	if (option("wifi")) {
+		printf("mpss: %u: the WLFW exchange is left to ath10k (wifi=1)\n", step);
+		return true;
+	}
 	struct wlfw_ind_register_req_msg_v01 reg;
 	struct wlfw_ind_register_resp_msg_v01 reg_reply;
 	struct wlfw_host_cap_req_msg_v01 host;
@@ -6536,7 +6542,8 @@ wds_server(__unused void *context, bool arrived, uint32_t service, __unused uint
 static void
 wds_open(void)
 {
-	if (wds_port == NULL && !option("modem_data_off")) {
+	/* (the 6T: the data path, the IPA, is not made yet; modem_data=1 asks for the session all the same) */
+	if (wds_port == NULL && !option("modem_data_off") && option("modem_data")) {
 		wds_port = qrtr_open(wds_receive, wds_server, NULL);
 		if (wds_port != NULL) {
 			qrtr_lookup(wds_port, QMI_WDS, 0, 0);
@@ -7994,6 +8001,13 @@ steps_thread(__unused void *parameter, __unused wait_result_t result)
 		printf("mpss: no root file system within a minute: the steps are not performed\n");
 	} else {
 		run_steps();
+		/* (kept up past NAS's step: its questions go on every two seconds, as with modem=1) */
+		if (keep && step >= 12 && nas_opened && nas.connected) {
+			tell("mpss: the modem stays up with NAS asked every two seconds: %s, %u bars (%d dBm, %s)\n",
+			    nas.state.registered ? "REGISTERED" : "not registered", nas.state.bars, nas.state.has_signal ? nas.state.dbm : 0,
+			    radio_name(nas.state.radio_interface));
+			nas_start();
+		}
 	}
 	if (option("modem_return")) {
 		printf("mpss: back to the loader (modem_return)\n");

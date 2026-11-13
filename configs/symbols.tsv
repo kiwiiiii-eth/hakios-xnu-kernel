@@ -176,6 +176,7 @@ MIC_SECS	arg	mic_secs	Audio and battery	k	hakios.mic.c
 MIC_TAP	arg	mic_tap	Audio and battery	k	hakios.mic.c	
 MIC_TEST	arg	mic_test	Audio and battery	k	hakios.mic.c	
 MODEM_APN	arg	modem_apn	Cellular	k	hakios.mpss.c,hakios.mpss845.c	a session to that APN instead of the default profile
+MODEM_DATA	arg	modem_data	User space	k	hakios.mpss845.c	
 MODEM_DATA_NOBIND	arg	modem_data_nobind	Cellular	k	hakios.mpss.c,hakios.mpss845.c	
 MODEM_DATA_OFF	arg	modem_data_off	Cellular	k	hakios.mpss.c,hakios.mpss845.c	
 MODEM_DATA_WAIT	arg	modem_data_wait	Cellular	k	hakios.mpss.c,hakios.mpss845.c	

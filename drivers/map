@@ -31,6 +31,7 @@ gpu      iokit/Kernel/hakios.gpu.cpp
 
 camera   bsd/dev/hakios.camera.c
 camera   bsd/dev/hakios.torch.c
+camera   bsd/dev/hakios.torch8998.c
 
 haptic   bsd/dev/hakios.haptic.c
 

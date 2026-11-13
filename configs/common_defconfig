@@ -45,6 +45,7 @@ CONFIG_HAKIOS_CAMERA=y
 
 # the flashlight: the flash LED module of the PM8350C (torch=1); it stays off while the battery is too warm [hakios.torch.c]
 CONFIG_HAKIOS_TORCH=y
+# CONFIG_HAKIOS_TORCH8998 is not set
 
 # the chip's identity from the firmware's shared memory: kern.hakios.soc_* (socinfo=1). Any Qualcomm SoC that keeps ... [hakios.socinfo.c]
 CONFIG_HAKIOS_SOCINFO=y

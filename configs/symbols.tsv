@@ -104,7 +104,10 @@ FBSUBTYPE	arg	fbsubtype	GPU and display	k	MiniIOMobileFramebuffer.cpp
 FBTRACE	arg	fbtrace	GPU and display	k	MiniIOMobileFramebuffer.cpp	log the first N calls of every selector (default 3)
 FBWIDTH	arg	fbwidth	GPU and display	ku	MiniIOMobileFramebuffer.cpp,inject_sb.c	
 FG8998	arg	fg8998	User space	k	hakios.fg8998.c	
+FG_CHARGE	arg	fg_charge	User space	k	hakios.fg8998.c	
+FG_CHARGE_MA	arg	fg_charge_ma	User space	k	hakios.fg8998.c	
 FG_CHARGER_LOOK	arg	fg_charger_look	User space	k	hakios.fg8998.c	
+FG_INPUT_MA	arg	fg_input_ma	User space	k	hakios.fg8998.c	
 GAMUT	arg	gamut	Loader	l	loader.c	
 GIC_VTIMER	arg	gic_vtimer	User space	k	gic_v3_irq.c	
 GL	arg	gl	User space	u	inject.c,inject_sb.c	not even with a GPU; gl=1: also without one, by Mesa's software driver (slow; for working on eagl.c in QEMU)
@@ -285,9 +288,9 @@ THERMAL_LOG	arg	thermal_log	Chip, thermal and PMIC	k	hakios.thermal.c	a summary 
 THERMAL_SOC	arg	thermal_soc	Chip, thermal and PMIC	k	hakios.thermal.c	the SDM845's table of sensors (21) instead of the reference phone's (27)
 THERMAL_TM0	arg	thermal_tm0	Chip, thermal and PMIC	k	hakios.thermal.c	
 THERMAL_TM1	arg	thermal_tm1	Chip, thermal and PMIC	k	hakios.thermal.c	
-TORCH	arg	torch	Haptics and torch	kl	hakios.torch.c,loader.c	a look, reading only: the arbiter's channel for the module and who may write through it, the module's type, its registers, the PMIC's temperature
-TORCH_MAX_S	arg	torch_max_s	Haptics and torch	k	hakios.torch.c	
-TORCH_SECS	arg	torch_secs	Haptics and torch	k	hakios.torch.c	
+TORCH	arg	torch	Haptics and torch	kl	hakios.torch.c,hakios.torch8998.c,loader.c	a look, reading only: the arbiter's channel for the module and who may write through it, the module's type, its registers, the PMIC's temperature
+TORCH_MAX_S	arg	torch_max_s	Haptics and torch	k	hakios.torch.c,hakios.torch8998.c	
+TORCH_SECS	arg	torch_secs	Haptics and torch	k	hakios.torch.c,hakios.torch8998.c	
 TOUCH_FLIP	arg	touch_flip	Touch and buttons	k	hakios.goodix.c	
 TOUCH_LAT	arg	touch_lat	GPU and display	ku	HakiosMetalCA.m,MiniIOMobileFramebuffer.cpp,eagl.c,hakios.goodix.c,hakios.gpu.cpp,hakios.input.c,inject.c,inject_sb.c	a line for every wait of a program's for the GPU that took a millisecond or more ("tl: f KIND US at US"), for telling apart what holds a frame up
 TOUCH_POLL_US	arg	touch_poll_us	Touch and buttons	k	hakios.goodix.c	

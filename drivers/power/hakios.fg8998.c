@@ -3,8 +3,9 @@
  * driver maps (hakios_pmic_reader, drivers/core/hakios.platform.c), and handed to drivers/power/hakios.battery.c
  * (hakios_battery_report): the sysctls kern.hakios.battery_* and HakiosBattery, the power source Darwin shows.
  *
- * READ ONLY. Nothing here writes to the PMIC: the charger runs as the boot loader left it (its own limits, its own
- * JEITA protection), and the fuel gauge keeps learning on its own. What is read, every ten seconds (slave 2, the
+ * READ ONLY, unless fg_charge=1 (below: two registers of the charger). Otherwise nothing here writes to the PMIC: the
+ * charger runs as the boot loader left it (its own limits, its own JEITA protection), and the fuel gauge keeps learning
+ * on its own. What is read, every ten seconds (slave 2, the
  * PMI8998; the layout is the phone's own kernel's, LineageOS 22.2 drivers/power/supply/qcom/fg-reg.h, qpnp-fg-gen3.c,
  * and Linux's qcom_smbx.c for the charger):
  *
@@ -83,6 +84,150 @@ static const struct {
 
 static bool fg_read(uint16_t id, uint8_t reg, uint8_t *bytes, uint32_t count);
 
+/*
+ * Charging under this kernel (boot-arg fg_charge=1; the user's decision, 11-13): two registers of the charger written,
+ * and nothing else. Run 46 read what the boot loader leaves: USB's input limited to 500 mA (USBIN_CURRENT_LIMIT_CFG
+ * 0x1370 = 0x14, in force at ICL_STATUS 0x1607; "input current limited" set) although the Mac's port is a CDP and says
+ * 1.5 A on Type-C (0x1308 = 0x04, 0x130b = 0x40), and the battery's fast-charge current at 0 (0x1061). So the phone took
+ * 500 mA and the battery gave the rest. Written here: the input limit to fg_input_ma (1000; at most 1500) and the
+ * fast-charge current to fg_charge_ma (1000, Linux's qcom_smbx.c's cap "to minimise potential fire hazard risks"; at
+ * most 1000), 25 mA a unit, each read back. The charger's own protection (JEITA, its timers) is left as it is; and
+ * while the battery is at 45 C or more both go back to what they were and stay so for the rest of the run.
+ *
+ * Writes through the PMIC arbiter (version 5, the reference phone's addresses: drivers/camera/hakios.torch.c) on the
+ * channel of the charger's peripheral, if that channel is ours (owner 0); one at a time with the buttons' driver.
+ */
+#define ARB_CORE_PHYS           0x0c440000UL
+#define ARB_CORE_SIZE           0x1100UL
+#define ARB_CNFG_PHYS           0x0c40a000UL
+#define ARB_CNFG_SIZE           0x1000UL
+#define ARB_CHNLS_PHYS          0x0c600000UL
+#define ARB_VERSION_5           0x50000000u
+#define ARB_VERSION_7           0x70000000u
+#define ARB_CHANNEL(n)          (0x900 + 4 * (n))
+#define ARB_OWNER(n)            (0x700 + 4 * (n))
+#define ARB_MAX_CHANNELS        512
+#define CHANNEL_COMMAND         0x00
+#define CHANNEL_STATUS          0x08
+#define CHANNEL_WDATA0          0x10
+
+extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+
+struct fg_writable {
+	uint16_t id;                    /* slave << 8 | peripheral */
+	uint8_t reg;
+	uint8_t was;                    /* as the boot loader left it */
+	vm_offset_t channel;            /* its write channel, mapped */
+};
+static struct fg_writable fg_icl = { .id = 0x213, .reg = 0x70 };      /* USBIN_CURRENT_LIMIT_CFG */
+static struct fg_writable fg_fcc = { .id = 0x210, .reg = 0x61 };      /* FAST_CHARGE_CURRENT_CFG */
+static bool fg_written, fg_given_back;
+
+static const char *
+fg_find_channel(struct fg_writable *w)
+{
+	static vm_offset_t core, cnfg;
+	uint32_t version, channels;
+
+	if (core == 0) {
+		core = ml_io_map(ARB_CORE_PHYS, ARB_CORE_SIZE);
+		cnfg = ml_io_map(ARB_CNFG_PHYS, ARB_CNFG_SIZE);
+	}
+	version = *(volatile uint32_t *)(core + 0);
+	channels = *(volatile uint32_t *)(core + 4) & 0x7ff;
+	if (version < ARB_VERSION_5 || version >= ARB_VERSION_7) {
+		return "the arbiter is not of version 5";
+	}
+	channels = channels == 0 || channels > ARB_MAX_CHANNELS ? ARB_MAX_CHANNELS : channels;
+	for (uint32_t n = 0; n < channels; n++) {
+		uint32_t map = *(volatile uint32_t *)(core + ARB_CHANNEL(n));
+
+		if (map != 0 && ((map >> 8) & 0xfff) == w->id && (*(volatile uint32_t *)(cnfg + ARB_OWNER(n)) & 7) == 0) {
+			w->channel = ml_io_map(ARB_CHNLS_PHYS + 0x10000UL * n, 0x1000);
+			return NULL;
+		}
+	}
+	return "no channel of the arbiter for it is ours";
+}
+
+/* One register written and read back: NULL, or what went wrong. */
+static const char *
+fg_put(struct fg_writable *w, uint8_t value)
+{
+	uint8_t back = 0xff;
+	uint32_t status = 0;
+
+	if (w->channel == 0) {
+		return "no channel";
+	}
+	for (int tries = 0; tries < 3; tries++) {
+		uint64_t start = mach_absolute_time(), interval;
+
+		nanoseconds_to_absolutetime(2000 * (uint64_t)NSEC_PER_USEC, &interval);
+		hakios_spmi_lock();
+		*(volatile uint32_t *)(w->channel + CHANNEL_WDATA0) = value;
+		*(volatile uint32_t *)(w->channel + CHANNEL_COMMAND) = (uint32_t)w->reg << 4;     /* write, one byte */
+		do {
+			status = *(volatile uint32_t *)(w->channel + CHANNEL_STATUS);
+		} while (!(status & 1) && mach_absolute_time() - start < interval);
+		hakios_spmi_unlock();
+		if ((status & 0xf) != (1 | 8)) {
+			break;          /* (done, or failed; dropped ones -- done and 8 -- are asked for again) */
+		}
+	}
+	if (!(status & 1) || (status & 0xe)) {
+		return !(status & 1) ? "no answer from the arbiter" : (status & 4) ? "the arbiter refuses" : "the write failed";
+	}
+	if (!fg_read(w->id, w->reg, &back, 1) || back != value) {
+		return "it does not read back as written";
+	}
+	return NULL;
+}
+
+static void
+fg_charge_start(void)
+{
+	uint32_t input_ma = 1000, charge_ma = 1000;
+	const char *problem;
+
+	PE_parse_boot_argn("fg_input_ma", &input_ma, sizeof(input_ma));
+	PE_parse_boot_argn("fg_charge_ma", &charge_ma, sizeof(charge_ma));
+	input_ma = input_ma < 100 ? 100 : input_ma > 1500 ? 1500 : input_ma;
+	charge_ma = charge_ma > 1000 ? 1000 : charge_ma;
+	if (hakios_battery_temperature() >= 45) {
+		printf("fg8998: CHARGING NOT SET UP: the battery is at %d C\n", hakios_battery_temperature());
+		return;
+	}
+	if ((problem = fg_find_channel(&fg_icl)) != NULL || (problem = fg_find_channel(&fg_fcc)) != NULL ||
+	    !fg_read(fg_icl.id, fg_icl.reg, &fg_icl.was, 1) || !fg_read(fg_fcc.id, fg_fcc.reg, &fg_fcc.was, 1)) {
+		printf("fg8998: CHARGING NOT SET UP: %s\n", problem != NULL ? problem : "a read failed");
+		return;
+	}
+	fg_written = true;
+	if ((problem = fg_put(&fg_icl, (uint8_t)(input_ma / 25))) != NULL ||
+	    (problem = fg_put(&fg_fcc, (uint8_t)(charge_ma / 25))) != NULL) {
+		printf("fg8998: CHARGING: a write: %s; both given back\n", problem);
+		(void)fg_put(&fg_fcc, fg_fcc.was);
+		(void)fg_put(&fg_icl, fg_icl.was);
+		fg_given_back = true;
+		return;
+	}
+	printf("fg8998: CHARGING SET UP: USB's input limit %u mA (was %u), the battery's fast charge %u mA (was %u); back as they "
+	    "were at 45 C\n", input_ma, fg_icl.was * 25, charge_ma, fg_fcc.was * 25);
+}
+
+/* every poll while charging is set up: too warm, and both go back for the rest of the run */
+static void
+fg_charge_watch(void)
+{
+	if (!fg_written || fg_given_back || hakios_battery_temperature() < 45) {
+		return;
+	}
+	fg_given_back = true;
+	printf("fg8998: THE BATTERY IS AT %d C: charging given back (input %s, fast charge %s)\n", hakios_battery_temperature(),
+	    fg_put(&fg_icl, fg_icl.was) == NULL ? "back" : "NOT BACK", fg_put(&fg_fcc, fg_fcc.was) == NULL ? "back" : "NOT BACK");
+}
+
 static void
 fg_charger_look(const char *why)
 {
@@ -135,7 +280,7 @@ fg_thread(__unused void *parameter, __unused wait_result_t result)
 	static const char *const doing[8] = { "trickle", "pre-charge", "fast", "full on", "taper", "done", "inhibited",
 		                              "disabled" };
 	uint8_t subtype[2] = { 0, 0 };
-	uint32_t charger_look = 1;
+	uint32_t charger_look = 1, charge_on = 0;
 	int was_plugged = -1;
 
 	for (int i = 0; i < 60 && hakios_pmic_reader == NULL; i++) {
@@ -153,6 +298,7 @@ fg_thread(__unused void *parameter, __unused wait_result_t result)
 	printf("fg8998: the PMI8998's fuel gauge (subtypes %#x, %#x); read every %u s, nothing written\n", subtype[0],
 	    subtype[1], POLL_SECONDS);
 	PE_parse_boot_argn("fg_charger_look", &charger_look, sizeof(charger_look));
+	PE_parse_boot_argn("fg_charge", &charge_on, sizeof(charge_on));
 	if (charger_look) {
 		for (unsigned k = 0; k < sizeof(fg_charger_regs) / sizeof(fg_charger_regs[0]); k++) {
 			printf("fg8998: %#x %s\n", fg_charger_regs[k].reg, fg_charger_regs[k].name);
@@ -195,6 +341,11 @@ fg_thread(__unused void *parameter, __unused wait_result_t result)
 				fg_charger_look(was_plugged != (int)plugged ? (plugged ? "USB in" : "USB out") : "a while on");
 			}
 			was_plugged = plugged;
+			if (tick == 1 && charge_on) {
+				fg_charge_start();       /* (after the first reading: the battery's temperature is known) */
+				fg_charger_look("charging set up");
+			}
+			fg_charge_watch();
 			if (tick % 6 == 0) {
 				printf("fg8998: %d.%02d%%, %d mV, %d mA (gauge %d), %d.%02d C; USB %s, charger %s\n", soc / 100,
 				    soc % 100, state.voltage_uv / 1000, state.current_ua / 1000, ibatt_ua / 1000,

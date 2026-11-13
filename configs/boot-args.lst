@@ -113,7 +113,10 @@ fbsubtype	k
 fbtrace	k
 fbwidth	ku
 fg8998	k
+fg_charge	k
+fg_charge_ma	k
 fg_charger_look	k
+fg_input_ma	k
 gamut	l
 gic_vtimer	k
 gl	u

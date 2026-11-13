@@ -5866,7 +5866,9 @@ step_mic_codec(void)
 
 static volatile uint32_t mic_returned, mic_reads, mic_read_errors;
 static volatile uint64_t mic_sum_squares, mic_frames_heard;
-static volatile uint32_t mic_peak;
+static volatile uint32_t mic_peak, mic_nonzero;
+static int16_t mic_first[8];
+static volatile bool mic_first_taken;
 
 static bool
 mic_events(uint8_t service, __unused uint16_t port, uint32_t opcode, uint32_t token, const uint32_t *payload, uint32_t length)
@@ -5888,9 +5890,14 @@ mic_events(uint8_t service, __unused uint16_t port, uint32_t opcode, uint32_t to
 				__asm__ volatile ("dc ivac, %0" : : "r" (line));
 			}
 			__asm__ volatile ("dsb sy");
+			if (!mic_first_taken && bytes >= 16) {
+				memcpy(mic_first, samples, 16);
+				mic_first_taken = true;
+			}
 			for (uint32_t i = 0; i < bytes / 2; i++) {
 				int32_t v = samples[i];
 
+				mic_nonzero += v != 0;
 				squares += (uint64_t)((int64_t)v * v);
 				peak = (uint32_t)(v < 0 ? -v : v) > peak ? (uint32_t)(v < 0 ? -v : v) : peak;
 			}
@@ -5944,6 +5951,8 @@ mic_listen(const char *what, unsigned ms, uint32_t handle)
 	mic_sum_squares = 0;
 	mic_frames_heard = 0;
 	mic_peak = 0;
+	mic_nonzero = 0;
+	mic_first_taken = false;
 	while (now_us() - began < (uint64_t)ms * 1000) {
 		uint32_t back = mic_returned;
 
@@ -5958,8 +5967,9 @@ mic_listen(const char *what, unsigned ms, uint32_t handle)
 		sleep_ms(2);
 	}
 	rms = mic_frames_heard ? isqrt64(mic_sum_squares / mic_frames_heard) : 0;
-	printf("adsp845: %u: HEARD (%s): %llu frames in %u ms, RMS %u, peak %u (of 32768); reads %u, errors %u\n", step, what,
-	    mic_frames_heard, ms, rms, mic_peak, mic_reads, mic_read_errors);
+	printf("adsp845: %u: HEARD (%s): %llu frames in %u ms (%u not zero), RMS %u, peak %u (of 32768); reads %u, errors %u; the first: "
+	    "%d %d %d %d %d %d %d %d\n", step, what, mic_frames_heard, ms, mic_nonzero, rms, mic_peak, mic_reads, mic_read_errors,
+	    mic_first[0], mic_first[1], mic_first[2], mic_first[3], mic_first[4], mic_first[5], mic_first[6], mic_first[7]);
 	return rms;
 }
 
@@ -5992,6 +6002,8 @@ mic_ngd_user(uint8_t mc, const uint8_t *payload, uint32_t n, uint8_t tid, const 
 	printf("adsp845: %u: SLIMbus %s: acknowledged (%02x %02x)\n", step, what, r[0], r[1]);
 	return true;
 }
+
+static void mic_ifd_show(const char *when);
 
 static bool
 mic_codec_capture_on(void)
@@ -6031,17 +6043,43 @@ mic_codec_capture_on(void)
 	    !mic_codec_update(0x0d1d, 0x07, 0x04, "ADC_MUX0_CFG0: ADC4") || !mic_codec_update(0x0d1e, 0x03, 0x01, "ADC_MUX0_CFG1: AMIC") ||
 	    !mic_codec_update(0x0a32, 0x80, 0x00, "TX0_TX_PATH_CFG0: analog") ||
 	    !mic_codec_update(0x0d3a, 0x03, 0x02, "CDC_IF_ROUTER_TX_MUX_CFG0: TX0 <- DEC0") ||
+	    !mic_codec_update(0x0611, 0x20, 0x20, "ANA_AMIC4: tx hold (Linux's ADC PRE_PMU)") ||
 	    !mic_codec_update(0x0611, 0x80, 0x80, "ANA_AMIC4: ADC4 on") ||
 	    !mic_codec_update(0x0a31, 0x2f, 0x24, "TX0_TX_PATH_CTL: DEC0 clock, 48 kHz") ||
-	    !mic_codec_update(0x0a32, 0x60, 0x20, "TX0_TX_PATH_CFG0: high-pass 75 Hz") ||
+	    !mic_codec_update(0x0a32, 0x60, 0x40, "TX0_TX_PATH_CFG0: high-pass 150 Hz") ||
+	    !mic_codec_update(0x0a39, 0x02, 0x02, "TX0_TX_PATH_SEC2: cut-off change request")) {
+		return false;
+	}
+	sleep_ms(1);
+	if (!mic_codec_update(0x0a39, 0x02, 0x00, "TX0_TX_PATH_SEC2: request over") ||
 	    !mic_codec_update(0x0a31, 0x10, 0x00, "TX0_TX_PATH_CTL: not muted")) {
 		return false;
 	}
 	(void)mic_codec_read(0x0a34, &v);
 	(void)mic_codec_write(0x0a34, v, "TX0_TX_VOL_CTL (again, to take)");
 	/* E: the interface device's TX port 0: channel mask 1, 12 bytes of watermark, on */
-	return mic_ve_write(mic_la_ifd, 0x100, 0x01) && mic_ve_write(mic_la_ifd, 0x101, 0x00) && mic_ve_write(mic_la_ifd, 0x050, 0x05) &&
-	       (printf("adsp845: %u: the interface device's TX port 0: channel mask 0x01, configuration 0x05\n", step), true);
+	if (!mic_ve_write(mic_la_ifd, 0x100, 0x01) || !mic_ve_write(mic_la_ifd, 0x101, 0x00) || !mic_ve_write(mic_la_ifd, 0x050, 0x05) ||
+	    !mic_ve_write(mic_la_ifd, 0x032, 0x01)) {
+		return false;
+	}
+	mic_ifd_show("set");
+	return true;
+}
+
+/* the interface device's TX port 0: its configuration and its interrupt status (overflow b0, underflow b1, closed b2) */
+static void
+mic_ifd_show(const char *when)
+{
+	uint8_t v[6] = { 0 };
+
+	(void)mic_ve_read(mic_la_ifd, 0x100, &v[0], 1);
+	(void)mic_ve_read(mic_la_ifd, 0x050, &v[1], 1);
+	(void)mic_ve_read(mic_la_ifd, 0x032, &v[2], 1);
+	(void)mic_ve_read(mic_la_ifd, 0x036, &v[3], 1);
+	(void)mic_ve_read(mic_la_ifd, 0x070, &v[4], 1);
+	(void)mic_ve_read(mic_la_ifd, 0x080, &v[5], 1);
+	printf("adsp845: %u: the interface's TX port 0 (%s): channel mask %#x, configuration %#x, interrupts on %#x, status %#x, source %#x, "
+	    "port status %#x\n", step, when, v[0], v[1], v[2], v[3], v[4], v[5]);
 }
 
 static void
@@ -6192,6 +6230,7 @@ step_mic_capture(void)
 		mic_read(n, handle);
 	}
 	rms_on = mic_listen("AMIC5, MIC BIAS3 on", 3000, handle);
+	mic_ifd_show("after 3 s");
 	(void)mic_codec_update(0x0625, 0xc0, 0x00, "ANA_MICB3: off (to compare)");
 	rms_off = mic_listen("AMIC5, MIC BIAS3 off", 2000, handle);
 	(void)mic_codec_update(0x0625, 0xc0, 0x40, "ANA_MICB3: on again");

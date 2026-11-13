@@ -143,7 +143,7 @@ static LCK_GRP_DECLARE(adsp_lock_group, "hakios-adsp845");
 
 static void bb_say(const char *format, ...) __printflike(1, 2);
 
-#define STEPS                   14
+#define STEPS                   15
 #define FIRST_INDEPENDENT_STEP  12      /* the steps from here on do not need the DSP (800 of adsp8=N leaves it alone) */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
@@ -3973,11 +3973,499 @@ off:
 	return ok;
 }
 
+/* ---- step 15: a stream of ours to the speaker's port, a quiet tone through it, the amplifier left off ----------- */
+
+/*
+ * S5 of lane-b-notes/sound-shortest-path.md (agreed to by the user, 11-13: SMMU stream 0x1821; the AFE as in step 14). After the
+ * port of step 14 is started again: our memory shown to the DSP through the application processors' SMMU as stream 0x1821 (Android's
+ * qcom,msm-audio-ion: iommus <&apps_smmu 0x1821 0>; the stream's low four bits, 1, in bits 32 to 35 of every address given to the DSP)
+ * through a context of ours with page tables of ours (hakios.sound.c's way), a device path (ADM, COPP) to port 0x1006 of 16 bits,
+ * an ASM stream routed to it, and a 1 kHz tone at -40 dBFS written into it for two seconds; the DSP's "written" events counted,
+ * the data pin (gpio61) watched. The amplifier stays off: nothing to hear. Then all closed, stopped, and given back.
+ */
+#define S_ASM                   7
+#define S_ADM                   8
+#define ADM_CMD_DEVICE_OPEN_V5                  0x00010326u
+#define ADM_CMDRSP_DEVICE_OPEN_V5               0x00010329u
+#define ADM_CMD_DEVICE_CLOSE_V5                 0x00010327u
+#define ADM_CMD_MATRIX_MAP_ROUTINGS_V5          0x00010325u
+#define ADM_TOPOLOGY_NONE                       0x00010312u
+#define ASM_CMD_SHARED_MEM_MAP_REGIONS          0x00010d92u
+#define ASM_CMDRSP_SHARED_MEM_MAP_REGIONS       0x00010d93u
+#define ASM_CMD_SHARED_MEM_UNMAP_REGIONS        0x00010d94u
+#define ASM_STREAM_CMD_OPEN_WRITE_V3            0x00010db3u
+#define ASM_DATA_CMD_MEDIA_FMT_UPDATE_V2        0x00010d98u
+#define ASM_SESSION_CMD_RUN_V2                  0x00010daau
+#define ASM_DATA_CMD_WRITE_V2                   0x00010dabu
+#define ASM_DATA_EVENT_WRITE_DONE_V2            0x00010d99u
+#define ASM_SESSION_EVENT_RX_UNDERFLOW          0x00010c17u
+#define ASM_STREAM_CMD_CLOSE                    0x00010bcdu
+#define ASM_TOPOLOGY_NONE                       0x00010c68u
+#define ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V2      0x00010da5u
+#define S5_STREAM_PORT          (1 << 8 | 1)    /* session 1, stream 1 */
+#define S5_WRITE_TOKEN          0x80000000u
+#define S5_PERIODS              8
+#define S5_PERIOD_FRAMES        960             /* 20 ms */
+#define S5_PERIOD_BYTES         (S5_PERIOD_FRAMES * 4)
+#define S5_BYTES                (S5_PERIODS * 4096)
+#define AUDIO_STREAM_6T         0x1821
+#define AUDIO_ADDRESSES_6T      0x10000000ull
+#define AUDIO_STREAM_BITS_6T    (1ull << 32)    /* 0x1821 & 0xf */
+
+extern lck_mtx_t hakios_smmu_lock;
+
+#define SMMU_SCR0               0x000
+#define SMMU_IDR0               0x020
+#define SMMU_IDR1               0x024
+#define SMMU_SGFSR              0x048
+#define SMMU_SGFSYNR1           0x054
+#define SMMU_SMR(n)             (0x800 + 4 * (n))
+#define SMMU_S2CR(n)            (0xc00 + 4 * (n))
+#define SMMU_CBAR(n)            (4 * (n))
+#define SMMU_CBAR_STAGE_1       (1u << 16 | 3u << 8 | 0xfu << 12)
+#define SMMU_CBA2R(n)           (0x800 + 4 * (n))
+#define SMMU_CB_SCTLR           0x00
+#define SMMU_CB_TCR2            0x10
+#define SMMU_CB_TTBR0           0x20
+#define SMMU_CB_TTBR1           0x28
+#define SMMU_CB_TCR             0x30
+#define SMMU_CB_MAIR0           0x38
+#define SMMU_CB_MAIR1           0x3c
+#define SMMU_CB_FSR             0x58
+#define SMMU_CB_FAR             0x60
+#define SMMU_CB_FSYNR0          0x68
+#define SMMU_CB_TLBIASID        0x610
+#define SMMU_CB_TLBSYNC         0x7f0
+#define SMMU_CB_TLBSTATUS       0x7f4
+#define SMMU_SCTLR_ON           (1u << 0 | 1u << 1 | 1u << 2 | 1u << 5 | 1u << 8 | 1u << 12)
+#define SMMU_TCR_39_BITS        (25u | 1u << 8 | 1u << 10 | 3u << 12 | 1u << 23)
+#define SMMU_TCR2               (1u | 1u << 4 | 7u << 15)
+#define SMMU_MAIR0              0xf404ff44
+#define SMMU_FSR_ALL            0xc00001fe
+#define AUDIO_PTE               (3ull | 1ull << 6 | 2ull << 8 | 1ull << 10 | 1ull << 11)
+
+static struct block s5_smmu = { "apps smmu", 0x15000000, 0x2000, 0 };
+static struct block s5_smmu_second = { "apps smmu", 0, 0x1000, 0 };
+static struct block s5_smmu_context = { "apps smmu, the audio context", 0, 0x1000, 0 };
+static struct {
+	bool on, passed;
+	uint32_t match, context, old_smr, old_s2cr, old_sctlr;
+	vm_offset_t tables;
+} s5_space;
+static vm_offset_t s5_buffer;
+static uint64_t s5_address;
+static volatile uint32_t s5_returned, s5_done, s5_underflows, s5_errors;
+
+/* stream 0x1821 through a context of ours; with hakios_smmu_lock held */
+static bool
+s5_space_on(void)
+{
+	bool used[256] = { false };
+	uint32_t scr0 = get(&s5_smmu, "scr0", SMMU_SCR0), idr0 = get(&s5_smmu, "idr0", SMMU_IDR0);
+	uint32_t idr1 = get(&s5_smmu, "idr1", SMMU_IDR1), matches = idr0 & 0xff, contexts = idr1 & 0xff, page, pages;
+	uint64_t *root, *second, *third, table_root;
+
+	if (scr0 & 1u << 3) {
+		printf("adsp845: %u: this SMMU numbers its streams with 16 bits: not written for\n", step);
+		return false;
+	}
+	page = idr1 >> 31 ? 0x10000 : 0x1000;
+	pages = 2u << (idr1 >> 28 & 7);
+	s5_space.match = ~0u;
+	for (uint32_t n = 0; n < matches && SMMU_SMR(n) < 0xc00; n++) {
+		uint32_t smr = rd(s5_smmu.base + SMMU_SMR(n)), s2cr = rd(s5_smmu.base + SMMU_S2CR(n));
+		uint32_t stream = smr & 0x7fff, mask = smr >> 16 & 0x7fff;
+
+		if (smr >> 31) {
+			used[s2cr & 0xff] = true;
+			if (((stream ^ AUDIO_STREAM_6T) & ~mask) == 0) {
+				printf("adsp845: %u: match register %u covers stream 0x1821 already (smr %#x, s2cr %#x)\n", step, n, smr, s2cr);
+				if ((s2cr >> 16 & 3) == 1) {
+					s5_space.passed = true;
+					return true;
+				}
+				printf("adsp845: %u: ... and does not pass it untranslated: somebody's, left alone\n", step);
+				return false;
+			}
+		} else if (s5_space.match == ~0u) {
+			s5_space.match = n;
+			s5_space.old_smr = smr;
+			s5_space.old_s2cr = s2cr;
+		}
+	}
+	for (s5_space.context = 0; s5_space.context < contexts && used[s5_space.context]; s5_space.context++) {
+	}
+	if (s5_space.match == ~0u || s5_space.context >= contexts) {
+		printf("adsp845: %u: the SMMU has no match register or no context left\n", step);
+		return false;
+	}
+	s5_smmu_second.phys = s5_smmu.phys + page;
+	s5_smmu_context.phys = s5_smmu.phys + (pages + s5_space.context) * page;
+	s5_space.old_sctlr = get(&s5_smmu_context, "sctlr", SMMU_CB_SCTLR);
+	if (s5_space.old_sctlr & 1) {
+		printf("adsp845: %u: context %u is on with no stream through it: somebody's, left alone\n", step, s5_space.context);
+		return false;
+	}
+	if (s5_space.tables == 0 && kmem_alloc(kernel_map, &s5_space.tables, 3 * 4096, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		s5_space.tables = 0;
+		return false;
+	}
+	bzero((void *)s5_space.tables, 3 * 4096);
+	root = (uint64_t *)s5_space.tables;
+	second = (uint64_t *)(s5_space.tables + 4096);
+	third = (uint64_t *)(s5_space.tables + 8192);
+	root[AUDIO_ADDRESSES_6T >> 30 & 0x1ff] = kvtophys((vm_offset_t)second) | 3;
+	second[AUDIO_ADDRESSES_6T >> 21 & 0x1ff] = kvtophys((vm_offset_t)third) | 3;
+	for (unsigned n = 0; n < S5_BYTES / 4096; n++) {
+		third[(AUDIO_ADDRESSES_6T >> 12 & 0x1ff) + n] = kvtophys(s5_buffer + 4096 * n) | AUDIO_PTE;
+	}
+	for (vm_offset_t line = s5_space.tables; line < s5_space.tables + 3 * 4096; line += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (line));
+	}
+	__asm__ volatile ("dsb sy");
+	table_root = kvtophys(s5_space.tables) | (uint64_t)s5_space.context << 48;
+	printf("adsp845: %u: THE SMMU IS ABOUT TO BE WRITTEN: context %u gets our page tables for %u KB at %#llx, match register %u sends "
+	    "stream 0x1821 (mask 0) through it\n", step, s5_space.context, S5_BYTES / 1024, AUDIO_ADDRESSES_6T, s5_space.match);
+	put(&s5_smmu_context, "sctlr", SMMU_CB_SCTLR, 0);
+	put(&s5_smmu_second, "cba2r", SMMU_CBA2R(s5_space.context), 1);
+	put(&s5_smmu_second, "cbar", SMMU_CBAR(s5_space.context), SMMU_CBAR_STAGE_1);
+	put(&s5_smmu_context, "tcr2", SMMU_CB_TCR2, SMMU_TCR2);
+	put(&s5_smmu_context, "tcr", SMMU_CB_TCR, SMMU_TCR_39_BITS);
+	put(&s5_smmu_context, "ttbr0, low", SMMU_CB_TTBR0, (uint32_t)table_root);
+	put(&s5_smmu_context, "ttbr0, high", SMMU_CB_TTBR0 + 4, (uint32_t)(table_root >> 32));
+	put(&s5_smmu_context, "ttbr1, low", SMMU_CB_TTBR1, 0);
+	put(&s5_smmu_context, "ttbr1, high", SMMU_CB_TTBR1 + 4, 0);
+	put(&s5_smmu_context, "mair0", SMMU_CB_MAIR0, SMMU_MAIR0);
+	put(&s5_smmu_context, "mair1", SMMU_CB_MAIR1, 0);
+	put(&s5_smmu_context, "fsr", SMMU_CB_FSR, SMMU_FSR_ALL);
+	put(&s5_smmu_context, "tlbiasid", SMMU_CB_TLBIASID, s5_space.context);
+	put(&s5_smmu_context, "tlbsync", SMMU_CB_TLBSYNC, 1);
+	for (unsigned ms = 0; rd(s5_smmu_context.base + SMMU_CB_TLBSTATUS) & 1; ms++) {
+		if (ms == 100) {
+			return false;
+		}
+		sleep_ms(1);
+	}
+	put(&s5_smmu_context, "sctlr", SMMU_CB_SCTLR, SMMU_SCTLR_ON);
+	s5_space.on = true;
+	put(&s5_smmu, "s2cr", SMMU_S2CR(s5_space.match), s5_space.context);
+	put(&s5_smmu, "smr", SMMU_SMR(s5_space.match), 1u << 31 | AUDIO_STREAM_6T);
+	if (get(&s5_smmu, "smr", SMMU_SMR(s5_space.match)) != (1u << 31 | AUDIO_STREAM_6T)) {
+		printf("adsp845: %u: THE SMMU DID NOT TAKE THE MATCH REGISTER\n", step);
+		return false;
+	}
+	printf("adsp845: %u: STREAM 0x1821 GOES THROUGH CONTEXT %u of the SMMU, with our page tables\n", step, s5_space.context);
+	return true;
+}
+
+static void
+s5_space_off(void)
+{
+	uint32_t status, global;
+
+	if (!s5_space.on) {
+		return;
+	}
+	status = rd(s5_smmu_context.base + SMMU_CB_FSR);
+	global = rd(s5_smmu.base + SMMU_SGFSR);
+	if ((status & SMMU_FSR_ALL) == 0 && global == 0) {
+		printf("adsp845: %u: the SMMU refused the DSP nothing (context %u)\n", step, s5_space.context);
+	} else {
+		printf("adsp845: %u: THE SMMU REFUSED A REQUEST: context %u status %#x, address %#x%08x, syndrome %#x; global %#x stream %#x\n",
+		    step, s5_space.context, status, rd(s5_smmu_context.base + SMMU_CB_FAR + 4), rd(s5_smmu_context.base + SMMU_CB_FAR),
+		    rd(s5_smmu_context.base + SMMU_CB_FSYNR0), global, rd(s5_smmu.base + SMMU_SGFSYNR1));
+	}
+	put(&s5_smmu, "smr (given back)", SMMU_SMR(s5_space.match), s5_space.old_smr);
+	put(&s5_smmu, "s2cr (given back)", SMMU_S2CR(s5_space.match), s5_space.old_s2cr);
+	put(&s5_smmu_context, "sctlr (given back)", SMMU_CB_SCTLR, s5_space.old_sctlr);
+	s5_space.on = false;
+}
+
+static bool
+s5_events(uint8_t service, __unused uint16_t port, uint32_t opcode, uint32_t token, const uint32_t *payload, uint32_t length)
+{
+	if (service != S_ASM) {
+		return false;
+	}
+	if ((opcode == ASM_DATA_EVENT_WRITE_DONE_V2 || opcode == APR_BASIC_RSP_RESULT) && (token & S5_WRITE_TOKEN)) {
+		if ((opcode == ASM_DATA_EVENT_WRITE_DONE_V2 && length >= 16 && payload[3] != 0) || opcode == APR_BASIC_RSP_RESULT) {
+			os_atomic_inc(&s5_errors, relaxed);
+		}
+		os_atomic_inc(&s5_done, relaxed);
+		os_atomic_or(&s5_returned, 1u << (token & 31), relaxed);
+		return true;
+	}
+	if (opcode == ASM_SESSION_EVENT_RX_UNDERFLOW) {
+		os_atomic_inc(&s5_underflows, relaxed);
+		return true;
+	}
+	return false;
+}
+
+/* a command to ASM or ADM: true if answered with status 0, or with `wanted' (then in *reply) */
+static bool
+s5_command(const char *what, uint8_t service, uint16_t port, uint32_t opcode, const void *payload, uint32_t length, uint32_t wanted,
+    struct apr_reply *reply)
+{
+	struct apr_reply local;
+
+	if (reply == NULL) {
+		reply = &local;
+	}
+	printf("adsp845: %u: %s: %s (opcode %#x)\n", step, service == S_ASM ? "ASM" : service == S_ADM ? "ADM" : "AFE", what, opcode);
+	snprintf(last_write, sizeof(last_write), "step %u asked: %s", step, what);
+	if (!apr_exchange(service, port, 0x15, false, opcode, payload, length, 1000, reply)) {
+		printf("adsp845: %u: %s: NO ANSWER\n", step, what);
+		return false;
+	}
+	if (reply->opcode == APR_BASIC_RSP_RESULT && reply->length >= 8 && reply->words[0] == opcode) {
+		printf("adsp845: %u: %s: %s (status %#x)\n", step, what, reply->words[1] == 0 ? "done" : "REFUSED", reply->words[1]);
+		return reply->words[1] == 0 && wanted == 0;
+	}
+	if (wanted != 0 && reply->opcode == wanted) {
+		return true;
+	}
+	printf("adsp845: %u: %s: an answer not expected: opcode %#x, %u bytes, %#x %#x\n", step, what, reply->opcode, reply->length,
+	    reply->words[0], reply->words[1]);
+	return false;
+}
+
+/* 1 kHz at 48 kHz, -40 dBFS (a peak of 328): one cycle (step 7 of the plan starts there too) */
+static const int16_t s5_tone[48] = {
+	0, 43, 85, 125, 164, 200, 232, 260, 284, 303, 317, 325, 328, 325, 317, 303, 284, 260, 232, 200, 164, 125, 85, 43,
+	0, -43, -85, -125, -164, -200, -232, -260, -284, -303, -317, -325, -328, -325, -317, -303, -284, -260, -232, -200, -164, -125,
+	-85, -43,
+};
+static uint32_t s5_tone_at;
+
+static void
+s5_period_fill(unsigned period)
+{
+	int16_t *samples = (int16_t *)(s5_buffer + 4096 * period);
+
+	for (unsigned frame = 0; frame < S5_PERIOD_FRAMES; frame++) {
+		int16_t sample = s5_tone[s5_tone_at++ % 48];
+
+		samples[2 * frame] = sample;
+		samples[2 * frame + 1] = sample;
+	}
+	for (vm_offset_t line = (vm_offset_t)samples; line < (vm_offset_t)samples + S5_PERIOD_BYTES; line += 64) {
+		__asm__ volatile ("dc cvac, %0" : : "r" (line));
+	}
+	__asm__ volatile ("dsb sy");
+}
+
+static bool
+s5_period_write(unsigned period, uint32_t handle)
+{
+	uint32_t write[8] = { (uint32_t)(s5_address + 4096 * period), (uint32_t)((s5_address + 4096 * period) >> 32), handle, S5_PERIOD_BYTES,
+		              period, 0, 0, 0 };
+
+	return apr_exchange(S_ASM, S5_STREAM_PORT, S5_WRITE_TOKEN | period, false, ASM_DATA_CMD_WRITE_V2, write, sizeof(write), 0, NULL);
+}
+
+static bool
+step_stream(void)
+{
+	struct afe_i2s_config i2s = { 1, MI2S_BITS, 2, 1, 1, MI2S_RATE, 0, 0 };
+	uint16_t port[2] = { QUAT_MI2S_RX, 0 };
+	uint32_t found_ctl[4], found_io[4], handle = 0, copp = 0, sent = 0;
+	bool clock = false, started = false, mapped = false, copp_open = false, stream_open = false, ok = false, smmu = false;
+	struct apr_reply reply;
+
+	announce("the port of step 14 started again; WRITE the SMMU (stream 0x1821 through a context of ours); ASK the DSP for our memory "
+	    "(ASM), a device path to port 0x1006 (ADM, 16 bits) and a stream routed to it; WRITE a 1 kHz tone at -40 dBFS into it for 2 s, the "
+	    "amplifier off; close, stop, give back");
+	if (s5_buffer == 0 && kmem_alloc(kernel_map, &s5_buffer, S5_BYTES, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		s5_buffer = 0;
+		printf("adsp845: %u: no memory for the periods\n", step);
+		return false;
+	}
+	for (unsigned i = 0; i < 4; i++) {
+		found_ctl[i] = get(&pins[i].page, "control", 0);
+		found_io[i] = get(&pins[i].page, "I/O", 4);
+	}
+	lck_mtx_lock(&hakios_smmu_lock);
+	smmu = s5_space_on();
+	lck_mtx_unlock(&hakios_smmu_lock);
+	if (!smmu) {
+		goto out;
+	}
+	s5_address = s5_space.passed ? (kvtophys(s5_buffer) | AUDIO_STREAM_BITS_6T) : (AUDIO_ADDRESSES_6T | AUDIO_STREAM_BITS_6T);
+	clock = afe_mi2s_clock(true);
+	if (!clock || !afe_param_send("the port 0x1006: I2S, 16 bits, stereo on SD1, 48 kHz", true, AFE_MODULE_AUDIO_DEV_INTERFACE,
+	    AFE_PARAM_ID_I2S_CONFIG, &i2s, sizeof(i2s))) {
+		goto out;
+	}
+	for (unsigned i = 0; i < 4; i++) {
+		bool driven = i < 2;
+
+		if (driven) {
+			put(&pins[i].page, "I/O", 4, 2);
+		}
+		put(&pins[i].page, "control", 0, 1u << 2 | 3u << 6 | (driven ? 1u << 9 : 0));
+	}
+	started = afe_command("the port 0x1006, started", AFE_PORT_CMD_DEVICE_START, port, sizeof(port));
+	if (!started) {
+		goto out;
+	}
+	{
+		struct {
+			uint16_t pool, regions;
+			uint32_t property, low, high, size;
+		} __attribute__((packed)) map = { 3, 1, 0, (uint32_t)s5_address, (uint32_t)(s5_address >> 32), S5_BYTES };
+		struct {
+			uint16_t flags, mode, endpoint1, endpoint2;
+			uint32_t topology;
+			uint16_t channels, bits;
+			uint32_t rate;
+			uint8_t map[8];
+		} __attribute__((packed)) open = { 0, 1, QUAT_MI2S_RX, 0xffff, ADM_TOPOLOGY_NONE, 2, 16, MI2S_RATE, { 1, 2 } };
+		struct {
+			uint32_t matrix, sessions;
+			uint16_t session, copps;
+			uint16_t copp[2];
+		} __attribute__((packed)) route = { 0, 1, 1, 1, { 0, 0 } };
+		struct {
+			uint32_t flags;
+			uint16_t sink, bits;
+			uint32_t topology, format;
+		} __attribute__((packed)) write = { 0, 0, 16, ASM_TOPOLOGY_NONE, ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V2 };
+		struct {
+			uint32_t size;
+			uint16_t channels, bits;
+			uint32_t rate;
+			uint16_t is_signed, reserved;
+			uint8_t map[8];
+		} __attribute__((packed)) format = { 20, 2, 16, MI2S_RATE, 1, 0, { 1, 2 } };
+		uint32_t run[3] = { 0, 0, 0 };
+
+		if (!s5_command("our periods, mapped for the DSP", S_ASM, 0, ASM_CMD_SHARED_MEM_MAP_REGIONS, &map, sizeof(map),
+		    ASM_CMDRSP_SHARED_MEM_MAP_REGIONS, &reply)) {
+			goto out;
+		}
+		mapped = true;
+		handle = reply.words[0];
+		printf("adsp845: %u: our %u KB at %#llx are the DSP's handle %#x\n", step, S5_BYTES / 1024, s5_address, handle);
+		if (!s5_command("a device path to port 0x1006: playback, no processing, 2 channels of 16 bits at 48 kHz", S_ADM, QUAT_MI2S_RX,
+		    ADM_CMD_DEVICE_OPEN_V5, &open, sizeof(open), ADM_CMDRSP_DEVICE_OPEN_V5, &reply)) {
+			goto out;
+		}
+		if (reply.words[0] != 0) {
+			printf("adsp845: %u: the device path: REFUSED (status %#x)\n", step, reply.words[0]);
+			goto out;
+		}
+		copp_open = true;
+		copp = reply.words[1] & 0xffff;
+		route.copp[0] = (uint16_t)copp;
+		printf("adsp845: %u: THE DEVICE PATH IS OPEN: COPP %u\n", step, copp);
+		if (!s5_command("the stream, opened for writing: 16-bit linear PCM, no processing", S_ASM, S5_STREAM_PORT,
+		    ASM_STREAM_CMD_OPEN_WRITE_V3, &write, sizeof(write), 0, NULL)) {
+			goto out;
+		}
+		stream_open = true;
+		if (!s5_command("session 1 routed to the device path", S_ADM, 0, ADM_CMD_MATRIX_MAP_ROUTINGS_V5, &route, sizeof(route), 0, NULL) ||
+		    !s5_command("the stream's format: 2 x 16 bits at 48 kHz", S_ASM, S5_STREAM_PORT, ASM_DATA_CMD_MEDIA_FMT_UPDATE_V2, &format,
+		    sizeof(format), 0, NULL) ||
+		    !s5_command("the session, run", S_ASM, S5_STREAM_PORT, ASM_SESSION_CMD_RUN_V2, run, sizeof(run), 0, NULL)) {
+			goto out;
+		}
+	}
+	{
+		uint64_t began = now_us();
+		uint32_t done_before, toggles_tone = 0, ones = 0;
+		bool tone_over = false, failed = false;
+
+		hakios_adsp_apr_events(s5_events);
+		s5_returned = 0;
+		s5_tone_at = 0;
+		done_before = s5_done;
+		for (unsigned n = 0; n < S5_PERIODS; n++) {
+			s5_period_fill(n);
+			if (!s5_period_write(n, handle)) {
+				printf("adsp845: %u: the write of period %u could not be sent\n", step, n);
+				failed = true;
+				break;
+			}
+			sent++;
+		}
+		while (!failed) {
+			uint32_t back = s5_returned;
+			uint64_t now = now_us();
+
+			if (back != 0) {
+				os_atomic_andnot(&s5_returned, back, relaxed);
+				for (unsigned n = 0; n < S5_PERIODS && !tone_over; n++) {
+					if (back & 1u << n) {
+						s5_period_fill(n);
+						if (!s5_period_write(n, handle)) {
+							tone_over = true;
+							break;
+						}
+						sent++;
+					}
+				}
+			}
+			if (toggles_tone == 0 && now - began > 500000) {
+				toggles_tone = pin_toggles(&pins[3], &ones);    /* gpio61, the data, while the tone plays */
+			}
+			if (!tone_over && now - began >= 2000000ull) {
+				tone_over = true;
+			}
+			if (tone_over && s5_done - done_before >= sent) {
+				break;
+			}
+			if (now - began > 4000000ull || (s5_done == done_before && now - began > 1000000ull)) {
+				printf("adsp845: %u: THE DSP HAS NOT GIVEN THE PERIODS BACK (%u of %u)\n", step, s5_done - done_before, sent);
+				failed = true;
+				break;
+			}
+			sleep_ms(2);
+		}
+		hakios_adsp_apr_events(NULL);
+		{
+			uint64_t us = now_us() - began, frames = (uint64_t)(s5_done - done_before) * S5_PERIOD_FRAMES;
+
+			printf("adsp845: %u: %u periods written, %u given back (%u with an error), %u underflows, in %llu ms: the DSP took %llu "
+			    "frames a second; the data pin (gpio61) %u changes while the tone played (the amplifier off: nothing to hear)\n", step,
+			    sent, s5_done - done_before, s5_errors, s5_underflows, us / 1000, us ? frames * 1000000 / us : 0, toggles_tone);
+		}
+		ok = !failed && s5_errors == 0 && s5_done - done_before >= sent && sent > S5_PERIODS;
+		printf("adsp845: %u: %s\n", step, ok ? "THE STREAM PLAYS: the DSP takes our samples through the SMMU at the port's pace" :
+		    "THE STREAM DID NOT PLAY CLEANLY");
+	}
+out:
+	if (stream_open) {
+		s5_command("the stream, closed", S_ASM, S5_STREAM_PORT, ASM_STREAM_CMD_CLOSE, NULL, 0, 0, NULL);
+	}
+	if (copp_open) {
+		s5_command("the device path, closed", S_ADM, (uint16_t)copp, ADM_CMD_DEVICE_CLOSE_V5, NULL, 0, 0, NULL);
+	}
+	if (mapped) {
+		s5_command("our periods, unmapped", S_ASM, 0, ASM_CMD_SHARED_MEM_UNMAP_REGIONS, &handle, sizeof(handle), 0, NULL);
+	}
+	if (started) {
+		afe_command("the port 0x1006, stopped", AFE_PORT_CMD_DEVICE_STOP, port, sizeof(port));
+	}
+	if (clock) {
+		afe_mi2s_clock(false);
+	}
+	lck_mtx_lock(&hakios_smmu_lock);
+	s5_space_off();
+	lck_mtx_unlock(&hakios_smmu_lock);
+	for (unsigned i = 0; i < 4; i++) {
+		put(&pins[i].page, "I/O (given back)", 4, found_io[i] & 2);
+		put(&pins[i].page, "control (given back)", 0, found_ctl[i]);
+	}
+	return ok;
+}
+
 /* ---- the steps, and their end ----------------------------------------------------------------------- */
 
 static bool (*const steps[STEPS])(void) = {
 	step_survey, step_firmware, step_mailbox, step_header, step_image, step_our_item, step_start, step_queues, step_link, step_qrtr,
-	step_apr, step_tfa, step_amplifier, step_afe,
+	step_apr, step_tfa, step_amplifier, step_afe, step_stream,
 };
 
 static bool keep;                       /* the DSP and the link stay up while the system runs (adsp8_keep) */

@@ -500,14 +500,17 @@ set_signal_mode(id self, SEL sel, long mode)
 {
 	static unsigned said_modes;
 	const char *name = object_getClassName(self);
-	bool cellular = name != NULL && strstr(name, "Cellular") != NULL;
+	/* (run 74: no call was ever said for a class named "Cellular": every signal view but Wi-Fi's is taken for the cellular) */
+	bool cellular = name != NULL && strstr(name, "Wifi") == NULL && strstr(name, "WiFi") == NULL && strstr(name, "Wireless") == NULL;
 	long wanted = mode;
 
-	if (cellular && mode < 8 && !(said_modes & (1u << mode))) {
-		said_modes |= 1u << mode;
-		say("hakios: cellular: %s asked for signal mode %ld\n", name, mode);
+	if (mode >= 0 && mode < 8 && said_modes < 24) {
+		said_modes++;
+		say("hakios: cellular: %s asked for signal mode %ld (registered %d, data %d)\n", name ? name : "?", mode,
+		    sysctl_int("kern.hakios.cellular_registered"), sysctl_int("kern.hakios.cellular_data"));
 	}
-	if (cellular && sysctl_int("kern.hakios.cellular_registered") > 0 && mode != cellular_active_mode) {
+	if (cellular && (sysctl_int("kern.hakios.cellular_registered") > 0 || sysctl_int("kern.hakios.cellular_data") > 0) &&
+	    mode != cellular_active_mode) {
 		wanted = cellular_active_mode;
 	}
 	original_set_signal_mode(self, sel, wanted);
@@ -534,10 +537,114 @@ signal_view_hook(void)
 	}
 }
 
+/*
+ * The data network item (the "LTE" beside the bars; Wi-Fi's fan when Wi-Fi carries the data): Darwin fills it from
+ * CoreTelephony, not here. While the kernel's data session is up and the item is not Wi-Fi's (type 5), it is made
+ * LTE (4, in the legacy status bar data's numbering: 0 GPRS, 1 EDGE, 2 3G, 3 4G, 4 LTE, 5 Wi-Fi). The values met are said.
+ */
+static void (*original_update_data_network_item)(id self, SEL sel, long item, void *data, BOOL primary, void *getter, void *setter);
+
+static void
+update_data_network_item(id self, SEL sel, long item, void *data, BOOL primary, void *getter, void *setter)
+{
+	static int said;
+	int before = -1, up = sysctl_int("kern.hakios.cellular_data");
+
+	if (original_update_data_network_item) {
+		original_update_data_network_item(self, sel, item, data, primary, getter, setter);
+	}
+	if (getter != NULL && data != NULL) {
+		before = BLOCK_CALL(getter, int (*)(void *, void *), data);
+	}
+	if (said++ < 8) {
+		say("hakios: cellular: data network item %ld (primary %d): type %d; the kernel's data session %d\n", item, primary, before, up);
+	}
+	if (primary && up > 0 && before != 5 && setter != NULL && data != NULL) {
+		BLOCK_CALL(setter, void (*)(void *, void *, int), data, 4);
+		((void (*)(id, SEL, long, BOOL))objc_msgSend)(self, sel_registerName("_setItem:enabled:"), item, YES);
+	}
+}
+
+static bool
+responds(id object, const char *selector)
+{
+	return object != nil && class_respondsToSelector(object_getClass(object), sel_registerName(selector));
+}
+
+static const char *
+described(id object)
+{
+	id text;
+
+	if (object == nil) {
+		return "nil";
+	}
+	text = ((id (*)(id, SEL))objc_msgSend)(object, sel_registerName("description"));
+	return text ? ((const char *(*)(id, SEL))objc_msgSend)(text, sel_registerName("UTF8String")) : "?";
+}
+
+/*
+ * UIKit's cellular item, as it applies an update: what its data's cellular entry says (its status and type are what
+ * make the bars grey or not), said a few times; and, while the kernel's modem is registered, its signal view put in
+ * active mode afterwards, whatever the entry said.
+ */
+static id (*original_apply_update)(id self, SEL sel, id update, id item);
+
+static id
+cellular_apply_update(id self, SEL sel, id update, id item)
+{
+	static int said;
+	id result = original_apply_update(self, sel, update, item);
+	id data = responds(update, "data") ? ((id (*)(id, SEL))objc_msgSend)(update, sel_registerName("data")) : nil;
+	id entry = responds(data, "mainCellularEntry") ? ((id (*)(id, SEL))objc_msgSend)(data, sel_registerName("mainCellularEntry")) : nil;
+	id view = responds(item, "view") ? ((id (*)(id, SEL))objc_msgSend)(item, sel_registerName("view")) : nil;
+	long mode = responds(view, "signalMode") ? ((long (*)(id, SEL))objc_msgSend)(view, sel_registerName("signalMode")) : -1;
+
+	if (said++ < 6) {
+		char line[700];
+
+		snprintf(line, sizeof(line), "%s", described(entry));
+		for (char *c = line; *c; c++) {
+			if (*c == '\n') {
+				*c = ' ';
+			}
+		}
+		say("hakios: cellular: the cellular item's update: item %s, view %s (signal mode %ld); its entry: %s\n",
+		    item ? object_getClassName(item) : "nil", view ? object_getClassName(view) : "nil", mode, line);
+	}
+	if (mode >= 0 && mode != cellular_active_mode && original_set_signal_mode != NULL &&
+	    (sysctl_int("kern.hakios.cellular_registered") > 0 || sysctl_int("kern.hakios.cellular_data") > 0)) {
+		original_set_signal_mode(view, sel_registerName("setSignalMode:"), cellular_active_mode);
+	}
+	return result;
+}
+
 static void
 cellular_hook(void)
 {
 	signal_view_hook();
+	{
+		Class item = objc_getClass("_UIStatusBarCellularItem");
+		Method apply = item ? class_getInstanceMethod(item, sel_registerName("applyUpdate:toDisplayItem:")) : NULL;
+		const char *data_selector = "_updateDataNetworkItem:withData:primary:dataNetworkTypeGetter:dataNetworkTypeSetter:";
+		Class aggregator = objc_getClass("SBStatusBarStateAggregator");
+		Method data_method = aggregator ? class_getInstanceMethod(aggregator, sel_registerName(data_selector)) : NULL;
+
+		if (apply != NULL) {
+			original_apply_update = (id (*)(id, SEL, id, id))method_getImplementation(apply);
+			method_setImplementation(apply, (IMP)cellular_apply_update);
+			say("hakios: cellular: -[_UIStatusBarCellularItem applyUpdate:toDisplayItem:] replaced (types \"%s\")\n",
+			    method_getTypeEncoding(apply));
+		} else {
+			say("hakios: cellular: no -[_UIStatusBarCellularItem applyUpdate:toDisplayItem:]\n");
+		}
+		if (data_method != NULL) {
+			original_update_data_network_item = (void (*)(id, SEL, long, void *, BOOL, void *, void *))method_getImplementation(data_method);
+			method_setImplementation(data_method, (IMP)update_data_network_item);
+			say("hakios: cellular: -[SBStatusBarStateAggregator %s] replaced (types \"%s\")\n", data_selector,
+			    method_getTypeEncoding(data_method));
+		}
+	}
 	{
 		const char *service_selector = "_updateServiceItem:withData:SIMInfo:otherSIMInfo:serviceStringGetter:serviceStringSetter:"
 		    "serviceCrossfadeStringGetter:serviceCrossfadeStringSetter:serviceContentTypeGetter:serviceContentTypeSetter:"
@@ -596,8 +703,23 @@ cellular_hook(void)
 
 	dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), 3 * NSEC_PER_SEC, NSEC_PER_SEC / 2);
 	dispatch_source_set_event_handler(timer, ^{
-		static int last_registered = -2, last_bars = -2;
+		static int last_registered = -2, last_bars = -2, last_data = -2;
 		int registered = sysctl_int("kern.hakios.cellular_registered"), bars = sysctl_int("kern.hakios.cellular_bars");
+		int data_up = sysctl_int("kern.hakios.cellular_data");
+
+		if (data_up != last_data && cellular_aggregator != nil) {
+			static const char *const updaters[] = { "_updateDataNetworkItem", "_updateServiceItem" };
+
+			last_data = data_up;
+			for (unsigned u = 0; u < 2; u++) {
+				SEL update = sel_registerName(updaters[u]);
+
+				if (class_getInstanceMethod(object_getClass(cellular_aggregator), update)) {
+					((void (*)(id, SEL))objc_msgSend)(cellular_aggregator, update);
+				}
+			}
+			say("hakios: cellular: the data network and service items asked to update (data session %d)\n", data_up);
+		}
 
 		if ((registered != last_registered || bars != last_bars) && cellular_aggregator != nil) {
 			SEL update = sel_registerName("_updateSignalStrengthItem");

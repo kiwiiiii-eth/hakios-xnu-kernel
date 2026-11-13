@@ -4243,7 +4243,12 @@ static const int16_t s5_tone[48] = {
  * volume under that, a limiter keeping the peaks at -20 dBFS (S5_PEAK_MOST): the left slot, the right one silent, as step 16.
  */
 #define S8_RING_FRAMES          16384u          /* 0.34 s */
-#define S8_BELOW_DB             0u              /* under what Darwin writes, always (r100: 20 dB made a ringtone -41 dBFS, unheard) */
+/*
+ * Under what Darwin writes, always. r100: 20 dB made the start's chime -41 dBFS, unheard; r101: 0 dB had YouTube 8x over -20 dBFS,
+ * the limiter holding it down all the time, so that Darwin's volume made no difference over most of its range. 12: loud media a
+ * little over the limit at Darwin's loudest, Darwin's volume heard over the rest.
+ */
+#define S8_BELOW_DB             12u
 #define S8_SILENCE              8               /* a sample's size under which it is taken for silence */
 #define S8_QUIET_US             3000000ull      /* this long without sound: the amplifier off */
 static int16_t s8_ring[2 * S8_RING_FRAMES];
@@ -4491,6 +4496,10 @@ step_stream(void)
 static bool
 step_speaker(void)
 {
+	if (last_step >= 17) {
+		printf("adsp845: %u: the tone's ladder is not played: step 17 follows, and puts the amplifier on itself\n", step);
+		return true;
+	}
 	return stream_play(1);
 }
 
@@ -4556,8 +4565,8 @@ s8_loop(uint32_t handle, uint32_t *sent_out)
 		}
 		if (generation != said_gen) {
 			said_gen = generation;
-			tell("adsp845: %u: Darwin's volume: %u.%u dB under its loudest%s\n", step, below / 8, below % 8 * 10 / 8,
-			    muted ? ", MUTED" : "");
+			tell("adsp845: %u: Darwin's volume: %u.%u dB under its loudest%s (setting %u)\n", step, below / 8, below % 8 * 10 / 8,
+			    muted ? ", MUTED" : "", generation);
 		}
 		if (sound && !s5_amp_on && fault == NULL) {
 			tell("adsp845: %u: sound from Darwin (its peak %u): the amplifier on\n", step, s8_peak_in);
@@ -4609,7 +4618,7 @@ s8_loop(uint32_t handle, uint32_t *sent_out)
 			tell("adsp845: %u: THE DSP HAS GIVEN NO PERIOD BACK FOR 1 s (%u of %u): Darwin's sound stops here\n", step, s5_done, sent);
 			failed = true;
 		}
-		if (now - last_say >= 10000000ull && s8_frames_in != frames_said) {
+		if (now - last_say >= (sound ? 2000000ull : 10000000ull) && s8_frames_in != frames_said) {
 			last_say = now;
 			frames_said = s8_frames_in;
 			tell("adsp845: %u: from Darwin %llu frames (its peak %u), to the speaker %llu (their peak %u of 3277; %u periods held down "

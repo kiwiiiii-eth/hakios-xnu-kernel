@@ -443,7 +443,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `gpu_dvfs` | K | `hakios.a630.c` | `CONFIG_GPU_DVFS` |  |
 | `haptic_ms` | K | `hakios.haptic8998.c` | `CONFIG_HAPTIC_MS` |  |
 | `haptic_strength` | K | `hakios.haptic8998.c` | `CONFIG_HAPTIC_STRENGTH` |  |
-| `ipa845` | K | `hakios.mpss845.c` | `CONFIG_IPA845` |  |
+| `ipa8` | K | `hakios.mpss845.c` | `CONFIG_IPA8` |  |
 | `ipa_gsi_look` | K | `hakios.mpss845.c` | `CONFIG_IPA_GSI_LOOK` |  |
 | `ipa_iram_look` | K | `hakios.mpss845.c` | `CONFIG_IPA_IRAM_LOOK` |  |
 | `m2v_utrace` | U | `HakiosMetalCA.m` | `CONFIG_M2V_UTRACE` |  |

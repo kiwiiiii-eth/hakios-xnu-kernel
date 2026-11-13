@@ -1141,7 +1141,7 @@ rpmh_command(const char *name, uint32_t value)
 	return done != 0;
 }
 
-static uint32_t ipa_stage;              /* ipa845=N: 2 the clock and the SMMU, 3 and the image put in place, 4 all with the SDM845's bus votes, 1 all without */
+static uint32_t ipa_stage;              /* ipa8=N: 2 the clock and the SMMU, 3 and the image put in place, 4 all with the SDM845's bus votes, 1 all without */
 #define BCM_VOTE(on, vote)      (1u << 30 | (uint32_t)(on) << 29 | ((vote) & 0x3fffu))
 
 /* The IPA's clock, on or off: the BCM "IP0" (dt of Linux: clocks = <&rpmhcc RPMH_IPA_CLK>). */
@@ -1163,7 +1163,7 @@ ipa_clock(bool on)
 	 * names for other things, and its ACV voted at 0x3fff sent the phone to CrashDump. modem_ipa_bus=1: voted all the same.)
 	 */
 	/*
-	 * ipa845=4: the SDM845's own, as Linux's interconnect driver has them for the IPA's three paths (sdm845.c): the
+	 * ipa8=4: the SDM845's own, as Linux's interconnect driver has them for the IPA's three paths (sdm845.c): the
 	 * processor to its registers through the config NoC (CN0), the IPA to IMEM (SN1), the IPA to memory through
 	 * aggre2 and the system NoC (SN11, SN0) to the memory controller (MC0, and ACV, whose vote is a mask of masters:
 	 * the SDM845's is bit 3, as y, x 0 -- never 0x3fff); small votes, as for a low bandwidth.
@@ -2162,7 +2162,7 @@ ipa_hardware_init(void)
 
 
 /*
- * The same for the 6T's IPA 3.5.1 (ipa845=8), as Linux does it for that version before its firmware is used
+ * The same for the 6T's IPA 3.5.1 (ipa8=8), as Linux does it for that version before its firmware is used
  * (ipa_mem_setup() with data/ipa_data-v3.5.1.c's ipa_mem_local_data; ipa_hardware_config() and ipa_resource_config()
  * with ipa_data_v3_5_1; reg/ipa_reg-v3.5.1.c). The local memory is 8 KB: the microcontroller's area to 0x288 left
  * alone, the rest zeroed, canaries before the tables (2 each), the modem's headers and processing contexts (2 each)
@@ -2691,7 +2691,7 @@ ipa_firmware_load(void)
 	    "Android does before the modem");
 	printf("mpss: %u: the IPA's image goes at %#x (%#x bytes allowed)\n", step, ipa_fw_memory, ipa_fw_size);
 	if (ipa_stage == 0) {
-		PE_parse_boot_argn("ipa845", &ipa_stage, sizeof(ipa_stage));
+		PE_parse_boot_argn("ipa8", &ipa_stage, sizeof(ipa_stage));
 	}
 	bb_say("ipa: the clock (IP0)\n");
 	if (!ipa_clock(true)) {
@@ -2704,7 +2704,7 @@ ipa_firmware_load(void)
 	}
 	bb_say("ipa: the SMMU done\n");
 	if (ipa_stage == 2) {
-		tell("mpss: %u: ipa845=2: the IPA's clock and SMMU, and no more\n", step);
+		tell("mpss: %u: ipa8=2: the IPA's clock and SMMU, and no more\n", step);
 		return false;
 	}
 	{
@@ -2810,7 +2810,7 @@ ipa_firmware_load(void)
 	settle();
 	ml_io_unmap((vm_offset_t)memory, size);
 	if (ipa_stage == 3) {
-		tell("mpss: %u: ipa845=3: the IPA's image taken and put in place, not started\n", step);
+		tell("mpss: %u: ipa8=3: the IPA's image taken and put in place, not started\n", step);
 		goto out;
 	}
 	bb_say("ipa: TrustZone's PAS_AUTH_AND_RESET(15)\n");
@@ -2884,10 +2884,10 @@ gsi_looked:
 	}
 	/*
 	 * (Not on the 6T yet, run 62: Android's IPA 4.11 values, written to an IPA 3.5.1 and a GSI 1.3, hung the bus -- the
-	 * secure watchdog right after TrustZone started the firmware. ipa845=8 once they are the 6T's.)
+	 * secure watchdog right after TrustZone started the firmware. ipa8=8 once they are the 6T's.)
 	 */
 	if (ipa_stage >= 8 && !option("modem_ipa_raw")) {
-		/* the 6T: IPA 3.5.1 (ipa845=8: its memory and hardware; 9: and this processor's data path) */
+		/* the 6T: IPA 3.5.1 (ipa8=8: its memory and hardware; 9: and this processor's data path) */
 		ipa351_memory_init();
 		ipa351_hardware_init();
 		hakios_ipa_set_version(351);
@@ -7182,14 +7182,14 @@ step_nas(void)
 		return false;
 	}
 	/*
-	 * The IPA, first part (ipa845=1): its clock, its SMMU streams, its firmware through TrustZone (image 15, pmOS's
+	 * The IPA, first part (ipa8=1): its clock, its SMMU streams, its firmware through TrustZone (image 15, pmOS's
 	 * ipa_fws into ipa_fw_mem), then its status read -- nothing more, and the modem not told of it (no SMP2P "ipa",
 	 * no QMI): what the 6T's IPA is, before the modem is asked to use it (run 53: without it, LTE makes the modem assert).
 	 */
-	if (option("ipa845") && !ipa_loaded && ipa_stage == 0) {
+	if (option("ipa8") && !ipa_loaded && ipa_stage == 0) {
 		ipa_loaded = ipa_firmware_load();
 		if (ipa_loaded) {
-			ipa_status("its firmware loaded (ipa845=1; the modem not told)");
+			ipa_status("its firmware loaded (ipa8=1; the modem not told)");
 			ipa_space_faults("its firmware loaded");
 		}
 	}
@@ -7803,20 +7803,20 @@ step_mba(void)
 		return false;
 	}
 	/*
-	 * ipa845=6 (7: with the SDM845's bus votes; 8 and 9: and IPA 3.5.1's memory and hardware, 9 its data path too): the
+	 * ipa8=6 (7: with the SDM845's bus votes; 8 and 9: and IPA 3.5.1's memory and hardware, 9 its data path too): the
 	 * IPA's firmware before the modem is started, as the reference phone
 	 * and Android do -- runs 56 and 59 asked TrustZone for it with the modem up, and TrustZone hung (its secure watchdog).
 	 */
 	{
 		uint32_t stage = 0;
 
-		PE_parse_boot_argn("ipa845", &stage, sizeof(stage));
+		PE_parse_boot_argn("ipa8", &stage, sizeof(stage));
 		if (stage >= 6 && !ipa_loaded) {
 			ipa_stage = stage == 7 ? 4 : stage >= 8 ? stage : 1;     /* (8, 9: also the 3.5.1 memory, hardware, data path) */
 			ipa_loaded = ipa_firmware_load();
 			if (ipa_loaded) {
 				bb_say("ipa: the status next\n");
-			ipa_status("its firmware loaded before the modem (ipa845=6; the modem not told)");
+			ipa_status("its firmware loaded before the modem (ipa8=6; the modem not told)");
 			bb_say("ipa: the status read\n");
 				ipa_space_faults("its firmware loaded before the modem");
 			}

@@ -143,7 +143,7 @@ static LCK_GRP_DECLARE(adsp_lock_group, "hakios-adsp845");
 
 static void bb_say(const char *format, ...) __printflike(1, 2);
 
-#define STEPS                   16
+#define STEPS                   17
 #define FIRST_INDEPENDENT_STEP  12      /* the steps from here on do not need the DSP (800 of adsp8=N leaves it alone) */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
@@ -4237,6 +4237,63 @@ static const int16_t s5_tone[48] = {
 	0, -43, -85, -125, -164, -200, -232, -260, -284, -303, -317, -325, -328, -325, -317, -303, -284, -260, -232, -200, -164, -125,
 	-85, -43,
 };
+/*
+ * S8: what Darwin plays (/dev/hakios-audio, from the audio server's plug-in) to the speaker. The sink puts it in a ring; the
+ * periods take it from there, the two channels made one (the speaker is one), 20 dB under what Darwin wrote and Darwin's own
+ * volume under that, the peaks never over -20 dBFS (S5_PEAK_MOST): the left slot, the right one silent, as the tone of step 16.
+ */
+#define S8_RING_FRAMES          16384u          /* 0.34 s */
+#define S8_BELOW_DB             20u             /* under what Darwin writes, always */
+#define S8_SILENCE              8               /* a sample's size under which it is taken for silence */
+#define S8_QUIET_US             3000000ull      /* this long without sound: the amplifier off */
+static int16_t s8_ring[2 * S8_RING_FRAMES];
+static volatile uint32_t s8_head, s8_tail, s8_peak_in, s8_peak_out, s8_gain_q15;
+static volatile uint64_t s8_last_sound_us, s8_frames_in, s8_frames_fed, s8_frames_silent;
+static volatile bool s8_mode, s8_stopping, s8_running;
+
+/* 10^(-dB/20) in Q15, 0..96 dB */
+static const uint16_t s8_db_q15[97] = {
+	32767, 29205, 26029, 23198, 20675, 18427, 16423, 14637, 13045, 11627, 10362, 9235, 8231, 7336, 6538, 5827, 5193, 4629, 4125,
+	3677, 3277, 2920, 2603, 2320, 2068, 1843, 1642, 1464, 1305, 1163, 1036, 924, 823, 734, 654, 583, 519, 463, 413, 368, 328, 292,
+	260, 232, 207, 184, 164, 146, 130, 116, 104, 92, 82, 73, 65, 58, 52, 46, 41, 37, 33, 29, 26, 23, 21, 18, 16, 15, 13, 12, 10, 9,
+	8, 7, 7, 6, 5, 5, 4, 4, 3, 3, 3, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+};
+
+/* Darwin's volume (eighths of a dB under its loudest) and S8_BELOW_DB: the gain, Q15 */
+static uint32_t
+s8_gain_for(uint32_t below_eighths)
+{
+	uint32_t db = S8_BELOW_DB + (below_eighths + 4) / 8;
+
+	return db > 96 ? 0 : s8_db_q15[db];
+}
+
+/* From the writer's thread (the audio server's real-time one): never waits; what does not fit is dropped */
+static uint32_t
+s8_sink(const int16_t *frames, uint32_t count)
+{
+	uint32_t head = s8_head, room = S8_RING_FRAMES - (head - s8_tail), taken = count < room ? count : room, peak = s8_peak_in;
+	bool sound = false;
+
+	for (uint32_t i = 0; i < taken; i++) {
+		int16_t left = frames[2 * i], right = frames[2 * i + 1];
+		uint32_t l = left < 0 ? (uint32_t)-(int32_t)left : (uint32_t)left, r = right < 0 ? (uint32_t)-(int32_t)right : (uint32_t)right;
+
+		s8_ring[2 * ((head + i) % S8_RING_FRAMES)] = left;
+		s8_ring[2 * ((head + i) % S8_RING_FRAMES) + 1] = right;
+		sound |= l > S8_SILENCE || r > S8_SILENCE;
+		peak = l > peak ? l : r > peak ? r : peak;
+	}
+	OSMemoryBarrier();
+	s8_head = head + taken;
+	s8_frames_in += taken;
+	s8_peak_in = peak;
+	if (sound) {
+		s8_last_sound_us = now_us();
+	}
+	return taken;
+}
+
 static uint32_t s5_tone_at;
 static volatile uint32_t s5_gain;               /* the tone's: x1 -40 dBFS, x2 -34, x4 -28, x8 -22; 0 silence */
 static bool s5_left_only;
@@ -4249,7 +4306,27 @@ s5_period_fill(unsigned period)
 	int16_t *samples = (int16_t *)(s5_buffer + 4096 * period);
 	uint32_t gain = s5_gain > 8 ? 8 : s5_gain;
 
-	for (unsigned frame = 0; frame < S5_PERIOD_FRAMES; frame++) {
+	if (s8_mode) {
+		uint32_t tail = s8_tail, available = s8_head - tail, n = available < S5_PERIOD_FRAMES ? available : S5_PERIOD_FRAMES;
+		int32_t q15 = (int32_t)s8_gain_q15, peak = (int32_t)s8_peak_out;
+
+		OSMemoryBarrier();
+		for (uint32_t i = 0; i < n; i++) {
+			int32_t one = ((int32_t)s8_ring[2 * ((tail + i) % S8_RING_FRAMES)] + s8_ring[2 * ((tail + i) % S8_RING_FRAMES) + 1]) / 2;
+			int32_t v = one * q15 >> 15;
+
+			v = v > S5_PEAK_MOST ? S5_PEAK_MOST : v < -S5_PEAK_MOST ? -S5_PEAK_MOST : v;
+			samples[2 * i] = (int16_t)v;
+			samples[2 * i + 1] = 0;
+			peak = v > peak ? v : -v > peak ? -v : peak;
+		}
+		bzero(samples + 2 * n, (S5_PERIOD_FRAMES - n) * 4);
+		OSMemoryBarrier();
+		s8_tail = tail + n;
+		s8_peak_out = (uint32_t)peak;
+		s8_frames_fed += n;
+		s8_frames_silent += S5_PERIOD_FRAMES - n;
+	} else for (unsigned frame = 0; frame < S5_PERIOD_FRAMES; frame++) {
 		int32_t sample = (int32_t)s5_tone[s5_tone_at++ % 48] * (int32_t)gain;
 
 		sample = sample > S5_PEAK_MOST ? S5_PEAK_MOST : sample < -S5_PEAK_MOST ? -S5_PEAK_MOST : sample;
@@ -4279,8 +4356,8 @@ s5_period_write(unsigned period, uint32_t handle)
  */
 static struct bitbang s5_bus;
 static bool s5_amp_on;
-static uint32_t s5_found_ctl[2], s5_found_io[2];
-static bool s5_took_bus;  /* gpio89 and 90 as found, given back at the end */
+static uint32_t s5_found_ctl[2], s5_found_io[2];  /* gpio89 and 90 as found, given back at the end */
+static bool s5_took_bus;
 
 static bool
 tfa_write(struct bitbang *b, uint8_t reg, uint16_t value)
@@ -4384,31 +4461,184 @@ tfa_up(void)
 	return true;
 }
 
-static bool stream_play(bool amp);
+static bool stream_play(unsigned mode);       /* 0: the tone, the amplifier off (S5); 1: the tone's ladder, heard (S7); 2: Darwin's (S8) */
 
 static bool
 step_stream(void)
 {
-	return stream_play(false);
+	return stream_play(0);
 }
 
 /* S6 and S7: the amplifier on, and a tone it plays: the left channel, 1 kHz, -40, -34, -28, -22 dBFS, two seconds each */
 static bool
 step_speaker(void)
 {
-	return stream_play(true);
+	return stream_play(1);
+}
+
+/* the gpio89/90 bus taken for the amplifier, as found kept */
+static void
+s5_take_bus(void)
+{
+	s5_found_ctl[0] = get(&pins[5].page, "gpio89 control", 0);
+	s5_found_io[0] = get(&pins[5].page, "gpio89 I/O", 4);
+	s5_found_ctl[1] = get(&pins[6].page, "gpio90 control", 0);
+	s5_found_io[1] = get(&pins[6].page, "gpio90 I/O", 4);
+	s5_bus.sda = &pins[5];
+	s5_bus.scl = &pins[6];
+	s5_took_bus = true;
+	printf("adsp845: %u: about to make gpio89/90 the amplifier's I2C by hand (were %#x %#x)\n", step, s5_found_ctl[0], s5_found_ctl[1]);
+	bb_line(&pins[5], true);
+	bb_line(&pins[6], true);
+}
+
+/*
+ * S8: Darwin's sound to the speaker until the run ends (hakios_adsp_stop()). The amplifier comes on when sound comes (and stays off
+ * for the rest of the run after a fault), goes off after 3 s of silence; its status is read every 200 ms while it is on.
+ */
+static bool
+s8_loop(uint32_t handle, uint32_t *sent_out)
+{
+	uint32_t sent = 0, failed_writes = 0, ups = 0, looks = 0, below = 0, generation = 0, done_seen = s5_done, said_gen = ~0u;
+	uint64_t last_look = 0, last_say = now_us(), last_done = now_us(), began = now_us(), frames_said = 0;
+	const char *fault = NULL;
+	bool muted = false, failed = false;
+
+	s8_head = s8_tail = 0;
+	s8_peak_in = s8_peak_out = 0;
+	s8_last_sound_us = 0;
+	s8_frames_in = s8_frames_fed = s8_frames_silent = 0;
+	s8_gain_q15 = 0;
+	s8_mode = true;
+	s5_returned = 0;
+	hakios_adsp_apr_events(s5_events);
+	for (unsigned n = 0; n < S5_PERIODS; n++) {
+		s5_period_fill(n);
+		if (!s5_period_write(n, handle)) {
+			printf("adsp845: %u: the write of period %u could not be sent\n", step, n);
+			failed = true;
+			break;
+		}
+		sent++;
+	}
+	s5_take_bus();
+	hakios_audio_set_sink("the 6T's speaker (adsp845, step 17)", s8_sink);
+	tell("adsp845: %u: DARWIN'S SOUND GOES TO THE SPEAKER now, until the run ends: %u dB under what it writes and its volume under that, "
+	    "never over -20 dBFS; the amplifier on while there is sound\n", step, S8_BELOW_DB);
+	while (!failed && !s8_stopping) {
+		uint64_t now = now_us();
+		bool sound = s8_last_sound_us != 0 && now - s8_last_sound_us < S8_QUIET_US;
+		uint32_t back = s5_returned;
+
+		if (!hakios_audio_volume(&below, &muted, &generation)) {
+			below = 0;
+			muted = false;
+		}
+		if (generation != said_gen) {
+			said_gen = generation;
+			tell("adsp845: %u: Darwin's volume: %u.%u dB under its loudest%s\n", step, below / 8, below % 8 * 10 / 8,
+			    muted ? ", MUTED" : "");
+		}
+		if (sound && !s5_amp_on && fault == NULL) {
+			tell("adsp845: %u: sound from Darwin (its peak %u): the amplifier on\n", step, s8_peak_in);
+			if (tfa_up()) {
+				ups++;
+			} else {
+				tfa_down();
+				fault = "it did not come on well";
+				tell("adsp845: %u: THE AMPLIFIER STAYS OFF for the rest of the run\n", step);
+			}
+			last_look = now_us();
+		} else if (!sound && s5_amp_on) {
+			s8_gain_q15 = 0;
+			tell("adsp845: %u: 3 s of silence: the amplifier off\n", step);
+			tfa_down();
+		}
+		s8_gain_q15 = s5_amp_on && !muted ? s8_gain_for(below) : 0;
+		if (s5_amp_on && now - last_look >= 200000) {
+			uint16_t s10 = 0, s11 = 0;
+
+			last_look = now;
+			looks++;
+			tfa_read(&s5_bus, 0x10, &s10);
+			tfa_read(&s5_bus, 0x11, &s11);
+			if ((fault = tfa_fault(s10, s11, true)) != NULL) {
+				s8_gain_q15 = 0;
+				tell("adsp845: %u: THE AMPLIFIER REPORTS %s (status %#06x %#06x): OFF NOW, and for the rest of the run\n", step, fault,
+				    s10, s11);
+				tfa_down();
+			}
+		}
+		if (back != 0) {
+			os_atomic_andnot(&s5_returned, back, relaxed);
+			for (unsigned n = 0; n < S5_PERIODS; n++) {
+				if (back & 1u << n) {
+					s5_period_fill(n);
+					if (s5_period_write(n, handle)) {
+						sent++;
+					} else {
+						failed_writes++;
+					}
+				}
+			}
+		}
+		if (s5_done != done_seen) {
+			done_seen = s5_done;
+			last_done = now;
+		} else if (now - last_done > 1000000ull) {
+			tell("adsp845: %u: THE DSP HAS GIVEN NO PERIOD BACK FOR 1 s (%u of %u): Darwin's sound stops here\n", step, s5_done, sent);
+			failed = true;
+		}
+		if (now - last_say >= 10000000ull && s8_frames_in != frames_said) {
+			last_say = now;
+			frames_said = s8_frames_in;
+			tell("adsp845: %u: from Darwin %llu frames (its peak %u), to the speaker %llu (their peak %u of 3277), %llu of silence filled "
+			    "in; %u underflows; the amplifier %s, on %u times, looked at %u times\n", step, s8_frames_in, s8_peak_in, s8_frames_fed,
+			    s8_peak_out, s8_frames_silent, s5_underflows, s5_amp_on ? "ON" : "off", ups, looks);
+			s8_peak_in = s8_peak_out = 0;
+		}
+		sleep_ms(2);
+	}
+	hakios_audio_set_sink("nothing", NULL);
+	s8_gain_q15 = 0;
+	tfa_down();
+	sleep_ms(200);                          /* (the periods in flight, silence now, played out) */
+	hakios_adsp_apr_events(NULL);
+	s8_mode = false;
+	tell("adsp845: %u: Darwin's sound to the speaker over after %llu s: from Darwin %llu frames, to the speaker %llu, %llu of silence; "
+	    "%u periods written (%u could not be), %u underflows, %u with an error; the amplifier on %u times%s%s\n", step,
+	    (now_us() - began) / 1000000, s8_frames_in, s8_frames_fed, s8_frames_silent, sent, failed_writes, s5_underflows, s5_errors, ups,
+	    fault ? "; it reported " : "", fault ? fault : "");
+	*sent_out = sent;
+	return !failed && fault == NULL;
 }
 
 static bool
-stream_play(bool amp)
+step_darwin(void)
 {
+	bool ok;
+
+	s8_running = true;
+	ok = stream_play(2);
+	s8_running = false;
+	return ok;
+}
+
+static bool
+stream_play(unsigned mode)
+{
+	bool amp = mode != 0;
 	struct afe_i2s_config i2s = { 1, MI2S_BITS, 2, 1, 1, MI2S_RATE, 0, 0 };
 	uint16_t port[2] = { QUAT_MI2S_RX, 0 };
 	uint32_t found_ctl[4], found_io[4], handle = 0, copp = 0, sent = 0;
 	bool clock = false, started = false, mapped = false, copp_open = false, stream_open = false, ok = false, smmu = false;
 	struct apr_reply reply;
 
-	if (amp) {
+	if (mode == 2) {
+		announce("as step 16, and then DARWIN'S SOUND (/dev/hakios-audio) to the speaker until the run ends: one channel of the two "
+		    "channels' mean, 20 dB under it and Darwin's volume under that, never over -20 dBFS; the amplifier on while there is sound "
+		    "(off after 3 s of silence, and for good after a fault), its status read every 200 ms. AUDIBLE");
+	} else if (amp) {
 		announce("as step 15, and then the AMPLIFIER: bypass, out of power-down, on (every write read back); a 1 kHz tone on the left "
 		    "channel at -40, -34, -28 and -22 dBFS, 2 s each, its status read every 200 ms (any fault: off at once); the amplifier off "
 		    "before anything else is stopped. AUDIBLE");
@@ -4512,7 +4742,9 @@ stream_play(bool amp)
 			goto out;
 		}
 	}
-	{
+	if (mode == 2) {
+		ok = s8_loop(handle, &sent);
+	} else {
 		uint64_t began = now_us();
 		uint32_t done_before, toggles_tone = 0, ones = 0;
 		bool tone_over = false, failed = false;
@@ -4537,17 +4769,7 @@ stream_play(bool amp)
 			sent++;
 		}
 		if (amp) {
-			s5_found_ctl[0] = get(&pins[5].page, "gpio89 control", 0);
-			s5_found_io[0] = get(&pins[5].page, "gpio89 I/O", 4);
-			s5_found_ctl[1] = get(&pins[6].page, "gpio90 control", 0);
-			s5_found_io[1] = get(&pins[6].page, "gpio90 I/O", 4);
-			s5_bus.sda = &pins[5];
-			s5_bus.scl = &pins[6];
-			s5_took_bus = true;
-			printf("adsp845: %u: about to make gpio89/90 the amplifier's I2C by hand (were %#x %#x)\n", step, s5_found_ctl[0],
-			    s5_found_ctl[1]);
-			bb_line(&pins[5], true);
-			bb_line(&pins[6], true);
+			s5_take_bus();
 			if (!tfa_up()) {
 				tfa_down();
 				failed = true;
@@ -4670,7 +4892,7 @@ out:
 
 static bool (*const steps[STEPS])(void) = {
 	step_survey, step_firmware, step_mailbox, step_header, step_image, step_our_item, step_start, step_queues, step_link, step_qrtr,
-	step_apr, step_tfa, step_amplifier, step_afe, step_stream, step_speaker,
+	step_apr, step_tfa, step_amplifier, step_afe, step_stream, step_speaker, step_darwin,
 };
 
 static bool keep;                       /* the DSP and the link stay up while the system runs (adsp8_keep) */
@@ -4678,6 +4900,9 @@ static bool keep;                       /* the DSP and the link stay up while th
 static void
 steps_over(uint32_t done)
 {
+	if (s8_stopping) {
+		return;                         /* (step 17 was ended by the run's end, which shuts the DSP down itself) */
+	}
 	lck_mtx_lock(&dsp_lock);
 	if (dsp_started && done == last_step && keep) {
 		tell("adsp845: THE AUDIO DSP STAYS ON while the system runs%s\n", link_runs ? ", and the link with it" : "");
@@ -4693,6 +4918,16 @@ steps_over(uint32_t done)
 void
 hakios_adsp_stop(void)
 {
+	s8_stopping = true;
+	if (s8_running) {
+		unsigned ms = 0;
+
+		tell("adsp845: the run is about to end: Darwin's sound to the speaker is stopped first (the amplifier off, the stream closed)\n");
+		for (; ms < 5000 && s8_running; ms += 10) {
+			sleep_ms(10);
+		}
+		tell("adsp845: %s after %u ms\n", s8_running ? "STEP 17 DID NOT STOP" : "step 17 stopped", ms);
+	}
 	lck_mtx_lock(&dsp_lock);
 	if (dsp_started) {
 		unsigned services = 0;
@@ -4715,6 +4950,21 @@ hakios_adsp_stop(void)
 void
 hakios_adsp_quiesce(void)
 {
+	if (s5_amp_on && s5_bus.sda != NULL) {
+		/* the amplifier off without a word or a lock: AMPE 0, 10 ms, power down (writes only, no read back) */
+		static const uint16_t words[2] = { 0x8220, 0x8201 };
+
+		for (unsigned i = 0; i < 2; i++) {
+			bb_start(&s5_bus);
+			bb_write(&s5_bus, TFA_ADDRESS << 1);
+			bb_write(&s5_bus, 0x00);
+			bb_write(&s5_bus, (uint8_t)(words[i] >> 8));
+			bb_write(&s5_bus, (uint8_t)words[i]);
+			bb_stop(&s5_bus);
+			delay(10000);
+		}
+		s5_amp_on = false;
+	}
 	if (!dsp_started) {
 		return;
 	}

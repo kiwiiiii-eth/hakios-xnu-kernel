@@ -94,6 +94,13 @@ SoC, then the phone, then the fragments you named.
   of those uses firmware pulled from the owner's own phone (`fw-*/`, never in this repository).
 - **The command line fits.** The kernel's boot line holds 607 characters, and a longer one loses its tail without an
   error. The check counts the arguments, adds what a run adds itself (about 260) and refuses what cannot fit.
+- **Arguments kept in the kernel.** `CONFIG_ARGS_BUILTIN=y` compiles the arguments that only the kernel reads (`BUILTIN_ARGS` in
+  `tools/hakios-config.py`: `cpufreq`, `thermal`, `wifi_station`, ...) and the device's `soc.args` into the kernel
+  (`pexpert/gen/hakios.builtin_args.h`, written by `make kernel`). `PE_parse_boot_argn` looks at the boot line first and at those
+  words second, so the line carries only what the loader and user space read (`hakios-config.py args`; `args --full` is the whole line).
+  The kernel carries a marker, `hakios_builtin_args_sha=<hash>`, that a run script compares with `hakios-config.py builtin --sha`:
+  the same hash leaves the words out of the line, another hash refuses to run (make the kernel again), no marker means a kernel
+  without them and the whole line. Tests: `tools/args-builtin-test.py`, `args-equiv.py`, `args-run-test.py`, `args-unchanged-test.py`.
 
 ## `CONFIG_BOOTARGS`: Linux's `CONFIG_CMDLINE`
 

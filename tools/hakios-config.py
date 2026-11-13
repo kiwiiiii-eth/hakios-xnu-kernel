@@ -27,6 +27,7 @@ Where this differs from Linux's, on purpose:
 import argparse
 import collections
 import difflib
+import hashlib
 import importlib.util
 import os
 import re
@@ -49,6 +50,9 @@ SYMBOLS = [
     ("SOC", "meta", None, "the SoC family (sc7280: SM7325, QCM6490); it is part of the kernel's version string", None, None),
     ("FIRMWARE", "meta", None, "\"device\": options may use firmware pulled from your own phone (fw-*/); \"none\": the open "
                                "configuration, nothing of the phone's own is loaded", None, None),
+    ("ARGS_BUILTIN", "bool", None, "keep the arguments only the kernel reads (BUILTIN_ARGS below) inside the kernel, so the boot line "
+                                   "carries the others alone: `args` prints those, `args --full` all of them; the run scripts check the kernel's hash "
+                                   "(builtin --sha) before they leave the rest out", None, None),
     ("CPUS", "int", "cpus", "CPU cores the kernel uses, 1 to 8; one if not set", None, None),
     ("BOOTCPU", "int", "bootcpu", "the core the kernel runs on, 0 to 7; 7 is the biggest core (the loader keeps core 0)", None, None),
     ("CPUFREQ", "bool", "cpufreq", "set the boot core to its top speed", None, None),
@@ -88,7 +92,7 @@ SYMBOLS = [
 
 # The group a symbol is listed under in the documented defconfig (the generated ones carry theirs in configs/symbols.tsv)
 GROUP_OF = {
-    "DEVICE": "Build facts", "SOC": "Build facts", "FIRMWARE": "Build facts",
+    "DEVICE": "Build facts", "SOC": "Build facts", "FIRMWARE": "Build facts", "ARGS_BUILTIN": "Build facts",
     "CPUS": "CPU, memory and boot", "BOOTCPU": "CPU, memory and boot", "CPUFREQ": "CPU, memory and boot",
     "UFS": "Storage and APFS", "UFS_WRITE": "Storage and APFS", "VAR_STORE": "Storage and APFS",
     "TOUCHSCREEN": "Touch and buttons", "GPU": "GPU and display",
@@ -642,6 +646,61 @@ def report(problems):
         print("hakios-config: PROBLEM: " + p)
 
 
+# ---- the arguments kept in the kernel ------------------------------------------------------------------------------
+#
+# With CONFIG_ARGS_BUILTIN=y the words below, and every name=value of the device's soc.args, are compiled into the kernel
+# (pexpert/gen/hakios.builtin_args.h, made by `kernel`), and PE_parse_boot_argn looks there when the boot line has no such
+# argument. Only what the KERNEL reads may be on this list: the loader (xnuloader/loader.c: bootcpu, cpus, torch, ufs) and user
+# space (kern.bootargs: wifi, ca_vbl, gpu, haptic, ...) read the boot line itself, so those stay on it. An argument not named here
+# stays on the boot line, whoever reads it: a doubt is settled that way.
+BUILTIN_ARGS = frozenset("""cpufreq socinfo thermal buttons cpufreq_gov ddr dsibl fg_charge gic_vtimer modem_keep modem_step
+rmi4 wifi_ba wifi_mac wifi_station wifi_wide""".split())
+
+
+def builtin_on(config):
+    return "ARGS_BUILTIN" in config
+
+
+def soc_args(root, config):
+    """The words of devices/<CONFIG_DEVICE>/soc.args as the run scripts take them: lines whose first non-blank is # left out."""
+    device = typed("DEVICE", config["DEVICE"]) if "DEVICE" in config else None
+    path = os.path.join(root, "devices", device, "soc.args") if device else None
+    if not path or not os.path.isfile(path):
+        return []
+    lines = [l for l in open(path, encoding="utf-8").read().split("\n") if not re.match(r"[ \t]*#", l)]
+    return " ".join(lines).split()
+
+
+def split_builtin(root, config, args):
+    """(on the boot line, in the kernel) for the arguments `args` of a configuration; the soc.args words go to the kernel too."""
+    if not builtin_on(config):
+        return list(args), []
+    kept = [a for a in args if a.split("=", 1)[0] not in BUILTIN_ARGS]
+    moved = [a for a in args if a.split("=", 1)[0] in BUILTIN_ARGS] + soc_args(root, config)
+    return kept, moved
+
+
+def builtin_text(root, config):
+    return " ".join(split_builtin(root, config, check(config)[1])[1])
+
+
+def builtin_sha(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def builtin_header(root, config):
+    """pexpert/gen/hakios.builtin_args.h: what bootargs.c reads. The marker is its own NUL-ended string, exported and kept
+    (`used`), so `strings -a hakios-kernel` finds "hakios_builtin_args_sha=<hash>"."""
+    if not builtin_on(config):
+        return "/* made by tools/hakios-config.py kernel: CONFIG_ARGS_BUILTIN is not set */\n#define HAKIOS_ARGS_BUILTIN 0\n"
+    text = builtin_text(root, config)
+    if not re.fullmatch(r"[A-Za-z0-9_.,:/+@=\- ]*", text):
+        raise ConfigError("the built-in arguments hold a character a C string should not: %r" % text)
+    return ("/* made by tools/hakios-config.py kernel: CONFIG_ARGS_BUILTIN=y; do not edit */\n#define HAKIOS_ARGS_BUILTIN 1\n"
+            "const char hakios_builtin_args_sha[] __attribute__((used)) = \"hakios_builtin_args_sha=%s\";\n"
+            "static const char hakios_builtin_args[] = \"%s\";\n" % (builtin_sha(text), text))
+
+
 # ---- commands ---------------------------------------------------------------------------------------------------
 
 def cmd_defconfig(a):
@@ -679,7 +738,27 @@ def cmd_args(a):
         for p in problems:
             print("hakios-config: PROBLEM: " + p, file=sys.stderr)
         return 1
+    if not a.full:
+        args = split_builtin(a.root, config, args)[0]
     print(" ".join(args))
+    return 0
+
+
+def cmd_builtin(a):
+    """builtin [--sha | --header]: the words compiled into the kernel (CONFIG_ARGS_BUILTIN), their hash, or the header that holds them.
+    Without CONFIG_ARGS_BUILTIN the words are none and the hash is that of the empty text."""
+    config = load(a.config)
+    problems, _args = check(config)
+    if problems:
+        for p in problems:
+            print("hakios-config: PROBLEM: " + p, file=sys.stderr)
+        return 1
+    if a.sha:
+        print(builtin_sha(builtin_text(a.root, config) if builtin_on(config) else ""))
+    elif a.header:
+        sys.stdout.write(builtin_header(a.root, config))
+    else:
+        print(builtin_text(a.root, config) if builtin_on(config) else "")
     return 0
 
 
@@ -1016,6 +1095,10 @@ def cmd_kernel(a):
         changed.append("config/MASTER.hakios")
     if write_if_changed(os.path.join(tree, "bsd", "dev", "hakios.drivers.h"), drivers_header(built, sources)):
         changed.append("bsd/dev/hakios.drivers.h")
+    if os.path.isdir(os.path.join(tree, "pexpert", "gen")):
+        # no .config: no built-in words
+        if write_if_changed(os.path.join(tree, "pexpert", "gen", "hakios.builtin_args.h"), builtin_header(a.root, config)):
+            changed.append("pexpert/gen/hakios.builtin_args.h")
     removed = stale_objects(tree) if choice_changed and os.path.isdir(os.path.join(tree, "BUILD", "obj")) else 0
     on = [d.name.lower() for d in DRIVERS if built[d.symbol]]
     off = [d.name.lower() for d in DRIVERS if not built[d.symbol]]
@@ -1057,7 +1140,12 @@ def main():
     p.add_argument("--force", action="store_true", help="print them even if the check finds a problem")
     p.add_argument("--defconfig", help="the arguments of this defconfig (and --fragment) instead of the .config's")
     p.add_argument("--fragment", action="append", default=[], help="a fragment over it; more than one is allowed")
+    p.add_argument("--full", action="store_true", help="all of them, also the ones CONFIG_ARGS_BUILTIN keeps in the kernel (a kernel without them wants these)")
     p.set_defaults(fn=cmd_args)
+    p = sub.add_parser("builtin", parents=[common], help="the arguments CONFIG_ARGS_BUILTIN compiles into the kernel")
+    p.add_argument("--sha", action="store_true", help="their hash (16 hex digits): the marker the kernel carries")
+    p.add_argument("--header", action="store_true", help="pexpert/gen/hakios.builtin_args.h, as `kernel` writes it")
+    p.set_defaults(fn=cmd_builtin)
     for name, fn, text in (("check", cmd_check, "validate the .config"), ("show", cmd_show, "say what the .config is"),
                            ("needs", cmd_needs, "which firmware the .config wants, and whether it is there"),
                            ("savedefconfig", cmd_savedefconfig, "the .config as a minimal defconfig"),

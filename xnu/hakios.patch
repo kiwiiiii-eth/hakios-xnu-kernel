@@ -3377,6 +3377,69 @@ index 050f34a53c49..c58ff62cd419 100644
  ifneq (,$(wildcard $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)))
  DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
  endif
+diff --git a/pexpert/gen/bootargs.c b/pexpert/gen/bootargs.c
+index c94c0ebe1224..e8f40bd8b64e 100644
+--- a/pexpert/gen/bootargs.c
++++ b/pexpert/gen/bootargs.c
+@@ -28,6 +28,12 @@
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
+ 
++/* HakiOS: the arguments only the kernel reads, kept in the kernel itself (CONFIG_ARGS_BUILTIN, tools/hakios-config.py
++ * builtin): the boot line holds 607 characters. The header is made by `hakios-config.py kernel`; it says
++ * HAKIOS_ARGS_BUILTIN 0, or 1 with hakios_builtin_args (the words) and hakios_builtin_args_sha (a marker the run scripts
++ * look for in the kernel file). */
++#include "hakios.builtin_args.h"
++
+ #if defined(CONFIG_XNUPOST)
+ #include <tests/xnupost.h>
+ #endif
+@@ -187,13 +193,35 @@ gotit:
+ 	return arg_found;
+ }
+ 
++/* The boot line first; an argument it does not carry is looked for in the built-in words, by the same rules (the last
++ * one of name=value, the first of -flag). Only the two public entry points do this: PE_parse_boot_argn_internal still
++ * reads the string it is given (the XNUPOST test hands it its own). */
++static boolean_t
++PE_parse_boot_argn_builtin(
++	const char      *arg_string,
++	void            *arg_ptr,
++	int             max_len,
++	boolean_t       force_string)
++{
++	if (PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, max_len, force_string)) {
++		return TRUE;
++	}
++#if HAKIOS_ARGS_BUILTIN
++	/* the marker is read here so that the linker keeps it with the words it vouches for */
++	if (hakios_builtin_args_sha[0] == 'h') {
++		return PE_parse_boot_argn_internal((char *)(uintptr_t)hakios_builtin_args, arg_string, arg_ptr, max_len, force_string);
++	}
++#endif
++	return FALSE;
++}
++
+ boolean_t
+ PE_parse_boot_argn(
+ 	const char      *arg_string,
+ 	void            *arg_ptr,
+ 	int                     max_len)
+ {
+-	return PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, max_len, FALSE);
++	return PE_parse_boot_argn_builtin(arg_string, arg_ptr, max_len, FALSE);
+ }
+ 
+ boolean_t
+@@ -202,7 +230,7 @@ PE_parse_boot_arg_str(
+ 	char            *arg_ptr,
+ 	int                     strlen)
+ {
+-	return PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, strlen, TRUE);
++	return PE_parse_boot_argn_builtin(arg_string, arg_ptr, strlen, TRUE);
+ }
+ 
+ #if defined(CONFIG_XNUPOST)
 diff --git a/pexpert/pexpert/arm64/BCM2837.h b/pexpert/pexpert/arm64/BCM2837.h
 index d9f0723244e5..53fe4f371d7f 100644
 --- a/pexpert/pexpert/arm64/BCM2837.h

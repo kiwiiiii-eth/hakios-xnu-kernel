@@ -10,8 +10,8 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SRC=${1:-${XNU_SRC:-$HERE/../xnu-src/xnu-8796.121.2}}
 BASE=c54f35ca767986246321eb901baf8f5ff7923f6a           # tag xnu-8796.121.2
 # never part of the work: build output and what editors, patch and python leave behind
-# nor what tools/hakios-config.py kernel writes for one configuration (the drivers' choice)
-JUNK='^BUILD/|^config/MASTER\.hakios$|^bsd/dev/hakios\.drivers\.h$|(^|/)__pycache__/|\.(orig|rej|pyc|o|swp)$|\.bak[0-9]*$|~$|(^|/)\.DS_Store$'
+# nor what tools/hakios-config.py kernel writes for one configuration (the drivers' choice, the built-in boot-arguments)
+JUNK='^BUILD/|^config/MASTER\.hakios$|^bsd/dev/hakios\.drivers\.h$|^pexpert/gen/hakios\.builtin_args\.h$|(^|/)__pycache__/|\.(orig|rej|pyc|o|swp)$|\.bak[0-9]*$|~$|(^|/)\.DS_Store$'
 
 cd "$SRC"
 git cat-file -e "$BASE^{commit}" 2>/dev/null || { echo "export.sh: $SRC is not a clone of xnu at $BASE" >&2; exit 1; }

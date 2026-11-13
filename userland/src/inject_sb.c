@@ -616,18 +616,76 @@ described(id object)
  */
 static id (*original_apply_update)(id self, SEL sel, id update, id item);
 
+/* An instance variable of an object written by its name, whatever its integer type (UIKit's entries have no setters to rely on) */
+static bool
+set_ivar_integer(id object, const char *name, long long value)
+{
+	Ivar ivar = object ? class_getInstanceVariable(object_getClass(object), name) : NULL;
+	const char *type = ivar ? ivar_getTypeEncoding(ivar) : NULL;
+	char *at;
+
+	if (ivar == NULL || type == NULL) {
+		return false;
+	}
+	at = (char *)(void *)object + ivar_getOffset(ivar);
+	switch (type[0]) {
+	case 'q': case 'Q': case 'l': case 'L': *(long long *)(void *)at = value; return true;
+	case 'i': case 'I': *(int *)(void *)at = (int)value; return true;
+	case 's': case 'S': *(short *)(void *)at = (short)value; return true;
+	case 'c': case 'C': case 'B': *at = (char)value; return true;
+	default: return false;
+	}
+}
+
+/*
+ * Run 76: the cellular entry UIKit gets from SpringBoard's data says isEnabled 1 but displayValue -2083811552 (a
+ * pointer's half, no number of bars): the bars are drawn as none, all grey -- the "transparent" signal. And a
+ * secondary SIM's entry makes it draw the dual-SIM view. So before UIKit applies an update, while the kernel's modem
+ * is registered, the main entry's bars are the kernel's and the secondary entry is switched off.
+ */
+static void
+cellular_fix_entries(id data)
+{
+	int registered = sysctl_int("kern.hakios.cellular_registered"), up = sysctl_int("kern.hakios.cellular_data");
+	int bars = sysctl_int("kern.hakios.cellular_bars"), dbm = sysctl_int("kern.hakios.cellular_dbm");
+	id entry, second;
+
+	if (data == nil || (registered <= 0 && up <= 0)) {
+		return;
+	}
+	if (bars <= 0) {
+		bars = dbm < 0 ? (dbm >= -95 ? 4 : dbm >= -105 ? 3 : dbm >= -115 ? 2 : 1) : 1;
+	}
+	if (bars > 4) {
+		bars = 4;
+	}
+	entry = responds(data, "cellularEntry") ? ((id (*)(id, SEL))objc_msgSend)(data, sel_registerName("cellularEntry")) : nil;
+	second = responds(data, "secondaryCellularEntry") ? ((id (*)(id, SEL))objc_msgSend)(data, sel_registerName("secondaryCellularEntry")) : nil;
+	if (entry != nil) {
+		set_ivar_integer(entry, "_displayValue", bars);
+		set_ivar_integer(entry, "_rawValue", dbm);
+		set_ivar_integer(entry, "_displayRawValue", dbm);
+	}
+	if (second != nil) {
+		set_ivar_integer(second, "_enabled", 0);
+	}
+}
+
 static id
 cellular_apply_update(id self, SEL sel, id update, id item)
 {
 	static int said;
-	id result = original_apply_update(self, sel, update, item);
 	id data = responds(update, "data") ? ((id (*)(id, SEL))objc_msgSend)(update, sel_registerName("data")) : nil;
+	id result;
+
+	cellular_fix_entries(data);
+	result = original_apply_update(self, sel, update, item);
 	id entry = responds(data, "mainCellularEntry") ? ((id (*)(id, SEL))objc_msgSend)(data, sel_registerName("mainCellularEntry")) :
 	    responds(data, "cellularEntry") ? ((id (*)(id, SEL))objc_msgSend)(data, sel_registerName("cellularEntry")) : nil;
 	id view = responds(item, "view") ? ((id (*)(id, SEL))objc_msgSend)(item, sel_registerName("view")) : nil;
 	long mode = responds(view, "signalMode") ? ((long (*)(id, SEL))objc_msgSend)(view, sel_registerName("signalMode")) : -1;
 
-	if (said++ < 6) {
+	if (said++ < 10) {
 		char line[700];
 
 		snprintf(line, sizeof(line), "%s", described(entry));

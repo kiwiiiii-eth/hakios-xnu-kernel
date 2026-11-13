@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **408 arguments**: 337 read by the kernel, 14 by the loader, 68 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **414 arguments**: 342 read by the kernel, 14 by the loader, 69 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
@@ -118,7 +118,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `wifi_loud` | K | `hakios.wifi.c` | `CONFIG_WIFI_LOUD` |  |
 | `wifi_lx` | K | `hakios.wifi.c`, `lx_bus.c` | `CONFIG_WIFI_LX` | implied by wifi=1 (as 2) |
 | `wifi_lx_step` | K | `lx_base.c` | `CONFIG_WIFI_LX_STEP` |  |
-| `wifi_mac` | K | `hakios.wifi.c`, `hakios.wifi10.c` | `CONFIG_WIFI_MAC` |  |
+| `wifi_mac` | K | `hakios.bt3990.c`, `hakios.wifi.c`, `hakios.wifi10.c` | `CONFIG_WIFI_MAC` |  |
 | `wifi_mission` | K | `hakios.wlfw.c` | `CONFIG_WIFI_MISSION` |  |
 | `wifi_new` | K | `hakios.wifi.c` | `CONFIG_WIFI_NEW` |  |
 | `wifi_pause` | K | `hakios.wifi.c` | `CONFIG_WIFI_PAUSE` |  |
@@ -136,7 +136,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `wifi_watch` | K | `hakios.wifi.c`, `hakios.wifi10.c` | `CONFIG_WIFI_WATCH` |  |
 | `wifi_wide` | K | `lx_80211.c` | `CONFIG_WIFI_WIDE` | implied by wifi=1 |
 
-## Cellular (53)
+## Cellular (54)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -144,6 +144,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `modem_again` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_AGAIN` |  |
 | `modem_apn` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_APN` |  |
 | `modem_buffer` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_BUFFER` |  |
+| `modem_cell_probe` | K | `hakios.cell.c` | `CONFIG_MODEM_CELL_PROBE` |  |
 | `modem_data_nobind` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_DATA_NOBIND` |  |
 | `modem_data_off` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_DATA_OFF` |  |
 | `modem_data_wait` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_DATA_WAIT` |  |
@@ -414,14 +415,18 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (72)
+## User space (77)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
 | `adreno_keep_watch` | K | `hakios.a630.c` | `CONFIG_ADRENO_KEEP_WATCH` |  |
 | `autounlock` | U | `inject_sb.c` | `CONFIG_AUTOUNLOCK` |  |
-| `bt` | K | `hakios.bt.c` | `CONFIG_BT` |  |
+| `bt` | K | `hakios.bt.c`, `hakios.bt3990.c` | `CONFIG_BT` |  |
+| `bt_after` | K | `hakios.bt3990.c` | `CONFIG_BT_AFTER` |  |
 | `bt_again` | K | `hakios.bt.c` | `CONFIG_BT_AGAIN` |  |
+| `bt_lines` | U | `inject_bt.c` | `CONFIG_BT_LINES` |  |
+| `bt_mac` | K | `hakios.bt3990.c` | `CONFIG_BT_MAC` |  |
+| `bt_said` | K | `hakios.bthci.c` | `CONFIG_BT_SAID` |  |
 | `ca_metallib` | U | `inject.c` | `CONFIG_CA_METALLIB` |  |
 | `ca_prof` | U | `HakiosMetalCA.m` | `CONFIG_CA_PROF` |  |
 | `ca_vbl` | U | `inject.c` | `CONFIG_CA_VBL` |  |
@@ -470,6 +475,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `modem_mpss_early` | K | `hakios.mpss845.c` | `CONFIG_MODEM_MPSS_EARLY` |  |
 | `modem_quiesce_off` | K | `hakios.mpss845.c` | `CONFIG_MODEM_QUIESCE_OFF` |  |
 | `modem_rails_look` | K | `hakios.mpss845.c` | `CONFIG_MODEM_RAILS_LOOK` |  |
+| `modem_sim_switch` | K | `hakios.mpss845.c` | `CONFIG_MODEM_SIM_SWITCH` |  |
 | `modem_tick` | K | `hakios.mpss845.c` | `CONFIG_MODEM_TICK` |  |
 | `modem_wds_sub` | K | `hakios.mpss845.c` | `CONFIG_MODEM_WDS_SUB` |  |
 | `modem_wlfw_ready` | K | `hakios.mpss845.c` | `CONFIG_MODEM_WLFW_READY` |  |

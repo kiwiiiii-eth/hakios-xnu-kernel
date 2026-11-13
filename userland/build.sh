@@ -58,6 +58,9 @@
 #                                   mounted). Not beside GL=1: the two do not fit the 64 MB the loader takes with
 #                                   the kernel. adsp=1 needs none of it: the system image has the firmware in /fw.
 #                      MODEM=1      stage checked local MPSS firmware from ../fw-modem in system.apfs /fw.
+#                      BT=1         Bluetooth (the OnePlus 6T's WCN3990, kernel boot-arg bt=4): iOS's bluetoothd, BlueTool,
+#                                   tccd and securityd as jobs, src/inject_bt.c inside BlueTool and bluetoothd, and the
+#                                   chip's rampatch and NVM (../fw-bt/crbtfw*.tlv, crnv*.bin: the phone's own) in /fw
 #                                   This does not start the modem; the XNU MPSS driver is still required.
 #   system.apfs      the system image, the root filesystem (the resident RAM disk, /dev/md0), an
 #                    APFS container: the part of Darwin userland 16.5 chosen by ../sysimage/select-system.py at
@@ -124,6 +127,10 @@ DARWIN_JOBS=${JOBS-"
 # (Count a QEMU run log with its duplicate lines removed: run-darwin.sh prints launchd's log twice.)
 # WIFID=0 leaves it out.
 [ "${WIFID-1}" != 0 ] && DARWIN_JOBS="$DARWIN_JOBS com.apple.wifid"
+# Bluetooth (BT=1, the kernel's drivers/bluetooth/hakios.bt3990.c with bt=4): bluetoothd, BlueTool (which src/inject_bt.c
+# turns into an answer that the controller is up), and what bluetoothd asks for on its way (HakiOS's MediaTek branch:
+# tccd, securityd; and wifid, above, without which its antenna vendor command stalls)
+[ -n "$BT" ] && DARWIN_JOBS="$DARWIN_JOBS com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.securityd"
 # The programs (file names) started with a library of ours inside them: "LIBRARY NAME..." per line
 # (src/inject.c is libhakios.dylib, src/inject_sb.c is libhakios.sb.dylib, src/inject_media.c is
 # libhakios.media.dylib).
@@ -138,6 +145,8 @@ INJECT=${INJECT-"/redwood/lib/libhakios.dylib backboardd containermanagerd conta
 /redwood/lib/libhakios.media.dylib mediaserverd
 /redwood/lib/libhakios.app.dylib Sileo
 /redwood/lib/libhakios.tweaks.dylib Preferences"}
+[ -n "$BT" ] && INJECT="$INJECT
+/redwood/lib/libhakios.bt.dylib BlueTool bluetoothd"
 mkdir -p obj
 
 if [ -z "$PREBUILT" ] && ! command -v ld64 >/dev/null; then PREBUILT=1; fi
@@ -249,6 +258,9 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		# ... and inside an application, to say what killed it (src/inject_app.c)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.app.dylib -lobjc \
 			-o obj/libhakios.app.dylib src/inject_app.c
+		# ... and inside BlueTool and bluetoothd, for Bluetooth on a controller that is not Broadcom's (src/inject_bt.c)
+		$DYN -dynamiclib -install_name /redwood/lib/libhakios.bt.dylib \
+			-o obj/libhakios.bt.dylib src/inject_bt.c
 		$DYN -O2 -dynamiclib -install_name /redwood/lib/libhakios.media.dylib -framework CoreFoundation -framework CoreMedia \
 			-framework CoreVideo -framework IOSurface -lobjc \
 			-o obj/libhakios.media.dylib src/inject_media.c src/camera_device.c src/camera_isp.c
@@ -374,6 +386,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/libhakios.media.dylib ] && cp obj/libhakios.media.dylib root/lib/     # (as with cpu_test)
 	[ -f obj/libhakios.app.dylib ] && cp obj/libhakios.app.dylib root/lib/
 	[ -f obj/libhakios.tweaks.dylib ] && cp obj/libhakios.tweaks.dylib root/lib/
+	if [ -n "$BT" ] && [ -f obj/libhakios.bt.dylib ]; then cp obj/libhakios.bt.dylib root/lib/; fi
 	if [ -f obj/HakiosAudio ]; then
 		mkdir -p root/lib/HakiosAudio.driver
 		cp obj/HakiosAudio root/lib/HakiosAudio.driver/
@@ -705,6 +718,13 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		if [ -d ../fw-modem/ath10k ]; then
 			rm -rf sysroot/fw/ath10k && cp -R ../fw-modem/ath10k sysroot/fw/ath10k
 		fi
+	fi
+	# ... and the Bluetooth chip's rampatch and NVM (BT=1; the WCN3990's, out of the phone's partition "bluetooth", IMAGE/,
+	# in lower case: hakios.bt3990.c reads fw/crbtfwNN.tlv and fw/crnvNN.bin, NN its ROM version). Not in the repository.
+	if [ -n "$BT" ]; then
+		ls ../fw-bt/crbtfw*.tlv ../fw-bt/crnv*.bin >/dev/null 2>&1 || { echo "build.sh: BT=1 needs ../fw-bt/crbtfw*.tlv and crnv*.bin" >&2; exit 1; }
+		mkdir -p sysroot/fw
+		cp ../fw-bt/crbtfw*.tlv ../fw-bt/crnv*.bin sysroot/fw/
 	fi
 	# ... and the speaker amplifiers' configuration, the phone's /vendor/etc/aw882xx_acf.bin (drivers/audio/hakios.speaker.c,
 	# for sound=3): Android's own register values, which are not in the repository either

@@ -76,3 +76,7 @@ power   bsd/dev/hakios.thermal.c
 power   bsd/dev/hakios.pmic.c
 power   bsd/dev/hakios.battguard.c
 bluetooth bsd/dev/hakios.bt.c
+bluetooth bsd/dev/hakios.bt3990.c
+bluetooth bsd/dev/hakios.bthci.c
+bluetooth bsd/dev/hakios.btsk.c
+bluetooth iokit/Kernel/hakios.bluetooth.cpp

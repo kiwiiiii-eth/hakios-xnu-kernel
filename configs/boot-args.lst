@@ -68,7 +68,11 @@ battery_stop_poll	k
 battmgr	k
 bootcpu	kl
 bt	k
+bt_after	k
 bt_again	k
+bt_lines	u
+bt_mac	k
+bt_said	k
 buttons	k
 buttons_pon	k
 buttons_steps	k
@@ -206,6 +210,7 @@ modem	k
 modem_again	k
 modem_apn	k
 modem_buffer	k
+modem_cell_probe	k
 modem_data	k
 modem_data_nobind	k
 modem_data_off	k
@@ -251,6 +256,7 @@ modem_rmtfs_rw_off	k
 modem_share_off	k
 modem_share_test	k
 modem_sim_probe_off	k
+modem_sim_switch	k
 modem_sim_switch_off	k
 modem_step	k
 modem_tick	k

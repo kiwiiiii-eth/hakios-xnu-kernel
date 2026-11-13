@@ -42,6 +42,7 @@ CONFIG_HAKIOS_VIRTIO_SOUND=y
 
 # the Bluetooth half of the WCN6750: step one, a read-only look at its three pins (bt=1) [hakios.bt.c]
 CONFIG_HAKIOS_BT=y
+# CONFIG_HAKIOS_BT3990 is not set
 
 # the cameras (cam=N): the sensors on the CCI bus and the ISP's interface. The sensors, their tables (fw-camera/) and ... [hakios.camera.c]
 CONFIG_HAKIOS_CAMERA=y

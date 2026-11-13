@@ -2432,7 +2432,8 @@ hakios_mpss_wifi_space(void)
 	contexts = idr1 & 0xff;
 	wifi_space.page = idr1 >> 31 ? 0x10000 : 0x1000;
 	wifi_space.pages = 2u << (idr1 >> 28 & 7);
-	if ((scr0 & 1u << 3) || 2 * wifi_space.pages * wifi_space.page != 0x100000) {
+	/* (the 6T's: 64 pages of 4K of global registers, then the contexts': 0x80000 in all, dt reg of apps_smmu) */
+	if ((scr0 & 1u << 3) || 2 * wifi_space.pages * wifi_space.page > 0x100000) {
 		lck_mtx_unlock(&hakios_smmu_lock);
 		printf("mpss: wifi: the SMMU is not of the shape this knows (scr0 %#x, idr1 %#x)\n", scr0, idr1);
 		return false;

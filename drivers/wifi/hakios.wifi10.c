@@ -27,11 +27,19 @@ extern kern_return_t thread_terminate(thread_t thread);
 #define WIFI10_DDR_FIRST        0x80000000ull   /* what hakios_mpss_wifi_space() shows the radio, as it is */
 #define WIFI10_DDR_END          0x400000000ull
 
+extern void loader_log_putc(char c);  /* the loader's record of the run (what the run's log is made of) */
+
 static void
 say_line(const char *line)
 {
 	size_t length = strlen(line);
 
+	for (const char *c = line; *c != 0; c++) {
+		loader_log_putc(*c);
+	}
+	if (length == 0 || line[length - 1] != '\n') {
+		loader_log_putc('\n');
+	}
 	printf("%s%s", line, length != 0 && line[length - 1] == '\n' ? "" : "\n");
 }
 

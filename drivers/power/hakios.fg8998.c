@@ -45,6 +45,61 @@
 
 #define POLL_SECONDS            10
 
+/*
+ * What the charger is set to, read only (boot-arg fg_charger_look=0 leaves it out), once at the start and again every
+ * ten minutes and whenever USB comes or goes: why the battery still gives while USB is in (11-11: 47% to 37% on the Mac;
+ * 11-13: "full on" and yet -8 to -158 mA). Slave 2, the charger's registers as Linux's qcom_smbx.c names them; the input
+ * current limits are in 25 mA units.
+ */
+static const struct {
+	uint16_t reg;                   /* slave 2, peripheral and offset: 0x1006 is peripheral 0x10, offset 6 */
+	const char *name;
+} fg_charger_regs[] = {
+	{ 0x1006, "BATTERY_CHARGER_STATUS_1 ([2:0] state)" },
+	{ 0x1007, "BATTERY_CHARGER_STATUS_2 (bit 7 input current limited)" },
+	{ 0x100a, "BATTERY_CHARGER_STATUS_4 (charge current after JEITA, 25 mA)" },
+	{ 0x100d, "BATTERY_CHARGER_STATUS_7" },
+	{ 0x1042, "CHARGING_ENABLE_CMD" },
+	{ 0x1051, "CHGR_CFG2" },
+	{ 0x1060, "PRE_CHARGE_CURRENT_CFG" },
+	{ 0x1061, "FAST_CHARGE_CURRENT_CFG (25 mA)" },
+	{ 0x1070, "FLOAT_VOLTAGE_CFG" },
+	{ 0x1307, "APSD_STATUS" },
+	{ 0x1308, "APSD_RESULT_STATUS (bit 0 SDP, 2 CDP, 3 DCP)" },
+	{ 0x130b, "TYPE_C_STATUS_1 (bit 7 Rp default, 6 1.5 A, 5 3 A)" },
+	{ 0x130c, "TYPE_C_STATUS_2" },
+	{ 0x1310, "USBIN_INT_RT_STS" },
+	{ 0x1362, "USBIN_OPTIONS_1_CFG" },
+	{ 0x1365, "USBIN_LOAD_CFG" },
+	{ 0x1366, "USBIN_ICL_OPTIONS (bit 1 USB51 mode, 0 high current mode)" },
+	{ 0x1370, "USBIN_CURRENT_LIMIT_CFG (25 mA)" },
+	{ 0x1380, "USBIN_AICL_OPTIONS_CFG" },
+	{ 0x1607, "ICL_STATUS (the limit in force, 25 mA)" },
+	{ 0x1608, "ICL_STATUS + 1" },
+	{ 0x160b, "POWER_PATH_STATUS" },
+	{ 0x1651, "WD_CFG" },
+	{ 0x1653, "SNARL_BARK_BITE_WD_CFG" },
+};
+
+static bool fg_read(uint16_t id, uint8_t reg, uint8_t *bytes, uint32_t count);
+
+static void
+fg_charger_look(const char *why)
+{
+	char line[1100];
+	size_t n;
+
+	n = (size_t)snprintf(line, sizeof(line), "fg8998: the charger (%s), read only:", why);
+	for (unsigned k = 0; k < sizeof(fg_charger_regs) / sizeof(fg_charger_regs[0]) && n < sizeof(line); k++) {
+		uint8_t value = 0;
+		uint16_t reg = fg_charger_regs[k].reg;
+		bool ok = fg_read((uint16_t)(0x200 | reg >> 8), (uint8_t)reg, &value, 1);
+
+		n += (size_t)snprintf(line + n, sizeof(line) - n, ok ? " %#x=%#04x" : " %#x=?", reg, value);
+	}
+	printf("%s\n", line);
+}
+
 static bool
 fg_read(uint16_t id, uint8_t reg, uint8_t *bytes, uint32_t count)
 {
@@ -80,6 +135,8 @@ fg_thread(__unused void *parameter, __unused wait_result_t result)
 	static const char *const doing[8] = { "trickle", "pre-charge", "fast", "full on", "taper", "done", "inhibited",
 		                              "disabled" };
 	uint8_t subtype[2] = { 0, 0 };
+	uint32_t charger_look = 1;
+	int was_plugged = -1;
 
 	for (int i = 0; i < 60 && hakios_pmic_reader == NULL; i++) {
 		delay_for_interval(500, NSEC_PER_MSEC);         /* the buttons' driver maps the arbiter */
@@ -95,6 +152,13 @@ fg_thread(__unused void *parameter, __unused wait_result_t result)
 	}
 	printf("fg8998: the PMI8998's fuel gauge (subtypes %#x, %#x); read every %u s, nothing written\n", subtype[0],
 	    subtype[1], POLL_SECONDS);
+	PE_parse_boot_argn("fg_charger_look", &charger_look, sizeof(charger_look));
+	if (charger_look) {
+		for (unsigned k = 0; k < sizeof(fg_charger_regs) / sizeof(fg_charger_regs[0]); k++) {
+			printf("fg8998: %#x %s\n", fg_charger_regs[k].reg, fg_charger_regs[k].name);
+		}
+		fg_charger_look("at the start");
+	}
 
 	for (unsigned tick = 0;; tick++) {
 		struct hakios_battery_state state = { .size = sizeof(state) };
@@ -126,6 +190,10 @@ fg_thread(__unused void *parameter, __unused wait_result_t result)
 			}
 			state.usb_type = plugged ? 1 : 0;
 			hakios_battery_report(&state);
+			if (charger_look && (was_plugged != (int)plugged || (tick != 0 && tick % 60 == 0))) {
+				fg_charger_look(was_plugged != (int)plugged ? (plugged ? "USB in" : "USB out") : "ten minutes on");
+			}
+			was_plugged = plugged;
 			if (tick % 6 == 0) {
 				printf("fg8998: %d.%02d%%, %d mV, %d mA (gauge %d), %d.%02d C; USB %s, charger %s\n", soc / 100,
 				    soc % 100, state.voltage_uv / 1000, state.current_ua / 1000, ibatt_ua / 1000,

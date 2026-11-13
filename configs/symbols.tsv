@@ -13,6 +13,7 @@ ADRENO_STREAM1	arg	adreno_stream1	GPU and display	k	hakios.a630.c,hakios.adreno.
 ADRENO_WATCH	arg	adreno_watch	GPU and display	k	hakios.a630.c,hakios.adreno.c	after the last step, say once a second for S seconds (default 20) that the machine is still alive, and what was written last
 ADSP8	arg	adsp8	Audio and battery	k	hakios.adsp845.c	the OnePlus 6T's audio DSP, steps 1 to N, once the root is there (the image is on it), while the system goes on starting
 ADSP8_AGAIN	arg	adsp8_again	Audio and battery	k	hakios.adsp845.c	
+ADSP8_APR	arg	adsp8_apr	Audio and battery	k	hakios.adsp845.c	
 ADSP8_BB	arg	adsp8_bb	Audio and battery	k	hakios.adsp845.c	
 ADSP8_CX	arg	adsp8_cx	Audio and battery	k	hakios.adsp845.c	
 ADSP8_KEEP	arg	adsp8_keep	Audio and battery	k	hakios.adsp845.c	

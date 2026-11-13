@@ -68,10 +68,22 @@
  *              bit 8); from here a thread of ours listens to the DSP
  *  10  talks   QRTR on that channel: hello both ways, and the services the DSP tells of, written down for
  *              adsp8_listen seconds (default 3)
+ *  11  talks   APR (B2a), on the channel apr_audio_svc that the DSP opens and we answer from step 9 on (only when adsp8 is 11 or
+ *              more: below that it is left unanswered as in B1): the core service (3) is asked whether the audio services are up
+ *              (AVCS_CMD_ADSP_EVENT_GET_STATE, over and over for adsp8_apr seconds, default 15) and which services and versions it
+ *              has; if they never say so, a diagnosis of what the DSP has told (the audio PD's notifier, the channels it opened).
+ *              Only GLINK data and doorbell bit 8, as step 10. This file exports the reference phone's API of it:
+ *              hakios_adsp_apr(), hakios_adsp_apr_events(), hakios_adsp_apr_events_second() (sys/hakios.audio.h)
+ *  12  reads   (B2a) the speaker amplifier, a TFA9894 at 0x34 on QUP wrapper 0's engine 4: READS the clock controller's status of the
+ *              engine's three clocks and the pins' control words (gpio58-61, 69, 89, 90); if the clocks are not all running it says so
+ *              and stops, nothing of the engine touched; if they run, sets the engine up as an I2C master (its own registers) and READS
+ *              the amplifier's revision register. No pin, clock, regulator or PMIC is written. Does not need the DSP: adsp8=812
+ *              performs it alone (the 800 of adsp8=N: the DSP is left alone; adsp8=211 and 212 are the DSP kept up, APR, and this)
+ *  13  --      (B2a) the playback sequence, a DESIGN: lane-b-notes/B2-test-plan.md chapter 6. The step refuses to run
  *
  * Writes to hardware registers: steps 3 (AOSS message RAM, apss_shared bit 0), 6 (the TCSR mutex), 7 and 9
  * (apss_shared bits 10 and 8; the AOSS again; with adsp8_cx=1 the RPMh sequencer), and TrustZone's calls
- * (4 and 7). Nothing writes a clock, a pin or a PMIC. The kinds of write that are new to the 6T, besides
+ * (4 and 7), and, in step 12 only if the clocks run, the I2C engine's own registers (0x890000). Nothing writes a clock, a pin or a PMIC. The kinds of write that are new to the 6T, besides
  * what the modem does already: TrustZone's PAS calls for image 1, "adsp" load state, and the apss_shared
  * bits 8 and 10.
  *
@@ -82,10 +94,11 @@
  * unless adsp8_again=1.
  *
  * The boot line is nearly full (607 characters), so the one argument carries more: the hundreds of adsp8=N are switches,
- * 100 = adsp8_cx=1, 200 = adsp8_keep=1, 400 = adsp8_again=1 (added: adsp8=307 is step 7 with cx.lvl and kept up). Named
+ * 100 = adsp8_cx=1, 200 = adsp8_keep=1, 400 = adsp8_again=1 (added: adsp8=307 is step 7 with cx.lvl and kept up), 800 = the DSP is
+ * left alone (adsp8=812 is the amplifier's probe alone). Named
  * arguments for what a config fragment can carry: adsp8_pause=MS (default 2200, what the loader needs to note the end of the log, after each announcement of the
  * last step), adsp8_wait=S (how long step 7 watches for "up", default 10), adsp8_listen=S, adsp8_keep=1,
- * adsp8_again=1, adsp8_cx=1, adsp8_bb=0 (the black box, below, off).
+ * adsp8_again=1, adsp8_cx=1, adsp8_bb=0 (the black box, below, off), adsp8_apr=S (how long step 11 asks the core service, default 15).
  */
 #include <kern/clock.h>
 #include <kern/kalloc.h>
@@ -104,6 +117,7 @@
 #include <sys/vnode.h>
 #include <sys/vnode_internal.h>
 #include <vm/vm_kern.h>
+#include <sys/hakios.audio.h>
 #include <sys/hakios.input.h>
 
 #ifdef HAKIOS_ADSP
@@ -129,13 +143,15 @@ static LCK_GRP_DECLARE(adsp_lock_group, "hakios-adsp845");
 
 static void bb_say(const char *format, ...) __printflike(1, 2);
 
-#define STEPS                   10
+#define STEPS                   13
+#define FIRST_INDEPENDENT_STEP  12      /* the steps from here on do not need the DSP (800 of adsp8=N leaves it alone) */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
 static uint32_t step;                   /* the one being performed */
 static uint32_t new_from;               /* the first of the steps that have not been seen to work: they wait */
 static char last_write[96] = "nothing written";
 static bool flag_cx, flag_keep, flag_again;      /* the hundreds of adsp8=N: 100 asks RPMh for cx.lvl, 200 keeps the DSP up, 400 starts it again */
+static bool flag_alone;                 /* 800: the DSP is left alone, only the steps that do not need it (12, 13) are performed */
 static bool leaving;                    /* on the way back to the loader after a panic: no lock is taken, nothing sleeps */
 
 /*
@@ -1975,10 +1991,11 @@ struct glink_packet {
  * no qrtr child for lpass; the reference phone's dt qcom,intents of qcom,adsp_qrtr). The DSP's others (apr_audio_svc and
  * the rest) are left unanswered: the audio services are for the steps after this one.
  */
-enum { CHANNEL_QRTR, CHANNELS };
+enum { CHANNEL_QRTR, CHANNEL_APR, CHANNELS };
 
 struct glink_channel {
 	const char *name;
+	bool wanted;                            /* answered when the DSP opens it (else: left unanswered, as in B1) */
 	uint32_t ours;                          /* our number for it */
 	struct {
 		uint32_t size, count;
@@ -2009,7 +2026,14 @@ static struct {
 	char others[4][33];                     /* the channels the DSP opens that nobody here speaks (for the log) */
 } glink = {
 	.channel = {
-		[CHANNEL_QRTR] = { .name = "IPCRTR", .ours = 1, .intents = { { 0x800, 5 }, { 0x2000, 3 }, { 0x4400, 2 } } },
+		[CHANNEL_QRTR] = { .name = "IPCRTR", .wanted = true, .ours = 1, .intents = { { 0x800, 5 }, { 0x2000, 3 }, { 0x4400, 2 } } },
+		/*
+		 * Step 11 (adsp8=11 and more): APR, the audio services' protocol. dt: ref-linux/sdm845.dtsi:931-935, apr-v2 with
+		 * qcom,glink-channels = "apr_audio_svc" and qcom,intents = <512 20>, 20 buffers of 512 bytes (Linux's
+		 * qcom_glink_native.c gives them to the channel when it is open, as glink_pump() does for the others). Not
+		 * answered unless step 11 is to be performed (hakios_adsp_init() sets "wanted"): the steps up to 10 stay as in B1.
+		 */
+		[CHANNEL_APR] = { .name = "apr_audio_svc", .ours = 2, .intents = { { 512, 20 }, { 0, 0 }, { 0, 0 } } },
 	},
 };
 
@@ -2244,7 +2268,7 @@ glink_pump(void)
 			glink_advance(length);
 			channel = NULL;
 			for (unsigned c = 0; c < CHANNELS; c++) {
-				if (strcmp(name, glink.channel[c].name) == 0) {
+				if (glink.channel[c].wanted && strcmp(name, glink.channel[c].name) == 0) {
 					channel = &glink.channel[c];
 				}
 			}
@@ -2475,6 +2499,7 @@ static struct {
 	bool there;
 } qrtr_servers[64];
 static uint32_t qrtr_peer, qrtr_in, qrtr_out, qrtr_hellos, qrtr_lookups;
+static uint32_t qrtr_looked_for[8];     /* the services (ids) the DSP looked for, each once: the diagnosis of step 11 says them */
 
 static int
 qrtr_out_packet(uint32_t type, uint32_t from_port, uint32_t to_node, uint32_t to_port, const void *data, uint32_t length)
@@ -2545,6 +2570,15 @@ qrtr_control(const struct qrtr_header *header, const struct qrtr_control *contro
 		break;
 	case QRTR_NEW_LOOKUP:
 		/* the DSP looks for a service of ours (a protection domain's locator, say): there are none yet */
+		for (unsigned i = 0; i < sizeof(qrtr_looked_for) / sizeof(qrtr_looked_for[0]); i++) {
+			if (qrtr_looked_for[i] == control->words[0]) {
+				break;
+			}
+			if (qrtr_looked_for[i] == 0) {
+				qrtr_looked_for[i] = control->words[0];
+				break;
+			}
+		}
 		if (qrtr_lookups++ < 16) {
 			printf("adsp845: qrtr: the DSP looks for service %u (%#x), instance %u: nobody here offers it\n", control->words[0],
 			    control->words[0], control->words[1]);
@@ -2618,6 +2652,8 @@ qrtr_input(const uint8_t *data, uint32_t length)
 
 static volatile bool link_wanted, link_runs;
 
+static void apr_input(const uint8_t *data, uint32_t length);
+
 static void
 link_thread(__unused void *parameter, __unused wait_result_t result)
 {
@@ -2659,6 +2695,8 @@ link_thread(__unused void *parameter, __unused wait_result_t result)
 			}
 			if (from == CHANNEL_QRTR) {
 				qrtr_input(packet->data, packet->length);
+			} else if (from == CHANNEL_APR) {
+				apr_input(packet->data, packet->length);
 			}
 			kfree_data(packet, sizeof(*packet) + packet->length);
 		}
@@ -2777,6 +2815,7 @@ step_link(void)
 	glink.trace = 60;
 	glink.up = true;
 	qrtr_hellos = qrtr_in = qrtr_out = qrtr_lookups = 0;
+	bzero(qrtr_looked_for, sizeof(qrtr_looked_for));
 	doorbell.since = began = now_us();
 	glink_say(GLINK_VERSION, GLINK_VERSION_1, glink.features, NULL, 0);
 	lck_mtx_unlock(&glink_lock);
@@ -2823,10 +2862,746 @@ step_qrtr(void)
 }
 
 
+/* ---- APR: the audio services' protocol, on the channel apr_audio_svc (step 11) ------------------------ */
+
+/*
+ * What Linux's audio drivers say to the DSP's audio services (Linux v6.12: drivers/soc/qcom/apr.c, include/linux/soc/qcom/apr.h,
+ * include/dt-bindings/soc/qcom,apr.h, sound/soc/qcom/qdsp6/q6core.c; this is written again from what they do, and from the
+ * reference phone's hakios.adsp.c, whose API it keeps: hakios.audio.h): a packet is a header of five words -- a field of
+ * version (bits 0-3), header size in words (4-7) and message type (8-9); the packet's size; who it is from and to (a service, a
+ * domain, a port each: the DSP is domain 4, we 5); a token that the answer carries back; an opcode -- and what the opcode takes.
+ * apr.c's apr_send_pkt() fills the source and destination (service and domain) of what a driver sends; the ports and the token of
+ * the core service's questions are 0 (q6core.c). The DSP's own core service (3) tells whether the audio services are up and which
+ * services and versions it has.
+ *
+ * What the reference phone's driver did not check, and this does (docs/driver-review/sound.md S-13: a packet whose own size is below
+ * its header's made "size - header" wrap to about 4 GB, and the copies after it read from beyond the packet): a packet is believed
+ * only when its header is whole, its size is neither below the header's nor above what arrived (Linux's apr_do_rx_callback() asks
+ * for equal; here a few bytes of padding after it would do), its version, message type, domains and services are in range.
+ */
+#define APR_DOMAIN_ADSP                 4       /* qcom,apr.h */
+#define APR_DOMAIN_APPS                 5
+#define APR_DOMAIN_MAX                  6
+#define APR_SVC_ADSP_CORE               3       /* sdm845.dtsi:937 service@3 "qcom,q6core" */
+#define APR_SVC_AFE                     4       /* :946 q6afe */
+#define APR_SVC_ASM                     7       /* :957 q6asm */
+#define APR_SVC_ADM                     8       /* :969 q6adm */
+#define APR_SVC_MAX                     0x17
+#define APR_MSG_TYPE_SEQ_CMD            2       /* apr.h */
+#define APR_PKT_VER                     0
+#define APR_HDR_FIELD(type, bytes)      ((uint16_t)(((type) & 3) << 8 | (((bytes) / 4) & 0xf) << 4 | APR_PKT_VER))
+#define APR_BASIC_RSP_RESULT            0x000110e8u     /* apr.h: payload { opcode, status } */
+#define ADSP_EUNSUPPORTED               3u              /* q6dsp-errno.h */
+#define AVCS_GET_VERSIONS               0x00012905u     /* q6core.c */
+#define AVCS_GET_VERSIONS_RSP           0x00012906u
+#define AVCS_CMD_ADSP_EVENT_GET_STATE   0x0001290cu
+#define AVCS_CMDRSP_ADSP_EVENT_GET_STATE 0x0001290du
+#define AVCS_CMD_GET_FWK_VERSION        0x0001292cu     /* (q6core.c writes 0x001292c: the same number) */
+#define AVCS_CMDRSP_GET_FWK_VERSION     0x0001292du
+#define APR_SEND_MAX                    256             /* the most payload a command of ours carries */
+#define APR_WORDS                       128             /* the most payload of an answer kept here (512 bytes, one of our intents) */
+
+struct apr_header {
+	uint16_t field, size;
+	uint8_t from_service, from_domain;
+	uint16_t from_port;
+	uint8_t to_service, to_domain;
+	uint16_t to_port;
+	uint32_t token, opcode;
+};
+_Static_assert(sizeof(struct apr_header) == 20, "APR's header is five words");
+
+struct apr_reply {
+	uint32_t opcode, token, length;         /* length: of the payload, in bytes (the words kept are at most APR_WORDS) */
+	uint8_t from_service;
+	uint32_t words[APR_WORDS];
+};
+
+/* The answer a question waits for: written by the link's thread, read by the asker, both under apr_answer_lock. */
+static LCK_MTX_DECLARE(apr_answer_lock, &adsp_lock_group);
+static LCK_MTX_DECLARE(apr_lock, &adsp_lock_group);     /* one question at a time */
+static struct apr_reply apr_answer;
+static bool apr_answer_there;
+static bool apr_waiting, apr_waiting_any;               /* a question waits; any token from its service will do (the core's) */
+static uint32_t apr_waited_token, apr_waited_service;
+static uint32_t apr_in, apr_out, apr_dropped, apr_trace, apr_next_token = 1;
+static hakios_apr_events_t apr_events;                  /* the sound's (hakios.sound.c): what nobody waits for */
+static hakios_apr_events_t apr_events_second;           /* the microphones' (hakios.mic.c) */
+
+/* A packet from the DSP's audio services. From the link's thread. */
+static void
+apr_input(const uint8_t *data, uint32_t length)
+{
+	struct apr_header header;
+	uint32_t header_length, payload, kept;
+	uint32_t words[64];
+	bool waited;
+
+	if (length < sizeof(header)) {
+		printf("adsp845: apr: %u bytes, no APR packet\n", length);
+		apr_dropped++;
+		return;
+	}
+	memcpy(&header, data, sizeof(header));
+	header_length = ((header.field >> 4) & 0xf) * 4;
+	if ((header.field & 0xf) > APR_PKT_VER + 1 || header_length < sizeof(header) || header_length > length) {
+		printf("adsp845: apr: a header of %u bytes (field %#x) in a packet of %u: dropped\n", header_length, header.field, length);
+		apr_dropped++;
+		return;
+	}
+	if (header.size < header_length || header.size > length) {
+		printf("adsp845: apr: a packet that says it is %u bytes, with a header of %u, in %u that arrived: dropped\n", header.size,
+		    header_length, length);
+		apr_dropped++;
+		return;
+	}
+	if (header.from_domain >= APR_DOMAIN_MAX || header.to_domain >= APR_DOMAIN_MAX || header.from_service >= APR_SVC_MAX ||
+	    header.to_service >= APR_SVC_MAX) {
+		printf("adsp845: apr: a header with a domain or a service out of range (from %u/%u to %u/%u): dropped\n", header.from_domain,
+		    header.from_service, header.to_domain, header.to_service);
+		apr_dropped++;
+		return;
+	}
+	payload = header.size - header_length;
+	kept = payload < sizeof(apr_answer.words) ? payload : (uint32_t)sizeof(apr_answer.words);
+	apr_in++;
+	if (apr_trace > 0) {
+		uint32_t w[4] = { 0, 0, 0, 0 };
+
+		apr_trace--;
+		memcpy(w, data + header_length, payload < sizeof(w) ? payload : sizeof(w));
+		printf("adsp845: apr: < from service %u of domain %u (port %u) to %u of %u (port %u): opcode %#x, token %u, %u bytes: %#x %#x "
+		    "%#x %#x\n", header.from_service, header.from_domain, header.from_port, header.to_service, header.to_domain,
+		    header.to_port, header.opcode, header.token, payload, w[0], w[1], w[2], w[3]);
+	}
+	lck_mtx_lock(&apr_answer_lock);
+	waited = apr_waiting && !apr_answer_there &&
+	    (apr_waiting_any ? header.from_service == apr_waited_service : header.token == apr_waited_token);
+	if (waited) {
+		bzero(apr_answer.words, sizeof(apr_answer.words));
+		memcpy(apr_answer.words, data + header_length, kept);
+		apr_answer.length = payload;
+		apr_answer.opcode = header.opcode;
+		apr_answer.token = header.token;
+		apr_answer.from_service = header.from_service;
+		apr_answer_there = true;
+	}
+	lck_mtx_unlock(&apr_answer_lock);
+	if (!waited) {
+		hakios_apr_events_t events = apr_events;
+		uint32_t handed = kept < sizeof(words) ? kept : (uint32_t)sizeof(words);
+
+		bzero(words, sizeof(words));
+		memcpy(words, data + header_length, handed);
+		if (events != NULL && events(header.from_service, header.from_port, header.opcode, header.token, words, handed)) {
+			return;
+		}
+		events = apr_events_second;
+		if (events != NULL) {
+			events(header.from_service, header.from_port, header.opcode, header.token, words, handed);
+		}
+	}
+}
+
+/*
+ * One command to a service of the DSP, and its answer waited for with ms (0: not waited for; what comes back is the events'
+ * handler's). With any_token the answer is the next packet from that service, whatever its token (the core service's: Linux's
+ * q6core.c sends token 0 and takes the next answer); else the packet that carries the token (token 0: one of ours is made up).
+ * True if it was sent and, if waited for, answered.
+ */
+static bool
+apr_exchange(uint8_t service, uint16_t port, uint32_t token, bool any_token, uint32_t opcode, const void *payload, uint32_t length,
+    uint32_t ms, struct apr_reply *reply)
+{
+	uint8_t packet[sizeof(struct apr_header) + APR_SEND_MAX];
+	struct apr_header *header = (struct apr_header *)packet;
+	bool answered = false;
+	int error;
+
+	if (length > APR_SEND_MAX || (length != 0 && payload == NULL) || !glink.channel[CHANNEL_APR].open) {
+		return false;
+	}
+	bzero(packet, sizeof(packet));
+	header->field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD, sizeof(*header));
+	header->size = (uint16_t)(sizeof(*header) + length);
+	header->from_service = service;
+	header->from_domain = APR_DOMAIN_APPS;
+	header->from_port = port;
+	header->to_service = service;
+	header->to_domain = APR_DOMAIN_ADSP;
+	header->to_port = port;
+	header->opcode = opcode;
+	if (length != 0) {
+		memcpy(packet + sizeof(*header), payload, length);
+	}
+	if (ms == 0) {
+		header->token = token;
+		error = glink_send(&glink.channel[CHANNEL_APR], packet, (uint32_t)sizeof(*header) + length);
+		apr_out += error == 0;
+		return error == 0;
+	}
+	lck_mtx_lock(&apr_lock);
+	if (token == 0 && !any_token) {
+		token = apr_next_token++;
+		if (apr_next_token >= 0x01000000u) {
+			apr_next_token = 1;
+		}
+	}
+	header->token = token;
+	lck_mtx_lock(&apr_answer_lock);
+	apr_answer_there = false;
+	apr_waited_token = token;
+	apr_waited_service = service;
+	apr_waiting_any = any_token;
+	apr_waiting = true;
+	lck_mtx_unlock(&apr_answer_lock);
+	error = glink_send(&glink.channel[CHANNEL_APR], packet, (uint32_t)sizeof(*header) + length);
+	if (error != 0) {
+		printf("adsp845: apr: > opcode %#x to service %u: NOT SENT (%d)\n", opcode, service, error);
+	} else {
+		apr_out++;
+		for (uint32_t waited = 0; waited < ms && !answered; waited++) {
+			lck_mtx_lock(&apr_answer_lock);
+			if (apr_answer_there) {
+				answered = true;
+				if (reply != NULL) {
+					*reply = apr_answer;
+				}
+			}
+			lck_mtx_unlock(&apr_answer_lock);
+			if (!answered) {
+				sleep_ms(1);
+			}
+		}
+	}
+	lck_mtx_lock(&apr_answer_lock);
+	apr_waiting = false;
+	apr_answer_there = false;
+	lck_mtx_unlock(&apr_answer_lock);
+	lck_mtx_unlock(&apr_lock);
+	return answered;
+}
+
+/* The reference phone's API (hakios.audio.h), as hakios.adsp.c has it: its answer has 64 words, so what is longer is cut. */
+bool
+hakios_adsp_apr(uint8_t service, uint16_t port, uint32_t token, uint32_t opcode, const void *payload, uint32_t length, uint32_t ms,
+    struct hakios_apr_answer *answer)
+{
+	struct apr_reply reply;
+	bool done = apr_exchange(service, port, token, false, opcode, payload, length, ms, &reply);
+
+	if (done && answer != NULL) {
+		answer->opcode = reply.opcode;
+		answer->token = reply.token;
+		answer->length = reply.length;
+		memcpy(answer->words, reply.words, sizeof(answer->words));
+	}
+	return done;
+}
+
+void
+hakios_adsp_apr_events(hakios_apr_events_t handler)
+{
+	apr_events = handler;
+}
+
+void
+hakios_adsp_apr_events_second(hakios_apr_events_t handler)
+{
+	apr_events_second = handler;
+}
+
+/* ---- step 11: APR, the core service ----------------------------------------------------------------- */
+
+static const char *
+apr_service_name(uint32_t id)
+{
+	switch (id) {              /* qcom,apr.h */
+	case 3: return "core";
+	case 4: return "afe";
+	case 5: return "vsm";
+	case 6: return "vpm";
+	case 7: return "asm";
+	case 8: return "adm";
+	case 9: return "mvm";
+	case 10: return "cvs";
+	case 11: return "cvp";
+	case 12: return "usm";
+	case 13: return "lsm";
+	case 0x16: return "vidc";
+	default: return "?";
+	}
+}
+
+/* The core service's list of the services and their versions (q6core.c's two structures), checked against what arrived. */
+static void
+apr_show_versions(const struct apr_reply *reply)
+{
+	uint32_t have = reply->length < sizeof(reply->words) ? reply->length / 4 : APR_WORDS, entry, first, count;
+
+	if (reply->opcode == AVCS_CMDRSP_GET_FWK_VERSION && have >= 5) {
+		/* { major, minor, branch, sub-branch, number of services } and then { service, api version, api branch version } each */
+		first = 5;
+		entry = 3;
+		count = reply->words[4];
+		printf("adsp845: 11: the DSP's framework is %u.%u.%u.%u and tells of %u services\n", reply->words[0], reply->words[1],
+		    reply->words[2], reply->words[3], count);
+	} else if (reply->opcode == AVCS_GET_VERSIONS_RSP && have >= 2) {
+		/* { build id, number of services } and then { service, version } each */
+		first = 2;
+		entry = 2;
+		count = reply->words[1];
+		printf("adsp845: 11: the DSP's build is %#x and tells of %u services\n", reply->words[0], count);
+	} else {
+		printf("adsp845: 11: an answer of opcode %#x (%u bytes) that is not a list of versions\n", reply->opcode, reply->length);
+		return;
+	}
+	if (count > (have - first) / entry) {
+		printf("adsp845: 11: only %u of them are in the %u bytes kept\n", (have - first) / entry, have * 4);
+		count = (have - first) / entry;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		const uint32_t *e = &reply->words[first + i * entry];
+
+		if (entry == 3) {
+			printf("adsp845: 11:   service %#x (%s): api %u, branch %u\n", e[0], apr_service_name(e[0]), e[1], e[2]);
+		} else {
+			printf("adsp845: 11:   service %#x (%s): version %u\n", e[0], apr_service_name(e[0]), e[1]);
+		}
+	}
+}
+
+/*
+ * Why there is no audio service to talk to, said as far as what the DSP has told us goes. Linux's side of "the audio protection
+ * domain": apr.c waits until the service notifier says "avs/audio" is up (pdr_add_lookup(); Linux v6.12 pdr_interface.c, which asks
+ * the locator, service 0x40, where the domain is, and the notifier, service 0x42, whether it is up); the locator's answer is the
+ * APSS side's own (qcom_pd_mapper.c: sdm845_domains has adsp_audio_pd, "msm/adsp/audio_pd", instance 74, service "avs/audio"):
+ * the DSP asks the APSS for nothing, so no answer of ours is wanted for it, and the audio PD, if it is going to run, runs without
+ * us. What we can see is whether the DSP has registered its notifier for that instance (QRTR service 66, instance 74) and which
+ * channels it has opened.
+ */
+static void
+apr_diagnose(const char *what)
+{
+	unsigned count = 0, notifier = 0, locator = 0;
+
+	for (unsigned i = 0; i < sizeof(qrtr_servers) / sizeof(qrtr_servers[0]); i++) {
+		if (!qrtr_servers[i].there) {
+			continue;
+		}
+		count++;
+		/* (QRTR's instance word is the version in its low byte and the instance above it: 1 | 74 << 8 for the audio PD's notifier) */
+		notifier += qrtr_servers[i].service == 0x42 && (qrtr_servers[i].instance >> 8) == 74;
+		locator += qrtr_servers[i].service == 0x40;
+	}
+	printf("adsp845: 11: DIAGNOSIS: %s\n", what);
+	printf("adsp845: 11:   the DSP has opened \"%s\" \"%s\" \"%s\" \"%s\" besides IPCRTR; apr_audio_svc is %s\n", glink.others[0],
+	    glink.others[1], glink.others[2], glink.others[3], glink.channel[CHANNEL_APR].open ? "OPEN" : "NOT OPEN");
+	printf("adsp845: 11:   QRTR: %u services told of, among them the notifier of msm/adsp/audio_pd (service 66, instance 74): %s; the "
+	    "locator (service 64): %s; the DSP looked for %u services of ours (ids %#x %#x %#x %#x)\n", count, notifier ? "THERE" : "NOT THERE",
+	    locator ? "there (the DSP's own)" : "not there", qrtr_lookups, qrtr_looked_for[0], qrtr_looked_for[1], qrtr_looked_for[2],
+	    qrtr_looked_for[3]);
+	if (!glink.channel[CHANNEL_APR].open && !notifier) {
+		printf("adsp845: 11:   no audio PD: neither its channel nor its notifier is there. The DSP has not started it (it may need more\n"
+		    "adsp845: 11:   time: adsp8_apr=S; or the PD's image, the files after adsp.b13 of the DSP's, are not loaded by us), or the\n"
+		    "adsp845: 11:   DSP waits for an answer of ours that this does not give (see the plan: servreg)\n");
+	} else if (!glink.channel[CHANNEL_APR].open) {
+		printf("adsp845: 11:   the audio PD is registered but its APR channel is not open: the DSP may not have been asked to open it\n");
+	} else {
+		printf("adsp845: 11:   the channel is open but the core service does not answer: its PD may be up and not ready\n");
+	}
+}
+
+static bool
+step_apr(void)
+{
+	uint32_t wait_seconds = 15, asked = 0, state = 0;
+	bool ready = false, unsupported = false;
+	struct apr_reply *reply;
+	uint64_t began = now_us();
+
+	PE_parse_boot_argn("adsp8_apr", &wait_seconds, sizeof(wait_seconds));
+	if (wait_seconds == 0 || wait_seconds > 600) {
+		wait_seconds = 15;
+	}
+	if (!dsp_started || !glink.channel[CHANNEL_QRTR].open || !glink.channel[CHANNEL_APR].wanted) {
+		return false;
+	}
+	announce("open APR's channel apr_audio_svc (answered when the DSP opens it, in step 9), then ask the core service (3) whether the "
+	    "audio services are up (AVCS_CMD_ADSP_EVENT_GET_STATE, again and again, as Linux's q6core_is_adsp_ready() does) and which services "
+	    "and versions it has; only GLINK data and doorbell bit 8");
+	snprintf(last_write, sizeof(last_write), "step %u asked the core service over APR", step);
+	apr_trace = 40;
+	for (unsigned ms = 0; ms < wait_seconds * 1000 && !glink.channel[CHANNEL_APR].open && !glink.broken; ms++) {
+		sleep_ms(1);
+	}
+	if (!glink.channel[CHANNEL_APR].open) {
+		printf("adsp845: %u: the channel \"apr_audio_svc\" is not open after %llu ms\n", step, (now_us() - began) / 1000);
+		apr_diagnose("the DSP has not opened apr_audio_svc");
+		return false;
+	}
+	printf("adsp845: %u: apr_audio_svc is OPEN after %llu ms\n", step, (now_us() - began) / 1000);
+	reply = kalloc_data(sizeof(*reply), Z_WAITOK | Z_ZERO);
+	if (reply == NULL) {
+		return false;
+	}
+	while (!ready && now_us() - began < wait_seconds * 1000000ull) {
+		asked++;
+		if (apr_exchange(APR_SVC_ADSP_CORE, 0, 0, true, AVCS_CMD_ADSP_EVENT_GET_STATE, NULL, 0, 500, reply)) {
+			if (reply->opcode == AVCS_CMDRSP_ADSP_EVENT_GET_STATE && reply->length >= 4) {
+				state = reply->words[0];
+				ready = state != 0;
+			} else if (reply->opcode == APR_BASIC_RSP_RESULT && reply->length >= 8 && reply->words[0] == AVCS_CMD_ADSP_EVENT_GET_STATE &&
+			    reply->words[1] == ADSP_EUNSUPPORTED) {
+				/* (Linux: "assume that the adsp is up if we not support this command") */
+				unsupported = ready = true;
+			}
+		}
+		if (!ready) {
+			sleep_ms(200);
+		}
+	}
+	printf("adsp845: %u: %s after %llu ms and %u questions (the last answer: opcode %#x, %u bytes, %#x %#x)\n", step,
+	    ready ? (unsupported ? "THE CORE SERVICE DOES NOT KNOW THE QUESTION (Linux takes that as up)" : "THE AUDIO SERVICES ARE UP") :
+	    "THE AUDIO SERVICES DO NOT SAY THEY ARE UP", (now_us() - began) / 1000, asked, reply->opcode, reply->length, reply->words[0],
+	    reply->words[1]);
+	if (!ready) {
+		apr_diagnose(apr_in == 0 ? "the core service is silent (no APR packet from the DSP at all)" :
+		    "the core service answers but not that the audio services are up");
+		kfree_data(reply, sizeof(*reply));
+		return false;
+	}
+	/* Linux asks for the framework's versions first and, if that is not supported, for the services' (q6core_get_svc_api_info()) */
+	if (apr_exchange(APR_SVC_ADSP_CORE, 0, 0, true, AVCS_CMD_GET_FWK_VERSION, NULL, 0, 1000, reply) &&
+	    reply->opcode == AVCS_CMDRSP_GET_FWK_VERSION) {
+		apr_show_versions(reply);
+	} else if (apr_exchange(APR_SVC_ADSP_CORE, 0, 0, true, AVCS_GET_VERSIONS, NULL, 0, 1000, reply) &&
+	    reply->opcode == AVCS_GET_VERSIONS_RSP) {
+		apr_show_versions(reply);
+	} else {
+		printf("adsp845: %u: no list of the services' versions came (last opcode %#x, %u bytes)\n", step, reply->opcode, reply->length);
+	}
+	printf("adsp845: %u: APR sent %u packets and received %u (%u dropped)\n", step, apr_out, apr_in, apr_dropped);
+	kfree_data(reply, sizeof(*reply));
+	return true;
+}
+
+/* ---- step 12: the speaker amplifier's presence, looked for on QUP wrapper 0's engine 4 (read-only) ---------- */
+
+/*
+ * The speaker of the 6T needs no codec (WCD9340, SLIMbus) -- mainline's sdm845-oneplus-common.dtsi:629-638 has a dai-link of the
+ * DSP's QUATERNARY_MI2S_RX with no codec behind it -- but an amplifier: the downstream tree (ref-linux/oneplus/dts-fajita.dtsi:
+ * 369-377, selected by op,smartpa = "tfa98xx" at :65; the MAX98927 of :663-672 is "disabled") has a tfa98xx@34, compatible
+ * "nxp,tfa9894", on &qupv3_se4_i2c, reset-gpio <&tlmm 69 0>, no interrupt line. &qupv3_se4_i2c is the SoC's QUP wrapper 0, engine 4:
+ * ref-linux/sdm845.dtsi:1504 (i2c4: i2c@890000, clock GCC_QUPV3_WRAP0_S4_CLK, pins qup_i2c4_default gpio89 and gpio90, function
+ * "qup4": sdm845.dtsi:2856-2858; Linux pinctrl-sdm845.c has it as the second function of gpio89 (value 2) and the third of gpio90 (3)).
+ *
+ * What this step does, in this order, each part saying what it touches before it does:
+ *   a  READS the global clock controller (GCC, 0x00100000): the vote register 0x5200c and the status words of the three clocks the
+ *      engine needs -- wrapper 0's M_AHB (halt 0x17004, vote bit 6) and S_AHB (halt 0x17008, bit 7), and the engine's own (halt
+ *      0x174f0, bit 14), and the engine's root clock (command 0x174f4, config 0x174f8) -- gcc-sdm845.c:2229-2245, 2445-2471, 524-531.
+ *      A halt word's bit 31 is "the clock is off" (a branch's CBCR; hakios.rmi4.c reads the other wrapper's the same way)
+ *   b  READS the pins the speaker's path uses, writing none: TLMM's control and I/O words of gpio58, 59, 60, 61 (the quaternary
+ *      MI2S: clock, word select, data 0, data 1: sdm845.dtsi:3226-3255), gpio69 (the amplifier's reset: the NXP driver's default
+ *      polarity makes it active HIGH: it sets the line low, then pulses high for 1 ms, then low: tfa98xx_ext_reset()) and
+ *      gpio89 and gpio90 (the engine's I2C)
+ *   c  if any of the three clocks is OFF, it says so and STOPS: nothing of the serial engine is read or written (on this phone a
+ *      register of a block whose clock is off makes the Config-NoC report an error and the phone goes to CrashDump). Switching a
+ *      clock on is a write the 6T has not had from this driver (GCC vote and root clock), and is a step of its own: the plan says
+ *      what it would be
+ *   d  if they are on, and the root clock runs from the 19.2 MHz crystal (the timing table below is for it): WRITES the serial
+ *      engine's own registers to set it up as an I2C master the way hakios.rmi4.c does for the touch screen's engine (FIFO mode,
+ *      polled, no interrupt; the constants are Linux's i2c-qcom-geni.c table for 19.2 MHz, at 100 kHz), checks the engine's
+ *      firmware says I2C, and READS the amplifier's revision register 0x03 at address 0x34: a write of the register's number (one
+ *      byte), then a read of two (the NXP driver's regmap: 8-bit registers, 16-bit values, most significant byte first; its
+ *      probe takes "reg & 0xff" == 0x94 for the TFA9894: tfa98xx_probe(), a switch of revisions; written again here from that
+ *      table, not copied). Nothing is written to the amplifier except that register's number; no pin, clock or regulator is changed
+ * An answer of no acknowledgement is the likely first one: the amplifier's supply and reset are not ours yet. The line of gpio69
+ * and of the two I2C pins, read before, say which of the three it is.
+ */
+#define GCC_PHYS                0x00100000u
+#define GCC_SIZE                0x00060000u
+#define GCC_VOTE_WORD           0x5200c
+#define GCC_QUP0_M_AHB_HALT     0x17004
+#define GCC_QUP0_S_AHB_HALT     0x17008
+#define GCC_QUP0_S4_HALT        0x174f0
+#define GCC_QUP0_S4_CMD         0x174f4
+#define GCC_QUP0_S4_CFG         0x174f8
+#define TLMM_EAST               0x03500000u     /* pinctrl-sdm845.c:13-15: the tiles, a pin's page is the tile + 0x1000 * its number */
+#define TLMM_NORTH              0x03900000u
+#define TLMM_SOUTH              0x03d00000u
+#define SE4_PHYS                0x00890000u     /* sdm845.dtsi:1504 i2c@890000, size 0x4000 */
+#define SE4_SIZE                0x00004000u
+#define TFA_ADDRESS             0x34            /* dts-fajita.dtsi:369-377 */
+#define TFA_REVISION            0x03            /* the NXP driver's tfa98xx_probe(): regmap_read(0x03), (value & 0xff) == 0x94 for the TFA9894 */
+#define TFA_REVISION_9894       0x94
+
+static struct block gcc_block = { "GCC", GCC_PHYS, GCC_SIZE, 0 };
+static struct block se4_block = { "SE4", SE4_PHYS, SE4_SIZE, 0 };
+
+struct pin_look {
+	struct block page;
+	unsigned number, function;              /* the function it should have for the speaker's path (0: plain GPIO) */
+	const char *what;
+};
+static struct pin_look pins[] = {
+	{ { "gpio58", TLMM_NORTH + 0x1000u * 58, 0x1000, 0 }, 58, 1, "quaternary MI2S clock (qua_mi2s)" },
+	{ { "gpio59", TLMM_NORTH + 0x1000u * 59, 0x1000, 0 }, 59, 1, "quaternary MI2S word select (qua_mi2s)" },
+	{ { "gpio60", TLMM_NORTH + 0x1000u * 60, 0x1000, 0 }, 60, 1, "quaternary MI2S data 0 (qua_mi2s)" },
+	{ { "gpio61", TLMM_NORTH + 0x1000u * 61, 0x1000, 0 }, 61, 1, "quaternary MI2S data 1 (qua_mi2s)" },
+	{ { "gpio69", TLMM_EAST + 0x1000u * 69, 0x1000, 0 }, 69, 0, "the amplifier's reset (GPIO; active high)" },
+	{ { "gpio89", TLMM_SOUTH + 0x1000u * 89, 0x1000, 0 }, 89, 2, "engine 4's I2C data or clock (qup4)" },
+	{ { "gpio90", TLMM_SOUTH + 0x1000u * 90, 0x1000, 0 }, 90, 3, "engine 4's I2C clock or data (qup4)" },
+};
+
+/* A pin's control word: [1:0] pull, [5:2] function, [8:6] drive ((value + 1) * 2 mA), [9] output enable; its I/O word: [0] level in, [1] level out. */
+static void
+pin_show(struct pin_look *p)
+{
+	uint32_t ctl = get(&p->page, "control", 0), io = get(&p->page, "I/O", 4);
+	static const char *const pulls[] = { "no pull", "pull down", "keeper", "pull up" };
+
+	printf("adsp845: %u:   gpio%u (%s): function %u (%s), %s, %u mA, %s; reads %u, would drive %u\n", step, p->number, p->what,
+	    (ctl >> 2) & 0xf, ((ctl >> 2) & 0xf) == p->function ? "as the speaker's path needs it" : "NOT what the speaker's path needs",
+	    pulls[ctl & 3], (((ctl >> 6) & 7) + 1) * 2, (ctl & (1u << 9)) ? "an output" : "an input", io & 1, (io >> 1) & 1);
+}
+
+/* the serial engine's registers: the same as hakios.rmi4.c's (Linux's qcom-geni-se.h, i2c-qcom-geni.c) */
+#define GENI_FORCE_DEFAULT      0x020
+#define GENI_OUTPUT_CTRL        0x024
+#define GENI_CGC_CTRL           0x028
+#define SE_GENI_STATUS          0x040
+#define GENI_SER_M_CLK_CFG      0x048
+#define GENI_IF_DISABLE_RO      0x064
+#define GENI_FW_REVISION_RO     0x068
+#define SE_GENI_CLK_SEL         0x07c
+#define SE_GENI_BYTE_GRAN       0x254
+#define SE_GENI_DMA_MODE_EN     0x258
+#define SE_GENI_TX_PACKING_CFG0 0x260
+#define SE_GENI_TX_PACKING_CFG1 0x264
+#define SE_I2C_TX_TRANS_LEN     0x26c
+#define SE_I2C_RX_TRANS_LEN     0x270
+#define SE_I2C_SCL_COUNTERS     0x278
+#define SE_GENI_RX_PACKING_CFG0 0x284
+#define SE_GENI_RX_PACKING_CFG1 0x288
+#define SE_GENI_M_CMD0          0x600
+#define SE_GENI_M_CMD_CTRL      0x604
+#define SE_GENI_M_IRQ_STATUS    0x610
+#define SE_GENI_M_IRQ_EN        0x614
+#define SE_GENI_M_IRQ_CLEAR     0x618
+#define SE_GENI_TX_FIFO         0x700
+#define SE_GENI_RX_FIFO         0x780
+#define SE_GENI_RX_FIFO_STATUS  0x804
+#define SE_GENI_TX_WATERMARK    0x80c
+#define SE_GENI_RX_WATERMARK    0x810
+#define SE_GENI_RX_RFR_WATERMARK 0x814
+#define SE_GSI_EVENT_EN         0xe18
+#define SE_IRQ_EN               0xe1c
+#define SE_HW_PARAM_0           0xe24
+#define SE_DMA_GENERAL_CFG      0xe30
+#define M_CMD_DONE              (1u << 0)
+#define M_CMD_OVERRUN           (1u << 1)
+#define M_ILLEGAL_CMD           (1u << 2)
+#define M_CMD_FAILURE           (1u << 3)
+#define M_CMD_ABORT             (1u << 5)
+#define M_GP_IRQ_NACK           (1u << 10)
+#define M_GP_IRQ_BUS_ERROR      (1u << 13)
+#define M_RX_FIFO_WATERMARK     (1u << 26)
+#define M_RX_FIFO_LAST          (1u << 27)
+#define M_TX_FIFO_WATERMARK     (1u << 30)
+#define M_ERRORS                (M_CMD_OVERRUN | M_ILLEGAL_CMD | M_CMD_FAILURE | M_CMD_ABORT | M_GP_IRQ_NACK | M_GP_IRQ_BUS_ERROR)
+#define I2C_WRITE               1u
+#define I2C_READ                2u
+#define I2C_TIMEOUT_US          20000
+
+static void
+se4_abort(void)
+{
+	vm_offset_t se = se4_block.base;
+
+	wr(se + SE_GENI_M_CMD_CTRL, 2);
+	for (int i = 0; i < 1000 && !(rd(se + SE_GENI_M_IRQ_STATUS) & M_CMD_ABORT); i++) {
+		sleep_us(10);
+	}
+	while (rd(se + SE_GENI_RX_FIFO_STATUS) & 0x1ffffff) {
+		(void)rd(se + SE_GENI_RX_FIFO);
+	}
+	wr(se + SE_GENI_M_IRQ_CLEAR, 0xffffffff);
+}
+
+/* One transfer to address 0x34: a write of `length` bytes, or a read of them. The engine's M_IRQ_STATUS at the end is in *status. 0, or an error number. */
+static int
+se4_transfer(bool read, uint8_t *bytes, unsigned length, uint32_t *status)
+{
+	vm_offset_t se = se4_block.base;
+	uint64_t start = mach_absolute_time(), limit;
+	unsigned got = 0;
+
+	nanoseconds_to_absolutetime((uint64_t)I2C_TIMEOUT_US * NSEC_PER_USEC, &limit);
+	for (int i = 0; rd(se + SE_GENI_STATUS) & 1; i++) {     /* a command still active */
+		if (i > 200) {
+			se4_abort();
+			break;
+		}
+		sleep_us(10);
+	}
+	wr(se + SE_GENI_M_IRQ_CLEAR, 0xffffffff);
+	wr(se + SE_I2C_TX_TRANS_LEN, read ? 0 : length);
+	wr(se + SE_I2C_RX_TRANS_LEN, read ? length : 0);
+	wr(se + SE_GENI_M_CMD0, (read ? I2C_READ : I2C_WRITE) << 27 | TFA_ADDRESS << 9);
+	for (unsigned i = 0; !read && i < length; i += 4) {
+		uint32_t word = 0;
+
+		for (unsigned b = 0; b < 4 && i + b < length; b++) {
+			word |= (uint32_t)bytes[i + b] << (8 * b);
+		}
+		wr(se + SE_GENI_TX_FIFO, word);
+	}
+	for (;;) {
+		*status = rd(se + SE_GENI_M_IRQ_STATUS);
+		for (uint32_t words = read ? rd(se + SE_GENI_RX_FIFO_STATUS) & 0x1ffffff : 0; words > 0; words--) {
+			uint32_t word = rd(se + SE_GENI_RX_FIFO);
+
+			for (unsigned b = 0; b < 4 && got < length; b++) {
+				bytes[got++] = (uint8_t)(word >> (8 * b));
+			}
+		}
+		if (*status & (M_CMD_DONE | M_ERRORS)) {
+			break;
+		}
+		if (mach_absolute_time() - start > limit) {
+			*status |= 1u << 31;
+			break;
+		}
+	}
+	if (read && (*status & M_CMD_DONE)) {                   /* what came in with the end */
+		for (uint32_t words = rd(se + SE_GENI_RX_FIFO_STATUS) & 0x1ffffff; words > 0; words--) {
+			uint32_t word = rd(se + SE_GENI_RX_FIFO);
+
+			for (unsigned b = 0; b < 4 && got < length; b++) {
+				bytes[got++] = (uint8_t)(word >> (8 * b));
+			}
+		}
+	}
+	wr(se + SE_GENI_M_IRQ_CLEAR, *status);
+	if (*status & (1u << 31)) {
+		se4_abort();
+		return ETIMEDOUT;
+	}
+	if (*status & M_GP_IRQ_NACK) {
+		return ENXIO;
+	}
+	if ((*status & M_ERRORS) || !(*status & M_CMD_DONE) || (read && got < length)) {
+		return EIO;
+	}
+	return 0;
+}
+
+static bool
+step_tfa(void)
+{
+	uint32_t vote, m_ahb, s_ahb, s4, cmd, cfg, fw, depth, status = 0;
+	bool clocks_on;
+	uint8_t reg = TFA_REVISION, value[2] = { 0, 0 };
+	int error;
+	vm_offset_t se;
+
+	announce("READ the global clock controller's status of QUP wrapper 0's AHB clocks and engine 4's (nothing written), READ the "
+	    "control words of gpio58-61, 69, 89 and 90 (nothing written); if the three clocks run: set up engine 4 as an I2C master "
+	    "(its own registers) and read the speaker amplifier's revision, register 0x03 at address 0x34");
+	snprintf(last_write, sizeof(last_write), "step %u wrote nothing (it only read)", step);
+	vote = get(&gcc_block, "vote word", GCC_VOTE_WORD);
+	m_ahb = get(&gcc_block, "QUP wrapper 0 M_AHB halt", GCC_QUP0_M_AHB_HALT);
+	s_ahb = get(&gcc_block, "QUP wrapper 0 S_AHB halt", GCC_QUP0_S_AHB_HALT);
+	s4 = get(&gcc_block, "engine 4 halt", GCC_QUP0_S4_HALT);
+	cmd = get(&gcc_block, "engine 4 root command", GCC_QUP0_S4_CMD);
+	cfg = get(&gcc_block, "engine 4 root config", GCC_QUP0_S4_CFG);
+	clocks_on = !(m_ahb >> 31) && !(s_ahb >> 31) && !(s4 >> 31);
+	printf("adsp845: %u: the clocks of engine 4: M_AHB %s, S_AHB %s, the engine's own %s (the vote word %#x: bits 6, 7 and 14 are %u %u %u)\n",
+	    step, (m_ahb >> 31) ? "OFF" : "on", (s_ahb >> 31) ? "OFF" : "on", (s4 >> 31) ? "OFF" : "on", vote, (vote >> 6) & 1,
+	    (vote >> 7) & 1, (vote >> 14) & 1);
+	for (unsigned i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+		pin_show(&pins[i]);
+	}
+	if (!clocks_on) {
+		printf("adsp845: %u: ENGINE 4'S CLOCKS ARE NOT ALL RUNNING: the serial engine is not touched (its registers behind a clock that is off "
+		    "would take the phone to CrashDump). Nothing was written. Turning them on is a separate step: see the plan (B2-test-plan.md)\n",
+		    step);
+		return false;
+	}
+	if ((cfg & 0x371fu) > 1) {
+		/* [4:0] divider (0 and 1: by one), [10:8] source (0: the 19.2 MHz crystal), [13:12] mode (0: bypass) */
+		printf("adsp845: %u: engine 4's root clock is not the 19.2 MHz crystal undivided (command %#x, config %#x): the bus timing table here "
+		    "would be wrong; the serial engine is not touched\n", step, cmd, cfg);
+		return false;
+	}
+	need(&se4_block);
+	se = se4_block.base;
+	fw = get(&se4_block, "firmware revision", GENI_FW_REVISION_RO);
+	depth = (get(&se4_block, "hardware parameter 0", SE_HW_PARAM_0) >> 24) & 0x3f;
+	printf("adsp845: %u: engine 4: protocol %u (3 is I2C), FIFO %s, depth %u words, status %#x\n", step, (fw >> 8) & 0xff,
+	    (rd(se + GENI_IF_DISABLE_RO) & 1) ? "DISABLED" : "on", depth, rd(se + SE_GENI_STATUS));
+	if (((fw >> 8) & 0xff) != 3 || (rd(se + GENI_IF_DISABLE_RO) & 1)) {
+		printf("adsp845: %u: engine 4 is not an I2C engine with a FIFO: nothing more is done\n", step);
+		return false;
+	}
+	printf("adsp845: %u: about to write engine 4's own setup registers (as hakios.rmi4.c does the touch engine's): FIFO mode, 100 kHz at 19.2 MHz\n",
+	    step);
+	snprintf(last_write, sizeof(last_write), "step %u set up engine 4's registers (0x890000) and read 0x34 reg 0x03", step);
+	wr(se + GENI_CGC_CTRL, rd(se + GENI_CGC_CTRL) | 0x7f);
+	wr(se + SE_DMA_GENERAL_CFG, rd(se + SE_DMA_GENERAL_CFG) | 0xf);
+	wr(se + GENI_OUTPUT_CTRL, 0x7f);
+	wr(se + GENI_FORCE_DEFAULT, 1);
+	wr(se + SE_GENI_DMA_MODE_EN, 0);
+	wr(se + SE_GSI_EVENT_EN, 0);
+	wr(se + SE_IRQ_EN, 0);                                  /* nothing reaches the interrupt controller */
+	wr(se + SE_GENI_M_IRQ_EN, M_CMD_DONE | M_TX_FIFO_WATERMARK | M_RX_FIFO_WATERMARK | M_RX_FIFO_LAST | M_ERRORS);
+	wr(se + SE_GENI_M_IRQ_CLEAR, 0xffffffff);
+	wr(se + SE_GENI_BYTE_GRAN, 0);
+	wr(se + SE_GENI_TX_PACKING_CFG0, 0x0007f8fe);
+	wr(se + SE_GENI_TX_PACKING_CFG1, 0x000ffefe);
+	wr(se + SE_GENI_RX_PACKING_CFG0, 0x0007f8fe);
+	wr(se + SE_GENI_RX_PACKING_CFG1, 0x000ffefe);
+	wr(se + SE_GENI_TX_WATERMARK, 1);
+	wr(se + SE_GENI_RX_WATERMARK, 0);
+	wr(se + SE_GENI_RX_RFR_WATERMARK, depth ? depth - 1 : 31);
+	wr(se + SE_GENI_CLK_SEL, 0);
+	wr(se + GENI_SER_M_CLK_CFG, 7u << 4 | 1);               /* divider 7, enabled: i2c-qcom-geni.c's 100 kHz row for 19.2 MHz */
+	wr(se + SE_I2C_SCL_COUNTERS, 10u << 20 | 11u << 10 | 26);
+	error = se4_transfer(false, &reg, 1, &status);
+	if (error == 0) {
+		error = se4_transfer(true, value, 2, &status);
+	}
+	if (error != 0) {
+		printf("adsp845: %u: NO ANSWER FROM 0x%x: %s (the engine's status %#x). Its supply or reset (gpio69, above) or the pins' mux (gpio89 and "
+		    "gpio90, above) are the places to look; nothing was changed to find out\n", step, TFA_ADDRESS,
+		    error == ENXIO ? "no acknowledgement" : error == ETIMEDOUT ? "the bus did not finish" : "the engine reports an error", status);
+		return true;
+	}
+	printf("adsp845: %u: THE AMPLIFIER ANSWERS: register 0x%02x = %#06x; %s\n", step, TFA_REVISION, (unsigned)(value[0] << 8 | value[1]),
+	    value[1] == TFA_REVISION_9894 ? "a TFA9894 (revision byte 0x94), as the device tree says" : "NOT a TFA9894 (it would end in 0x94)");
+	return value[1] == TFA_REVISION_9894;
+}
+
+/* ---- step 13: playback, a design only ----------------------------------------------------------------- */
+
+/*
+ * The whole sequence is written in lane-b-notes/B2-test-plan.md (chapter 6), with what each part writes and which kinds of write would
+ * be new to the 6T. It is not code yet: four of its writes are of kinds this driver has not made (the GCC's root clock and votes, the
+ * pins' mux, the amplifier's reset line and its registers, and the DSP's AFE and ASM with memory it reads through the SMMU).
+ */
+static bool
+step_playback(void)
+{
+	printf("adsp845: %u: step 13 is a design only (lane-b-notes/B2-test-plan.md, chapter 6) and does not run: nothing is written\n", step);
+	return false;
+}
+
 /* ---- the steps, and their end ----------------------------------------------------------------------- */
 
 static bool (*const steps[STEPS])(void) = {
 	step_survey, step_firmware, step_mailbox, step_header, step_image, step_our_item, step_start, step_queues, step_link, step_qrtr,
+	step_apr, step_tfa, step_playback,
 };
 
 static bool keep;                       /* the DSP and the link stay up while the system runs (adsp8_keep) */
@@ -2884,7 +3659,8 @@ run_steps(void)
 {
 	uint32_t done = 0;
 
-	for (step = 1; step <= last_step; step++) {
+	/* (adsp8=8NN: the DSP is left alone: steps 11 and under all need it, the amplifier's probe (12) does not) */
+	for (step = flag_alone ? FIRST_INDEPENDENT_STEP : 1; step <= last_step; step++) {
 		if (!steps[step - 1]()) {
 			tell("adsp845: step %u: FAILED; the steps after it are not attempted\n", step);
 			break;
@@ -2902,10 +3678,10 @@ run_steps(void)
 static void
 steps_thread(__unused void *parameter, __unused wait_result_t result)
 {
-	for (unsigned waited = 0; waited < 300 && rootvnode == NULLVP; waited++) {
+	for (unsigned waited = 0; !flag_alone && waited < 300 && rootvnode == NULLVP; waited++) {
 		sleep_ms(200);
 	}
-	if (rootvnode == NULLVP) {
+	if (rootvnode == NULLVP && !flag_alone) {
 		tell("adsp845: no root file system within a minute: the steps are not performed\n");
 	} else {
 		run_steps();
@@ -2927,6 +3703,7 @@ hakios_adsp_init(void)
 	flag_cx = (last_step / 100) & 1;
 	flag_keep = (last_step / 100) & 2;
 	flag_again = (last_step / 100) & 4;
+	flag_alone = (last_step / 100) & 8;
 	last_step %= 100;
 	if (last_step == 0) {
 		return;
@@ -2935,10 +3712,13 @@ hakios_adsp_init(void)
 		last_step = STEPS;
 	}
 	keep = flag_keep || option("adsp8_keep");
-	new_from = last_step;
+	/* (steps 11 and on are new: each waits after its announcement; from 11 up APR's channel is answered when the DSP opens it, in step 9) */
+	new_from = last_step >= 11 ? (flag_alone ? FIRST_INDEPENDENT_STEP : 11) : last_step;
+	glink.channel[CHANNEL_APR].wanted = last_step >= 11 && !flag_alone;
 	PE_parse_boot_argn("adsp8_pause", &pause_ms, sizeof(pause_ms));
-	tell("adsp845: steps up to %u (cx.lvl %s, kept %s, again %s); the last waits %u ms after each announcement; the steps wait for the "
-	    "root file system, and the system goes on starting\n", last_step, (flag_cx || option("adsp8_cx")) ? "asked for" : "not asked",
+	tell("adsp845: steps %u up to %u%s (cx.lvl %s, kept %s, again %s); the last waits %u ms after each announcement; the steps wait for the "
+	    "root file system, and the system goes on starting\n", flag_alone ? FIRST_INDEPENDENT_STEP : 1, last_step,
+	    flag_alone ? " (the DSP left alone)" : "", (flag_cx || option("adsp8_cx")) ? "asked for" : "not asked",
 	    keep ? "yes" : "no", (flag_again || option("adsp8_again")) ? "yes" : "no", pause_ms);
 	if (kernel_thread_start(steps_thread, NULL, &thread) != KERN_SUCCESS) {
 		tell("adsp845: no thread: the steps are not performed\n");

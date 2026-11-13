@@ -143,7 +143,7 @@ static LCK_GRP_DECLARE(adsp_lock_group, "hakios-adsp845");
 
 static void bb_say(const char *format, ...) __printflike(1, 2);
 
-#define STEPS                   13
+#define STEPS                   14
 #define FIRST_INDEPENDENT_STEP  12      /* the steps from here on do not need the DSP (800 of adsp8=N leaves it alone) */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
@@ -3812,11 +3812,172 @@ give_back:
 	return answered;
 }
 
+/* ---- step 14: the AFE port of the speaker, started and stopped, the amplifier left off -------------------------- */
+
+/*
+ * S4 of lane-b-notes/sound-shortest-path.md (agreed to by the user, 11-13: the DSP's LPASS clock and AFE port, the pins of the
+ * quaternary MI2S). The speaker's samples leave the SoC on the quaternary MI2S (Linux's QUATERNARY_MI2S_RX, AFE port 0x1006: mainline
+ * sdm845-oneplus-common.dtsi:629-638), data on SD1 (gpio61); the DSP makes its bit clock (QUAD_MI2S_IBIT, clock 0x106) at 48 kHz x
+ * 16 bits x 2 = 1.536 MHz. In order, each answered with status 0 before the next: the clock on (AFE_SVC_CMD_SET_PARAM), the port's
+ * I2S configuration (AFE_PORT_CMD_SET_PARAM_V2), the four pins to the interface (function 1, 8 mA; clock and word select output
+ * high), the port started; the clock and word-select pins watched for a while (they must toggle); then the port stopped, the clock
+ * off, the pins given back. The amplifier is not touched: nothing can be heard.
+ */
+#define S_AFE                   4
+#define AFE_PORT_CMD_DEVICE_START       0x000100e5u
+#define AFE_PORT_CMD_DEVICE_STOP        0x000100e6u
+#define AFE_PORT_CMD_SET_PARAM_V2       0x000100efu
+#define AFE_SVC_CMD_SET_PARAM           0x000100f3u
+#define AFE_MODULE_AUDIO_DEV_INTERFACE  0x0001020cu
+#define AFE_PARAM_ID_I2S_CONFIG         0x0001020du
+#define AFE_MODULE_CLOCK_SET            0x0001028fu
+#define AFE_PARAM_ID_CLOCK_SET          0x00010290u
+#define QUAT_MI2S_RX            0x1006
+#define CLOCK_QUAD_MI2S_IBIT    0x106
+#define MI2S_RATE               48000u
+#define MI2S_BITS               16u
+
+struct afe_param {
+	uint32_t module, param;
+	uint16_t size, reserved;
+} __attribute__((packed));
+
+struct afe_clock_set {
+	uint32_t version, id, hz;
+	uint16_t attribute, root;
+	uint32_t enable;
+} __attribute__((packed));
+
+struct afe_i2s_config {
+	uint32_t version;
+	uint16_t bits, channel_mode, mono_stereo, ws_source;
+	uint32_t rate;
+	uint16_t data_format, reserved;
+} __attribute__((packed));
+
+/* one AFE command, its basic answer waited for: true if status 0 */
+static bool
+afe_command(const char *what, uint32_t opcode, const void *payload, uint32_t length)
+{
+	struct apr_reply reply;
+
+	printf("adsp845: %u: AFE: %s (opcode %#x)\n", step, what, opcode);
+	snprintf(last_write, sizeof(last_write), "step %u asked the AFE: %s", step, what);
+	if (!apr_exchange(S_AFE, 0, 0x14, false, opcode, payload, length, 1000, &reply)) {
+		printf("adsp845: %u: AFE: %s: NO ANSWER\n", step, what);
+		return false;
+	}
+	if (reply.opcode == APR_BASIC_RSP_RESULT && reply.length >= 8 && reply.words[0] == opcode) {
+		printf("adsp845: %u: AFE: %s: %s (status %#x)\n", step, what, reply.words[1] == 0 ? "done" : "REFUSED", reply.words[1]);
+		return reply.words[1] == 0;
+	}
+	printf("adsp845: %u: AFE: %s: an answer not expected: opcode %#x, %u bytes\n", step, what, reply.opcode, reply.length);
+	return false;
+}
+
+static bool
+afe_param_send(const char *what, bool port, uint32_t module, uint32_t param, const void *data, uint16_t size)
+{
+	uint8_t packet[16 + sizeof(struct afe_param) + 32];
+	struct afe_param *p = (struct afe_param *)(packet + 16);
+
+	bzero(packet, sizeof(packet));
+	if (port) {
+		*(uint16_t *)packet = QUAT_MI2S_RX;
+		*(uint16_t *)(packet + 2) = (uint16_t)(sizeof(*p) + size);
+	} else {
+		*(uint32_t *)packet = (uint32_t)sizeof(*p) + size;      /* in band: address 0, handle 0 */
+	}
+	p->module = module;
+	p->param = param;
+	p->size = size;
+	memcpy(packet + 16 + sizeof(*p), data, size);
+	return afe_command(what, port ? AFE_PORT_CMD_SET_PARAM_V2 : AFE_SVC_CMD_SET_PARAM, packet, 16 + (uint32_t)sizeof(*p) + size);
+}
+
+static bool
+afe_mi2s_clock(bool on)
+{
+	struct afe_clock_set clock = { 1, CLOCK_QUAD_MI2S_IBIT, on ? MI2S_RATE * MI2S_BITS * 2 : 0, 1, 0, on };
+
+	return afe_param_send(on ? "the quaternary MI2S bit clock (0x106) at 1.536 MHz, on" : "the quaternary MI2S bit clock, off", false,
+	           AFE_MODULE_CLOCK_SET, AFE_PARAM_ID_CLOCK_SET, &clock, sizeof(clock));
+}
+
+static unsigned
+pin_toggles(struct pin_look *p, uint32_t *ones)
+{
+	uint32_t last = rd(p->page.base + 4) & 1, changes = 0;
+
+	*ones = 0;
+	for (uint32_t i = 0; i < 20000; i++) {
+		uint32_t now = rd(p->page.base + 4) & 1;
+
+		changes += now != last;
+		*ones += now;
+		last = now;
+	}
+	return changes;
+}
+
+static bool
+step_afe(void)
+{
+	struct afe_i2s_config i2s = { 1, MI2S_BITS, 2 /* SD1 */, 1 /* stereo */, 1 /* internal */, MI2S_RATE, 0, 0 };
+	uint16_t port[2] = { QUAT_MI2S_RX, 0 };
+	uint32_t found_ctl[4], found_io[4];
+	bool clock = false, started = false, ok = false;
+
+	announce("ASK the DSP (AFE) for the quaternary MI2S bit clock and port 0x1006 (I2S, 16 bits, stereo on SD1, 48 kHz), WRITE gpio58-61 "
+	    "to the interface, START the port, watch the clock pins, then STOP it, the clock off, the pins given back (the amplifier untouched)");
+	for (unsigned i = 0; i < 4; i++) {
+		found_ctl[i] = get(&pins[i].page, "control", 0);
+		found_io[i] = get(&pins[i].page, "I/O", 4);
+	}
+	clock = afe_mi2s_clock(true);
+	if (!clock || !afe_param_send("the port 0x1006: I2S, 16 bits, stereo on SD1, word select internal, 48 kHz", true,
+	    AFE_MODULE_AUDIO_DEV_INTERFACE, AFE_PARAM_ID_I2S_CONFIG, &i2s, sizeof(i2s))) {
+		goto off;
+	}
+	for (unsigned i = 0; i < 4; i++) {
+		bool driven = i < 2;                    /* the bit clock and the word select: outputs, high */
+
+		if (driven) {
+			put(&pins[i].page, "I/O", 4, 2);
+		}
+		put(&pins[i].page, "control", 0, 1u << 2 | 3u << 6 | (driven ? 1u << 9 : 0));
+	}
+	started = afe_command("the port 0x1006, started", AFE_PORT_CMD_DEVICE_START, port, sizeof(port));
+	if (started) {
+		uint32_t ones_clk, ones_ws;
+		unsigned clk, ws;
+
+		delay(20000);
+		clk = pin_toggles(&pins[0], &ones_clk);
+		ws = pin_toggles(&pins[1], &ones_ws);
+		printf("adsp845: %u: the pins while the port runs: the bit clock (gpio58) %u changes (%u ones), the word select (gpio59) %u changes "
+		    "(%u ones), in 20000 reads each\n", step, clk, ones_clk, ws, ones_ws);
+		ok = clk > 0 && ws > 0;
+		printf("adsp845: %u: %s\n", step, ok ? "THE QUATERNARY MI2S RUNS: its clock and word select toggle at the pins" :
+		    "THE PORT STARTED BUT THE PINS DO NOT TOGGLE (the pins' function or the DSP's clock)");
+		afe_command("the port 0x1006, stopped", AFE_PORT_CMD_DEVICE_STOP, port, sizeof(port));
+	}
+off:
+	if (clock) {
+		afe_mi2s_clock(false);
+	}
+	for (unsigned i = 0; i < 4; i++) {
+		put(&pins[i].page, "I/O (given back)", 4, found_io[i] & 2);
+		put(&pins[i].page, "control (given back)", 0, found_ctl[i]);
+	}
+	return ok;
+}
+
 /* ---- the steps, and their end ----------------------------------------------------------------------- */
 
 static bool (*const steps[STEPS])(void) = {
 	step_survey, step_firmware, step_mailbox, step_header, step_image, step_our_item, step_start, step_queues, step_link, step_qrtr,
-	step_apr, step_tfa, step_amplifier,
+	step_apr, step_tfa, step_amplifier, step_afe,
 };
 
 static bool keep;                       /* the DSP and the link stay up while the system runs (adsp8_keep) */

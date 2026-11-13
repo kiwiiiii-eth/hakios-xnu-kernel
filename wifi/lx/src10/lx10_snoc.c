@@ -947,7 +947,32 @@ lx_start(void)
 		lx_tell("lx10: the probe fails: %d\n", ret);
 		return (-ret);
 	}
-	return (0);
+	/* the rest is the driver's own threads': its qmi.c, "ready", the core's start, the radio registered (60 s at most) */
+	{
+		unsigned long long began = lx_os_nanoseconds();
+
+		while (!lx_station_registered() && lx_os_nanoseconds() - began < 60000000000ull) {
+			lx_pause_ms(10);
+		}
+		lx_tell("lx10: %llu ms after the probe the driver %s\n", (lx_os_nanoseconds() - began) / 1000000ull,
+		    lx_station_registered() ? "HAS REGISTERED ITS RADIO: the firmware is up, its messages pass" :
+		    "HAS NOT REGISTERED A RADIO");
+		if (!lx_station_registered()) {
+			return (ETIMEDOUT);
+		}
+	}
+	lx_pause_ms(1000);                      /* (for what the firmware says unasked once it is ready) */
+	if (lx_os_option("wifi_station")) {
+		/* whoever wants a network asks the kernel (Darwin's wifid, sys/hakios.sta.h), and the kernel asks the station */
+		ret = lx_station_offer();
+	} else if (lx_os_option("wifi_join")) {
+		ret = lx_station_join();
+	} else if (lx_os_option("wifi_scan")) {
+		ret = lx_station_scan();
+	} else {
+		ret = 0;
+	}
+	return (ret);
 }
 
 void

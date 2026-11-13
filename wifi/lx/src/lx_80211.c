@@ -1086,6 +1086,13 @@ station_scan(struct lx_radio *radio, const uint8_t *name, unsigned name_length, 
 }
 
 /* An interface, a scan that only listens, and down again: what the radio hears is said. 0, or an errno. */
+/* whether the driver has registered its radio (lx10's lx_start() waits for it: ath10k registers from its own threads) */
+bool
+lx_station_registered(void)
+{
+	return (the_radio != NULL && the_radio->registered);
+}
+
 int
 lx_station_scan(void)
 {

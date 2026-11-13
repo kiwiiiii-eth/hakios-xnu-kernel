@@ -9,6 +9,7 @@ void	lx_tell(const char *format, ...) __printflike(1, 2);	/* lx_base.c: a line t
 void	lx_memory_say(void);		/* lx_base.c: what the layer holds of memory */
 void	lx_pause_ms(unsigned ms);	/* lx_base.c: sleep */
 void	lx_mark(const char *what);	/* lx_base.c: a point reached, said and waited at if the kernel was asked to */
+bool	lx_station_registered(void);	/* lx_80211.c: the driver has registered its radio */
 int	lx_station_scan(void);		/* lx_80211.c: an interface in station mode, a scan, what was heard; 0, or an errno */
 int	lx_station_join(void);		/* lx_80211.c: join the network the kernel was given; 0 when frames can pass */
 void	lx_station_say(void);		/* lx_80211.c: what has passed since */

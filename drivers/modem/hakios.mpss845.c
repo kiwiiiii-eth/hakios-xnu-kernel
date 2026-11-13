@@ -2162,6 +2162,88 @@ ipa_hardware_init(void)
 
 
 /*
+ * The same for the 6T's IPA 3.5.1 (ipa845=8), as Linux does it for that version before its firmware is used
+ * (ipa_mem_setup() with data/ipa_data-v3.5.1.c's ipa_mem_local_data; ipa_hardware_config() and ipa_resource_config()
+ * with ipa_data_v3_5_1; reg/ipa_reg-v3.5.1.c). The local memory is 8 KB: the microcontroller's area to 0x288 left
+ * alone, the rest zeroed, canaries before the tables (2 each), the modem's headers and processing contexts (2 each)
+ * and the microcontroller's event ring (1); the modem's processing contexts at 0x7d0.
+ */
+static void
+ipa351_memory_init(void)
+{
+	static const struct {
+		uint16_t offset, canaries;
+	} regions[] = {
+		{ 0x0288, 2 }, { 0x0308, 2 }, { 0x0388, 2 }, { 0x0408, 2 }, { 0x0488, 2 }, { 0x0508, 2 }, { 0x0588, 2 }, { 0x0608, 2 },
+		{ 0x0688, 2 }, { 0x07d0, 2 }, { 0x1c00, 1 },
+	};
+	const uint32_t size = 0x2000;
+
+	need(&ipa_sram);
+	need(&ipa_regs);
+	bb_say("ipa: 3.5.1: the local memory\n");
+	for (uint32_t at = 0x288; at < size; at += 4) {
+		wr(ipa_sram.base + ipa_mem_offset + at, 0);
+	}
+	for (unsigned r = 0; r < sizeof(regions) / sizeof(regions[0]); r++) {
+		for (unsigned c = 1; c <= regions[r].canaries; c++) {
+			wr(ipa_sram.base + ipa_mem_offset + regions[r].offset - 4 * c, 0xdeadbeef);
+		}
+	}
+	wr(ipa_regs.base + 0x1e8, (ipa_mem_offset + 0x07d0) & 0x1ffff);      /* LOCAL_PKT_PROC_CNTXT: the modem's processing contexts */
+	settle();
+	tell("mpss: ipa: 3.5.1: its local memory zeroed (0x288..%#x at offset %#x), the canaries written, the processing contexts at "
+	    "%#x\n", size, ipa_mem_offset, ipa_mem_offset + 0x07d0);
+}
+
+static void
+ipa351_hardware_init(void)
+{
+	/* the source resources (ipa_resource_src): types 0..4, groups 0 LWA_DL, 1 UL_DL, 2 MHI_DMA, 3 UC_RX_Q; {min, max} */
+	static const uint8_t src[5][4][2] = {
+		{ { 1, 63 }, { 1, 63 }, { 0, 0 }, { 1, 63 } },          /* packet contexts */
+		{ { 10, 10 }, { 10, 10 }, { 0, 0 }, { 8, 8 } },         /* descriptor lists */
+		{ { 12, 12 }, { 14, 14 }, { 0, 0 }, { 8, 8 } },         /* descriptor buffers */
+		{ { 0, 63 }, { 0, 63 }, { 0, 63 }, { 0, 63 } },         /* HPS DMARs */
+		{ { 14, 14 }, { 20, 20 }, { 0, 0 }, { 14, 14 } },       /* ACK entries */
+	};
+	/* the destination resources (ipa_resource_dst): types 0..1, groups 0 LWA_DL, 1 UL_DL_DPL, 2 unused */
+	static const uint8_t dst[2][4][2] = {
+		{ { 4, 4 }, { 4, 4 }, { 3, 3 }, { 0, 0 } },             /* data sectors */
+		{ { 2, 63 }, { 1, 63 }, { 1, 2 }, { 0, 0 } },           /* DPS DMARs */
+	};
+
+	need(&ipa_regs);
+	bb_say("ipa: 3.5.1: the hardware\n");
+	/* BCR: CMDQ_L_LACK_ONE_ENTRY, TX_NOT_USING_BRESP, SUSPEND_L2_IRQ, HOLB_DROP_L2_IRQ, DUAL_TX (ipa_data_v3_5_1) */
+	wr(ipa_regs.base + 0x1d0, 1u << 0 | 1u << 1 | 1u << 3 | 1u << 4 | 1u << 5);
+	/* QSB: the DDR master 8 writes and 8 reads, the PCIe master 4 and 12 */
+	wr(ipa_regs.base + IPA_QSB_MAX_WRITES, 8 | 4u << 4);
+	wr(ipa_regs.base + IPA_QSB_MAX_READS, 8 | 12u << 4);
+	/* COUNTER_CFG: the aggregation's granularity, 500 us (in 1/32 ms, less one: 15) */
+	wr(ipa_regs.base + 0x1f0, 15u << 4);
+	/* the dynamic clock division: enter idle after 256, no constant non-idle (IDLE_INDICATION_CFG at 0x220 on 3.5.1) */
+	wr(ipa_regs.base + 0x220, 256);
+	for (unsigned t = 0; t < 5; t++) {
+		wr(ipa_regs.base + IPA_SRC_RSRC_GRP_01(t), RSRC(src[t][0][0], src[t][0][1], src[t][1][0], src[t][1][1]));
+		wr(ipa_regs.base + IPA_SRC_RSRC_GRP_23(t), RSRC(src[t][2][0], src[t][2][1], src[t][3][0], src[t][3][1]));
+	}
+	for (unsigned t = 0; t < 2; t++) {
+		wr(ipa_regs.base + IPA_DST_RSRC_GRP_01(t), RSRC(dst[t][0][0], dst[t][0][1], dst[t][1][0], dst[t][1][1]));
+		wr(ipa_regs.base + IPA_DST_RSRC_GRP_23(t), RSRC(dst[t][2][0], dst[t][2][1], dst[t][3][0], dst[t][3][1]));
+	}
+	/* the default route (Linux's ipa_endpoint_default_route_set()): the LAN receive endpoint 9, header table, retained */
+	wr(ipa_regs.base + IPA_ROUTE, 9u << 1 | 1u << 6 | 9u << 17 | 1u << 24);
+	settle();
+	tell("mpss: ipa: 3.5.1: the hardware set up as Linux does: BCR %#x, QSB %#x %#x, counter %#x, idle %#x, route %#x, source "
+	    "groups 0/1 %#x %#x %#x %#x %#x, destination %#x %#x\n", rd(ipa_regs.base + 0x1d0), rd(ipa_regs.base + IPA_QSB_MAX_WRITES),
+	    rd(ipa_regs.base + IPA_QSB_MAX_READS), rd(ipa_regs.base + 0x1f0), rd(ipa_regs.base + 0x220), rd(ipa_regs.base + IPA_ROUTE),
+	    rd(ipa_regs.base + IPA_SRC_RSRC_GRP_01(0)), rd(ipa_regs.base + IPA_SRC_RSRC_GRP_01(1)), rd(ipa_regs.base + IPA_SRC_RSRC_GRP_01(2)),
+	    rd(ipa_regs.base + IPA_SRC_RSRC_GRP_01(3)), rd(ipa_regs.base + IPA_SRC_RSRC_GRP_01(4)), rd(ipa_regs.base + IPA_DST_RSRC_GRP_01(0)),
+	    rd(ipa_regs.base + IPA_DST_RSRC_GRP_01(1)));
+}
+
+/*
  * The IPA reaches memory through the application processors' SMMU (dt of Linux: iommus 0x480 and
  * 0x482 of apps_smmu), where a stream nobody matches faults, and the hypervisor grants no bypass
  * (tried on 24 October: the S2CR stayed "fault"). So, as the Wi-Fi's radio has (hakios.wifi.c,
@@ -2805,13 +2887,19 @@ gsi_looked:
 	 * secure watchdog right after TrustZone started the firmware. ipa845=8 once they are the 6T's.)
 	 */
 	if (ipa_stage >= 8 && !option("modem_ipa_raw")) {
-		ipa_memory_init();
-		ipa_hardware_init();
+		/* the 6T: IPA 3.5.1 (ipa845=8: its memory and hardware; 9: and this processor's data path) */
+		ipa351_memory_init();
+		ipa351_hardware_init();
+		hakios_ipa_set_version(351);
+		if (ipa_stage == 8) {
+			goto data_left;
+		}
 		/* this processor's own channels and endpoints, and the IPA's tables, before the modem (hakios.ipa.c); then en1 on them */
 		if (hakios_ipa_data_setup()) {
 			hakios_cell_attach();
 		}
 	}
+data_left:
 	ok = true;
 out:
 	if (page != 0) {
@@ -7715,7 +7803,8 @@ step_mba(void)
 		return false;
 	}
 	/*
-	 * ipa845=6 (7: with the SDM845's bus votes): the IPA's firmware before the modem is started, as the reference phone
+	 * ipa845=6 (7: with the SDM845's bus votes; 8 and 9: and IPA 3.5.1's memory and hardware, 9 its data path too): the
+	 * IPA's firmware before the modem is started, as the reference phone
 	 * and Android do -- runs 56 and 59 asked TrustZone for it with the modem up, and TrustZone hung (its secure watchdog).
 	 */
 	{
@@ -7723,7 +7812,7 @@ step_mba(void)
 
 		PE_parse_boot_argn("ipa845", &stage, sizeof(stage));
 		if (stage >= 6 && !ipa_loaded) {
-			ipa_stage = stage == 7 ? 4 : 1;
+			ipa_stage = stage == 7 ? 4 : stage >= 8 ? stage : 1;     /* (8, 9: also the 3.5.1 memory, hardware, data path) */
 			ipa_loaded = ipa_firmware_load();
 			if (ipa_loaded) {
 				bb_say("ipa: the status next\n");

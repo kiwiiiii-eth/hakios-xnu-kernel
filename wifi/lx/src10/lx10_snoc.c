@@ -768,6 +768,18 @@ ath10k_dbg_dump(struct ath10k *ar, unsigned int mask, const char *msg, const cha
 	(void)len;
 }
 
+/*
+ * The radio's own address, which ath10k asks its device for before it falls back on the firmware's (which says none
+ * valid on the 6T, run 36: "invalid MAC address; choosing random"): the kernel's, if it was given one (wifi_mac), so
+ * that en0, made when the kernel starts (hakios_lx_net_early()), and the radio have the same.
+ */
+int
+linuxkpi_device_get_mac_address(struct device *dev, char *address)
+{
+	(void)dev;
+	return (lx_os_radio_address((unsigned char *)address) ? 0 : -ENOENT);
+}
+
 /* ---- FreeBSD's, as LinuxKPI's headers reach them ------------------------------------------------------- */
 
 const uint8_t rfc1042_header[6] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 };

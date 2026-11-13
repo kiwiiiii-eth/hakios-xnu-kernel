@@ -3565,3 +3565,21 @@ index 3ebc295117a3..de101eafc83b 100755
  def find_non_ascii(s):
      for c in s:
          if ord(c) >= 0x80: return True
+diff --git a/osfmk/arm/io_map.c b/osfmk/arm/io_map.c
+index 18ef2f02122f..77ca43185d6d 100644
+--- a/osfmk/arm/io_map.c
++++ b/osfmk/arm/io_map.c
+@@ -62,7 +62,12 @@
+ 
+ extern vm_offset_t virtual_space_start;     /* Next available kernel VA */
+ 
+-#define IO_MAP_SIZE            (8ul << 20)
++/*
++ * HakiOS: 128 MB, not 8 -- every ml_io_map() of a driver's registers is a permanent mapping in this submap, and the OnePlus 6T's drivers
++ * (the modem's 2 MB of the GCC, the touch screen's pin controller, the GPU, Wi-Fi, the IPA, the audio DSP, Bluetooth) ran out of
++ * 8 MB: kmem_alloc(..., 16384, KMEM_PERMANENT | KMEM_PAGEABLE | KMEM_NOFAIL) "failed with 3", a panic (runs 82, 96)
++ */
++#define IO_MAP_SIZE            (128ul << 20)
+ 
+ __startup_data static struct mach_vm_range io_range;
+ static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;

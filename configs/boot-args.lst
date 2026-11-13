@@ -3,6 +3,7 @@ adreno_blind	k
 adreno_dirty	k
 adreno_fine	k
 adreno_keep	k
+adreno_keep_watch	k
 adreno_only	k
 adreno_pause	k
 adreno_return	k
@@ -84,6 +85,7 @@ cam_shutter	k
 cam_vblank	k
 cc_fade	u
 cpufreq	k
+cpufreq_gov	k
 cpuload	k
 cpumask	l
 cpus	l
@@ -91,6 +93,8 @@ ddr	k
 ddr_rest	k
 ddr_vote	k
 display_probe	k
+dsibl	k
+dsibl_test	k
 epoch	k
 fb_beam	k
 fb_beat	k
@@ -108,6 +112,7 @@ fbscale	k
 fbsubtype	k
 fbtrace	k
 fbwidth	ku
+fg8998	k
 gamut	l
 gic_vtimer	k
 gl	u
@@ -148,6 +153,7 @@ glwait	u
 glyes	u
 gpu	k
 gpu_cached	k
+gpu_dvfs	k
 gpu_exact	k
 gpu_keep	k
 gpu_log	k
@@ -159,8 +165,6 @@ loader_return_after	kl
 m2v_utrace	u
 machine_name	k
 membench	k
-cpufreq_gov	k
-dsibl	k
 metal	ku
 metal_all	u
 metal_defer	u
@@ -198,6 +202,7 @@ modem_ipa_fw_at	k
 modem_ipa_gsi_enable	k
 modem_ipa_item	k
 modem_ipa_no_probe	k
+modem_ipa_qmi	k
 modem_ipa_quiet	k
 modem_ipa_raw	k
 modem_ipa_routes	k
@@ -205,6 +210,12 @@ modem_ipa_skip_uc	k
 modem_ipa_smmu_off	k
 modem_keep	k
 modem_listen	k
+modem_mba	k
+modem_mba_only	k
+modem_mba_part	k
+modem_mdata	k
+modem_meta_quiet	k
+modem_mpss_early	k
 modem_nas_wait	k
 modem_new	k
 modem_no_ipa_qmi	k
@@ -212,8 +223,11 @@ modem_no_nav	k
 modem_no_tftp	k
 modem_online	k
 modem_pause	k
+modem_quiesce_off	k
+modem_rails_look	k
 modem_return	k
 modem_rmtfs_delay	k
+modem_rmtfs_early	k
 modem_rmtfs_rw_fake	k
 modem_rmtfs_rw_off	k
 modem_share_off	k
@@ -221,8 +235,11 @@ modem_share_test	k
 modem_sim_probe_off	k
 modem_sim_switch_off	k
 modem_step	k
+modem_tick	k
 modem_wait	k
 modem_wda_off	k
+modem_wlfw_ready	k
+modem_wlfw_wait	k
 net_names	k
 net_trace	k
 pmic	k
@@ -243,6 +260,7 @@ regtrace	k
 return_cpu	k
 return_panic	k
 rmi4	k
+rmi4_charger	k
 rmi4_khz	k
 rmi4_peek	k
 rmi4_steps	k

@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **366 arguments**: 295 read by the kernel, 14 by the loader, 68 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **386 arguments**: 315 read by the kernel, 14 by the loader, 68 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
@@ -12,19 +12,19 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
-| `adreno` | K | `hakios.adreno.c` | `CONFIG_ADRENO` |  |
-| `adreno_blind` | K | `hakios.adreno.c` | `CONFIG_ADRENO_BLIND` |  |
-| `adreno_dirty` | K | `hakios.adreno.c` | `CONFIG_ADRENO_DIRTY` |  |
-| `adreno_fine` | K | `hakios.adreno.c` | `CONFIG_ADRENO_FINE` |  |
-| `adreno_keep` | K | `hakios.adreno.c` | `CONFIG_ADRENO_KEEP` |  |
-| `adreno_only` | K | `hakios.adreno.c` | `CONFIG_ADRENO_ONLY` |  |
-| `adreno_pause` | K | `hakios.adreno.c` | `CONFIG_ADRENO_PAUSE` |  |
-| `adreno_return` | K | `hakios.adreno.c` | `CONFIG_ADRENO_RETURN` |  |
-| `adreno_skip` | K | `hakios.adreno.c` | `CONFIG_ADRENO_SKIP` |  |
-| `adreno_speed` | K | `hakios.adreno.c` | `CONFIG_ADRENO_SPEED` |  |
-| `adreno_stream1` | K | `hakios.adreno.c` | `CONFIG_ADRENO_STREAM1` |  |
-| `adreno_watch` | K | `hakios.adreno.c` | `CONFIG_ADRENO_WATCH` |  |
-| `display_probe` | K | `hakios.adreno.c` | `CONFIG_DISPLAY_PROBE` |  |
+| `adreno` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_ADRENO` |  |
+| `adreno_blind` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_ADRENO_BLIND` |  |
+| `adreno_dirty` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_ADRENO_DIRTY` |  |
+| `adreno_fine` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_ADRENO_FINE` |  |
+| `adreno_keep` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_ADRENO_KEEP` |  |
+| `adreno_only` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_ADRENO_ONLY` |  |
+| `adreno_pause` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_ADRENO_PAUSE` |  |
+| `adreno_return` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_ADRENO_RETURN` |  |
+| `adreno_skip` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_ADRENO_SKIP` |  |
+| `adreno_speed` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_ADRENO_SPEED` |  |
+| `adreno_stream1` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_ADRENO_STREAM1` |  |
+| `adreno_watch` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_ADRENO_WATCH` |  |
+| `display_probe` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_DISPLAY_PROBE` |  |
 | `fb_beam` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_BEAM` |  |
 | `fb_beat` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_BEAT` |  |
 | `fb_ca_hz` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_CA_HZ` |  |
@@ -72,12 +72,12 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `gltrace_shaders` | U | `eagl.c` | `CONFIG_GLTRACE_SHADERS` |  |
 | `gltrace_uniforms` | U | `eagl.c` | `CONFIG_GLTRACE_UNIFORMS` |  |
 | `glwait` | U | `eagl.c` | `CONFIG_GLWAIT` |  |
-| `gpu` | K | `hakios.adreno.c` | `CONFIG_GPU` |  |
+| `gpu` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_GPU` |  |
 | `gpu_cached` | K | `hakios.gpu.cpp` | `CONFIG_GPU_CACHED` |  |
-| `gpu_exact` | K | `hakios.adreno.c` | `CONFIG_GPU_EXACT` |  |
+| `gpu_exact` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_GPU_EXACT` |  |
 | `gpu_keep` | K | `hakios.gpu.cpp` | `CONFIG_GPU_KEEP` |  |
-| `gpu_log` | K | `hakios.adreno.c` | `CONFIG_GPU_LOG` |  |
-| `hakios_kver` | K | `MiniIOMobileFramebuffer.cpp`, `hakios.version.c` |  | the loader (from the payload's kernel.ver) |
+| `gpu_log` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_GPU_LOG` |  |
+| `hakios_kver` | K | `MiniIOMobileFramebuffer.cpp`, `hakios.ufs.c`, `hakios.version.c` |  | the loader (from the payload's kernel.ver) |
 | `metal` | KU | `HakiosMetal.m`, `MiniIOMobileFramebuffer.cpp`, `inject_sb.c` | `CONFIG_METAL` |  |
 | `rec_mb` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_REC_MB` |  |
 | `rec_ring` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_REC_RING` |  |
@@ -101,7 +101,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
-| `wifi` | K | `hakios.wifi.c` | `CONFIG_WIFI` |  |
+| `wifi` | K | `hakios.wifi.c`, `hakios.wifi10.c` | `CONFIG_WIFI` |  |
 | `wifi_again` | K | `hakios.wifi.c` | `CONFIG_WIFI_AGAIN` |  |
 | `wifi_ask` | K | `hakios.wifi.c` | `CONFIG_WIFI_ASK` |  |
 | `wifi_ba` | K | `lx_80211.c` | `CONFIG_WIFI_BA` | implied by wifi=1 |
@@ -117,7 +117,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `wifi_loud` | K | `hakios.wifi.c` | `CONFIG_WIFI_LOUD` |  |
 | `wifi_lx` | K | `hakios.wifi.c`, `lx_bus.c` | `CONFIG_WIFI_LX` | implied by wifi=1 (as 2) |
 | `wifi_lx_step` | K | `lx_base.c` | `CONFIG_WIFI_LX_STEP` |  |
-| `wifi_mac` | K | `hakios.wifi.c` | `CONFIG_WIFI_MAC` |  |
+| `wifi_mac` | K | `hakios.wifi.c`, `hakios.wifi10.c` | `CONFIG_WIFI_MAC` |  |
 | `wifi_mission` | K | `hakios.wlfw.c` | `CONFIG_WIFI_MISSION` |  |
 | `wifi_new` | K | `hakios.wifi.c` | `CONFIG_WIFI_NEW` |  |
 | `wifi_pause` | K | `hakios.wifi.c` | `CONFIG_WIFI_PAUSE` |  |
@@ -129,67 +129,67 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `wifi_smmu` | K | `hakios.wifi.c` | `CONFIG_WIFI_SMMU` | implied by wifi=1 (as 2) |
 | `wifi_station` | K | `lx_bus.c` | `CONFIG_WIFI_STATION` | implied by wifi=1 |
 | `wifi_step` | K | `hakios.wifi.c` | `CONFIG_WIFI_STEP` |  |
-| `wifi_wait` | K | `hakios.wifi.c` | `CONFIG_WIFI_WAIT` |  |
-| `wifi_watch` | K | `hakios.wifi.c` | `CONFIG_WIFI_WATCH` |  |
+| `wifi_wait` | K | `hakios.wifi.c`, `hakios.wifi10.c` | `CONFIG_WIFI_WAIT` |  |
+| `wifi_watch` | K | `hakios.wifi.c`, `hakios.wifi10.c` | `CONFIG_WIFI_WATCH` |  |
 | `wifi_wide` | K | `lx_80211.c` | `CONFIG_WIFI_WIDE` | implied by wifi=1 |
 
 ## Cellular (53)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
-| `modem` | K | `hakios.mpss.c` | `CONFIG_MODEM` |  |
-| `modem_again` | K | `hakios.mpss.c` | `CONFIG_MODEM_AGAIN` |  |
-| `modem_apn` | K | `hakios.mpss.c` | `CONFIG_MODEM_APN` |  |
-| `modem_buffer` | K | `hakios.mpss.c` | `CONFIG_MODEM_BUFFER` |  |
-| `modem_data_nobind` | K | `hakios.mpss.c` | `CONFIG_MODEM_DATA_NOBIND` |  |
-| `modem_data_off` | K | `hakios.mpss.c` | `CONFIG_MODEM_DATA_OFF` |  |
-| `modem_data_wait` | K | `hakios.mpss.c` | `CONFIG_MODEM_DATA_WAIT` |  |
-| `modem_dpm_off` | K | `hakios.mpss.c` | `CONFIG_MODEM_DPM_OFF` |  |
-| `modem_ipa` | K | `hakios.mpss.c` | `CONFIG_MODEM_IPA` |  |
-| `modem_ipa_bus_off` | K | `hakios.mpss.c` | `CONFIG_MODEM_IPA_BUS_OFF` |  |
+| `modem` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM` |  |
+| `modem_again` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_AGAIN` |  |
+| `modem_apn` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_APN` |  |
+| `modem_buffer` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_BUFFER` |  |
+| `modem_data_nobind` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_DATA_NOBIND` |  |
+| `modem_data_off` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_DATA_OFF` |  |
+| `modem_data_wait` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_DATA_WAIT` |  |
+| `modem_dpm_off` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_DPM_OFF` |  |
+| `modem_ipa` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA` |  |
+| `modem_ipa_bus_off` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA_BUS_OFF` |  |
 | `modem_ipa_data_off` | K | `hakios.ipa.c` | `CONFIG_MODEM_IPA_DATA_OFF` |  |
 | `modem_ipa_data_trace` | K | `hakios.cell.c`, `hakios.ipa.c` | `CONFIG_MODEM_IPA_DATA_TRACE` |  |
-| `modem_ipa_fw` | K | `hakios.mpss.c` | `CONFIG_MODEM_IPA_FW` |  |
-| `modem_ipa_fw_at` | K | `hakios.mpss.c` | `CONFIG_MODEM_IPA_FW_AT` |  |
-| `modem_ipa_gsi_enable` | K | `hakios.mpss.c` | `CONFIG_MODEM_IPA_GSI_ENABLE` |  |
-| `modem_ipa_item` | K | `hakios.mpss.c` | `CONFIG_MODEM_IPA_ITEM` |  |
-| `modem_ipa_no_probe` | K | `hakios.mpss.c` | `CONFIG_MODEM_IPA_NO_PROBE` |  |
-| `modem_ipa_quiet` | K | `hakios.mpss.c` | `CONFIG_MODEM_IPA_QUIET` |  |
-| `modem_ipa_raw` | K | `hakios.mpss.c` | `CONFIG_MODEM_IPA_RAW` |  |
-| `modem_ipa_routes` | K | `hakios.mpss.c` | `CONFIG_MODEM_IPA_ROUTES` |  |
-| `modem_ipa_skip_uc` | K | `hakios.mpss.c` | `CONFIG_MODEM_IPA_SKIP_UC` |  |
-| `modem_ipa_smmu_off` | K | `hakios.mpss.c` | `CONFIG_MODEM_IPA_SMMU_OFF` |  |
-| `modem_keep` | K | `hakios.mpss.c` | `CONFIG_MODEM_KEEP` |  |
-| `modem_listen` | K | `hakios.mpss.c` | `CONFIG_MODEM_LISTEN` |  |
-| `modem_nas_wait` | K | `hakios.mpss.c` | `CONFIG_MODEM_NAS_WAIT` |  |
-| `modem_new` | K | `hakios.mpss.c` | `CONFIG_MODEM_NEW` |  |
-| `modem_no_ipa_qmi` | K | `hakios.mpss.c` | `CONFIG_MODEM_NO_IPA_QMI` |  |
+| `modem_ipa_fw` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA_FW` |  |
+| `modem_ipa_fw_at` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA_FW_AT` |  |
+| `modem_ipa_gsi_enable` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA_GSI_ENABLE` |  |
+| `modem_ipa_item` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA_ITEM` |  |
+| `modem_ipa_no_probe` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA_NO_PROBE` |  |
+| `modem_ipa_quiet` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA_QUIET` |  |
+| `modem_ipa_raw` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA_RAW` |  |
+| `modem_ipa_routes` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA_ROUTES` |  |
+| `modem_ipa_skip_uc` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA_SKIP_UC` |  |
+| `modem_ipa_smmu_off` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA_SMMU_OFF` |  |
+| `modem_keep` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_KEEP` |  |
+| `modem_listen` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_LISTEN` |  |
+| `modem_nas_wait` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_NAS_WAIT` |  |
+| `modem_new` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_NEW` |  |
+| `modem_no_ipa_qmi` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_NO_IPA_QMI` |  |
 | `modem_no_nav` | K | `hakios.mpss.c` | `CONFIG_MODEM_NO_NAV` |  |
-| `modem_no_tftp` | K | `hakios.mpss.c` | `CONFIG_MODEM_NO_TFTP` |  |
-| `modem_online` | K | `hakios.mpss.c` | `CONFIG_MODEM_ONLINE` |  |
-| `modem_pause` | K | `hakios.mpss.c` | `CONFIG_MODEM_PAUSE` |  |
-| `modem_return` | K | `hakios.mpss.c` | `CONFIG_MODEM_RETURN` |  |
-| `modem_rmtfs_delay` | K | `hakios.mpss.c` | `CONFIG_MODEM_RMTFS_DELAY` |  |
-| `modem_rmtfs_rw_fake` | K | `hakios.mpss.c` | `CONFIG_MODEM_RMTFS_RW_FAKE` |  |
-| `modem_rmtfs_rw_off` | K | `hakios.mpss.c` | `CONFIG_MODEM_RMTFS_RW_OFF` |  |
-| `modem_share_off` | K | `hakios.mpss.c` | `CONFIG_MODEM_SHARE_OFF` |  |
-| `modem_share_test` | K | `hakios.mpss.c` | `CONFIG_MODEM_SHARE_TEST` |  |
-| `modem_sim_probe_off` | K | `hakios.mpss.c` | `CONFIG_MODEM_SIM_PROBE_OFF` |  |
-| `modem_sim_switch_off` | K | `hakios.mpss.c` | `CONFIG_MODEM_SIM_SWITCH_OFF` |  |
-| `modem_step` | K | `hakios.mpss.c` | `CONFIG_MODEM_STEP` |  |
-| `modem_wait` | K | `hakios.mpss.c` | `CONFIG_MODEM_WAIT` |  |
-| `modem_wda_off` | K | `hakios.mpss.c` | `CONFIG_MODEM_WDA_OFF` |  |
-| `soc_cmd_db` | K | `hakios.cpufreq.c`, `hakios.mpss.c`, `hakios.rmi4.c` | `CONFIG_SOC_CMD_DB` |  |
+| `modem_no_tftp` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_NO_TFTP` |  |
+| `modem_online` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_ONLINE` |  |
+| `modem_pause` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_PAUSE` |  |
+| `modem_return` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_RETURN` |  |
+| `modem_rmtfs_delay` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_RMTFS_DELAY` |  |
+| `modem_rmtfs_rw_fake` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_RMTFS_RW_FAKE` |  |
+| `modem_rmtfs_rw_off` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_RMTFS_RW_OFF` |  |
+| `modem_share_off` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_SHARE_OFF` |  |
+| `modem_share_test` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_SHARE_TEST` |  |
+| `modem_sim_probe_off` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_SIM_PROBE_OFF` |  |
+| `modem_sim_switch_off` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_SIM_SWITCH_OFF` |  |
+| `modem_step` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_STEP` |  |
+| `modem_wait` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_WAIT` |  |
+| `modem_wda_off` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_WDA_OFF` |  |
+| `soc_cmd_db` | K | `hakios.cpufreq.c`, `hakios.mpss.c`, `hakios.mpss845.c`, `hakios.rmi4.c` | `CONFIG_SOC_CMD_DB` |  |
 | `soc_gsi_base` | K | `hakios.ipa.c` | `CONFIG_SOC_GSI_BASE` |  |
-| `soc_imem` | K | `hakios.mpss.c` | `CONFIG_SOC_IMEM` |  |
+| `soc_imem` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_SOC_IMEM` |  |
 | `soc_ipa_base` | K | `hakios.ipa.c` | `CONFIG_SOC_IPA_BASE` |  |
-| `soc_ipa_fw` | K | `hakios.mpss.c` | `CONFIG_SOC_IPA_FW` |  |
-| `soc_ipa_stream` | K | `hakios.mpss.c` | `CONFIG_SOC_IPA_STREAM` |  |
-| `soc_ipa_stream_uc` | K | `hakios.mpss.c` | `CONFIG_SOC_IPA_STREAM_UC` |  |
-| `soc_mpss_mem` | K | `hakios.mpss.c` | `CONFIG_SOC_MPSS_MEM` |  |
-| `soc_pas_ipa` | K | `hakios.mpss.c` | `CONFIG_SOC_PAS_IPA` |  |
-| `soc_pas_mpss` | K | `hakios.mpss.c` | `CONFIG_SOC_PAS_MPSS` |  |
-| `soc_smem` | K | `hakios.mpss.c`, `hakios.socinfo.c` | `CONFIG_SOC_SMEM` |  |
+| `soc_ipa_fw` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_SOC_IPA_FW` |  |
+| `soc_ipa_stream` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_SOC_IPA_STREAM` |  |
+| `soc_ipa_stream_uc` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_SOC_IPA_STREAM_UC` |  |
+| `soc_mpss_mem` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_SOC_MPSS_MEM` |  |
+| `soc_pas_ipa` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_SOC_PAS_IPA` |  |
+| `soc_pas_mpss` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_SOC_PAS_MPSS` |  |
+| `soc_smem` | K | `hakios.mpss.c`, `hakios.mpss845.c`, `hakios.socinfo.c` | `CONFIG_SOC_SMEM` |  |
 
 ## Audio and battery (33)
 
@@ -347,7 +347,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `thermal_tm0` | K | `hakios.thermal.c` | `CONFIG_THERMAL_TM0` |  |
 | `thermal_tm1` | K | `hakios.thermal.c` | `CONFIG_THERMAL_TM1` |  |
 
-## CPU, memory and boot (28)
+## CPU, memory and boot (29)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -355,11 +355,12 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `applog_name` | K | `(patch)` | `CONFIG_APPLOG_NAME` |  |
 | `bootcpu` | KL | `loader.c`, `loader_return.c` | `CONFIG_BOOTCPU` |  |
 | `cpufreq` | K | `hakios.cpufreq.c` | `CONFIG_CPUFREQ` |  |
+| `cpufreq_gov` | K | `hakios.cpufreq.c` | `CONFIG_CPUFREQ_GOV` |  |
 | `cpuload` | K | `hakios.cpufreq.c` | `CONFIG_CPULOAD` |  |
 | `ddr` | K | `hakios.cpufreq.c` | `CONFIG_DDR` |  |
 | `ddr_rest` | K | `hakios.cpufreq.c` | `CONFIG_DDR_REST` |  |
 | `ddr_vote` | K | `hakios.cpufreq.c` | `CONFIG_DDR_VOTE` |  |
-| `epoch` | K | `GenericARMPE.cpp` |  | xl (the host's clock) |
+| `epoch` | K | `GenericARMPE.cpp`, `hakios.mpss845.c` |  | xl (the host's clock) |
 | `hv_wdt_pet` | K | `loader_return.c` |  | the loader, when it has armed the watchdog (the runner also passes it) |
 | `loader_return_after` | KL | `loader.c`, `loader_return.c` |  | xl (XL_SECS) |
 | `machine_name` | K | `GenericARMPE.cpp` | `CONFIG_MACHINE_NAME` |  |
@@ -402,10 +403,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (42)
+## User space (61)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
+| `adreno_keep_watch` | K | `hakios.a630.c` | `CONFIG_ADRENO_KEEP_WATCH` |  |
 | `autounlock` | U | `inject_sb.c` | `CONFIG_AUTOUNLOCK` |  |
 | `bt` | K | `hakios.bt.c` | `CONFIG_BT` |  |
 | `bt_again` | K | `hakios.bt.c` | `CONFIG_BT_AGAIN` |  |
@@ -414,12 +416,16 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ca_vbl` | U | `inject.c` | `CONFIG_CA_VBL` |  |
 | `caenv` | U | `inject.c`, `inject_sb.c` | `CONFIG_CAENV` |  |
 | `cc_fade` | U | `inject_sb.c` | `CONFIG_CC_FADE` |  |
+| `dsibl` | K | `hakios.dsibl.c` | `CONFIG_DSIBL` |  |
+| `dsibl_test` | K | `hakios.dsibl.c` | `CONFIG_DSIBL_TEST` |  |
+| `fg8998` | K | `hakios.fg8998.c` | `CONFIG_FG8998` |  |
 | `gic_vtimer` | K | `gic_v3_irq.c` | `CONFIG_GIC_VTIMER` |  |
 | `gl` | U | `inject.c`, `inject_sb.c` | `CONFIG_GL` |  |
 | `glcompile` | U | `inject.c` | `CONFIG_GLCOMPILE` |  |
 | `glno` | U | `inject.c` | `CONFIG_GLNO` |  |
 | `glsb3` | U | `inject.c` | `CONFIG_GLSB3` |  |
 | `glyes` | U | `inject.c` | `CONFIG_GLYES` |  |
+| `gpu_dvfs` | K | `hakios.a630.c` | `CONFIG_GPU_DVFS` |  |
 | `m2v_utrace` | U | `HakiosMetalCA.m` | `CONFIG_M2V_UTRACE` |  |
 | `metal_all` | U | `HakiosMetalCA.m` | `CONFIG_METAL_ALL` |  |
 | `metal_defer` | U | `HakiosMetalCA.m` | `CONFIG_METAL_DEFER` |  |
@@ -433,7 +439,21 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `metal_skip` | U | `HakiosMetalCA.m` | `CONFIG_METAL_SKIP` |  |
 | `metal_trace` | U | `HakiosMetalCA.m` | `CONFIG_METAL_TRACE` |  |
 | `metal_watch` | U | `inject.c` | `CONFIG_METAL_WATCH` |  |
+| `modem_ipa_qmi` | K | `hakios.mpss845.c` | `CONFIG_MODEM_IPA_QMI` |  |
+| `modem_mba` | K | `hakios.mpss845.c` | `CONFIG_MODEM_MBA` |  |
+| `modem_mba_only` | K | `hakios.mpss845.c` | `CONFIG_MODEM_MBA_ONLY` |  |
+| `modem_mba_part` | K | `hakios.mpss845.c` | `CONFIG_MODEM_MBA_PART` |  |
+| `modem_mdata` | K | `hakios.mpss845.c` | `CONFIG_MODEM_MDATA` |  |
+| `modem_meta_quiet` | K | `hakios.mpss845.c` | `CONFIG_MODEM_META_QUIET` |  |
+| `modem_mpss_early` | K | `hakios.mpss845.c` | `CONFIG_MODEM_MPSS_EARLY` |  |
+| `modem_quiesce_off` | K | `hakios.mpss845.c` | `CONFIG_MODEM_QUIESCE_OFF` |  |
+| `modem_rails_look` | K | `hakios.mpss845.c` | `CONFIG_MODEM_RAILS_LOOK` |  |
+| `modem_rmtfs_early` | K | `hakios.mpss845.c` | `CONFIG_MODEM_RMTFS_EARLY` |  |
+| `modem_tick` | K | `hakios.mpss845.c` | `CONFIG_MODEM_TICK` |  |
+| `modem_wlfw_ready` | K | `hakios.mpss845.c` | `CONFIG_MODEM_WLFW_READY` |  |
+| `modem_wlfw_wait` | K | `hakios.mpss845.c` | `CONFIG_MODEM_WLFW_WAIT` |  |
 | `rmi4` | K | `hakios.rmi4.c` | `CONFIG_RMI4` |  |
+| `rmi4_charger` | K | `hakios.rmi4.c` | `CONFIG_RMI4_CHARGER` |  |
 | `rmi4_khz` | K | `hakios.rmi4.c` | `CONFIG_RMI4_KHZ` |  |
 | `rmi4_peek` | K | `hakios.rmi4.c` | `CONFIG_RMI4_PEEK` |  |
 | `rmi4_steps` | K | `hakios.rmi4.c` | `CONFIG_RMI4_STEPS` |  |

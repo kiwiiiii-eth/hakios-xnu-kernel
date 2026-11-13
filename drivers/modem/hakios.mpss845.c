@@ -1245,6 +1245,13 @@ root_file(const char *name, uint64_t *size)
 	return data;
 }
 
+/* For the 6T's Wi-Fi (drivers/wifi/hakios.wifi10.c): a file of /fw, read whole into memory that is never given back. */
+const uint8_t *
+hakios_mpss_root_file(const char *name, uint64_t *size)
+{
+	return root_file(name, size);
+}
+
 static bool from_root;                  /* the image is in memory of ours (root_file()), to be given back once written */
 
 /* A file of fw/ in the small image (MODEM=1 userland/build.sh puts fw-modem/ there), else of /fw on the root (above). */
@@ -2362,6 +2369,184 @@ ipa_space_off(void)
 	lck_mtx_unlock(&hakios_smmu_lock);
 	ipa_space.on = false;
 	printf("mpss: ipa: the IPA's streams and context %u of the SMMU are put back as they were found\n", ipa_space.context);
+}
+
+/* ---- for the 6T's Wi-Fi (drivers/wifi/hakios.wifi10.c, ath10k): its stream in the SMMU, its memory, its files ---- */
+
+/*
+ * The WCN3990's copy engines read and write memory as stream 0x40 of the application processors' SMMU, mask 1 (dt:
+ * iommus = <&apps_smmu 0x0040 0x1> of wifi@18800000). Nobody matches it, and a stream nobody matches faults (as the
+ * IPA's, above): a match register and a context of our own, as ipa_space_on() makes them, whose one table maps DDR
+ * as it is in 1 GB blocks, uncached -- the radio's address of a buffer is its physical address, wherever the kernel's
+ * memory is (ath10k's mask for the WCN3990 is 35 bits). The hypervisor grants a match register whose mask is the
+ * device tree's (the reference phone's Wi-Fi, 13 October). Put back by hakios_mpss_wifi_space_off().
+ */
+#define WIFI_STREAM             0x40u
+#define WIFI_STREAM_MASK        0x1u
+#define WIFI_SPACE_FIRST_GB     2u              /* DDR from 0x80000000 ... */
+#define WIFI_SPACE_END_GB       16u             /* ... to 0x400000000: more than any 6T has */
+static struct block apps_smmu_wifi = { "apps smmu, the Wi-Fi's context", 0, 0x1000 };
+static struct {
+	bool on;
+	uint32_t page, pages, match, context, old_smr, old_s2cr, old_sctlr;
+	vm_offset_t root;
+} wifi_space;
+
+void
+hakios_mpss_wifi_faults(const char *when)
+{
+	uint32_t status, global;
+
+	if (!wifi_space.on) {
+		return;
+	}
+	status = rd(apps_smmu_wifi.base + SMMU_CB_FSR);
+	global = rd(apps_smmu.base + SMMU_SGFSR);
+	if ((status & SMMU_FSR_ALL) == 0 && global == 0) {
+		printf("mpss: wifi: %s: the SMMU has refused the radio nothing (context %u)\n", when, wifi_space.context);
+		return;
+	}
+	tell("mpss: wifi: %s: THE SMMU HAS REFUSED A REQUEST OF THE RADIO'S: context %u: status %#x, address %#llx, syndrome %#x; "
+	    "the SMMU as a whole: status %#x, syndromes %#x %#x\n", when, wifi_space.context, status,
+	    (uint64_t)rd(apps_smmu_wifi.base + SMMU_CB_FAR + 4) << 32 | rd(apps_smmu_wifi.base + SMMU_CB_FAR),
+	    rd(apps_smmu_wifi.base + SMMU_CB_FSYNR0), global, rd(apps_smmu.base + SMMU_SGFSYNR0), rd(apps_smmu.base + SMMU_SGFSYNR1));
+	wr(apps_smmu_wifi.base + SMMU_CB_FSR, SMMU_FSR_ALL);
+}
+
+bool
+hakios_mpss_wifi_space(void)
+{
+	bool used[256] = { false };
+	uint32_t scr0, idr0, idr1, matches, contexts, sees = 1u << 31 | WIFI_STREAM_MASK << 16 | WIFI_STREAM;
+	uint64_t *root, ttbr;
+
+	if (wifi_space.on) {
+		return true;
+	}
+	lck_mtx_lock(&hakios_smmu_lock);
+	need(&apps_smmu);
+	scr0 = rd(apps_smmu.base + SMMU_SCR0);
+	idr0 = rd(apps_smmu.base + SMMU_IDR0);
+	idr1 = rd(apps_smmu.base + SMMU_IDR1);
+	matches = idr0 & 0xff;
+	contexts = idr1 & 0xff;
+	wifi_space.page = idr1 >> 31 ? 0x10000 : 0x1000;
+	wifi_space.pages = 2u << (idr1 >> 28 & 7);
+	if ((scr0 & 1u << 3) || 2 * wifi_space.pages * wifi_space.page != 0x100000) {
+		lck_mtx_unlock(&hakios_smmu_lock);
+		printf("mpss: wifi: the SMMU is not of the shape this knows (scr0 %#x, idr1 %#x)\n", scr0, idr1);
+		return false;
+	}
+	wifi_space.match = ~0u;
+	for (uint32_t n = 0; n < matches && SMMU_SMR(n) < 0xc00; n++) {
+		uint32_t smr = rd(apps_smmu.base + SMMU_SMR(n)), s2cr = rd(apps_smmu.base + SMMU_S2CR(n));
+
+		if (smr >> 31) {
+			used[s2cr & 0xff] = true;
+			if ((((smr & 0x7fff) ^ WIFI_STREAM) & ~(((smr >> 16) & 0x7fff) | WIFI_STREAM_MASK)) == 0) {
+				lck_mtx_unlock(&hakios_smmu_lock);
+				printf("mpss: wifi: match register %u covers the radio's stream already (smr %#x, s2cr %#x): left alone\n", n, smr,
+				    s2cr);
+				return false;
+			}
+		} else if (wifi_space.match == ~0u) {
+			wifi_space.match = n;
+			wifi_space.old_smr = smr;
+			wifi_space.old_s2cr = s2cr;
+		}
+	}
+	if (ipa_space.on) {
+		used[ipa_space.context] = true;
+	}
+	for (wifi_space.context = 0; wifi_space.context < contexts && used[wifi_space.context]; wifi_space.context++) {
+	}
+	if (wifi_space.match == ~0u || wifi_space.context >= contexts) {
+		lck_mtx_unlock(&hakios_smmu_lock);
+		printf("mpss: wifi: the SMMU has no match register or no context left\n");
+		return false;
+	}
+	apps_smmu_second.phys = apps_smmu.phys + wifi_space.page;
+	apps_smmu_wifi.phys = apps_smmu.phys + (wifi_space.pages + wifi_space.context) * wifi_space.page;
+	need(&apps_smmu_second);
+	need(&apps_smmu_wifi);
+	wifi_space.old_sctlr = rd(apps_smmu_wifi.base + SMMU_CB_SCTLR);
+	if (wifi_space.old_sctlr & 1) {
+		lck_mtx_unlock(&hakios_smmu_lock);
+		printf("mpss: wifi: context %u of the SMMU is switched on although no stream goes through it: left alone\n", wifi_space.context);
+		return false;
+	}
+	if (wifi_space.root == 0 &&
+	    kmem_alloc(kernel_map, &wifi_space.root, 4096, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		lck_mtx_unlock(&hakios_smmu_lock);
+		return false;
+	}
+	root = (uint64_t *)wifi_space.root;
+	bzero(root, 4096);
+	for (unsigned g = WIFI_SPACE_FIRST_GB; g < WIFI_SPACE_END_GB; g++) {
+		root[g] = ((uint64_t)g << 30) | IPA_BLOCK;
+	}
+	FlushPoC_DcacheRegion(wifi_space.root, 4096);
+	settle();
+	ttbr = kvtophys(wifi_space.root) | (uint64_t)wifi_space.context << 48;
+	printf("mpss: wifi: THE SMMU IS ABOUT TO BE WRITTEN: context %u gets our table (root %#llx: DDR from %#x to %#llx as it is, in "
+	    "1 GB blocks) and match register %u sends stream %#x mask %#x through it (before: smr %#x s2cr %#x, sctlr %#x)\n",
+	    wifi_space.context, ttbr & 0x0000fffffffff000ull, WIFI_SPACE_FIRST_GB << 30, (uint64_t)WIFI_SPACE_END_GB << 30,
+	    wifi_space.match, WIFI_STREAM, WIFI_STREAM_MASK, wifi_space.old_smr, wifi_space.old_s2cr, wifi_space.old_sctlr);
+	wr(apps_smmu_wifi.base + SMMU_CB_SCTLR, 0);
+	wr(apps_smmu_second.base + SMMU_CBA2R(wifi_space.context), SMMU_CBA2R_64_BIT);
+	wr(apps_smmu_second.base + SMMU_CBAR(wifi_space.context), SMMU_CBAR_STAGE_1);
+	wr(apps_smmu_wifi.base + SMMU_CB_TCR2, SMMU_TCR2);
+	wr(apps_smmu_wifi.base + SMMU_CB_TCR, SMMU_TCR_39_BITS);
+	wr(apps_smmu_wifi.base + SMMU_CB_TTBR0, (uint32_t)ttbr);
+	wr(apps_smmu_wifi.base + SMMU_CB_TTBR0 + 4, (uint32_t)(ttbr >> 32));
+	wr(apps_smmu_wifi.base + SMMU_CB_TTBR1, 0);
+	wr(apps_smmu_wifi.base + SMMU_CB_TTBR1 + 4, 0);
+	wr(apps_smmu_wifi.base + SMMU_CB_MAIR0, SMMU_MAIR0);
+	wr(apps_smmu_wifi.base + SMMU_CB_MAIR1, 0);
+	wr(apps_smmu_wifi.base + SMMU_CB_FSR, SMMU_FSR_ALL);
+	wr(apps_smmu_wifi.base + SMMU_CB_TLBIASID, wifi_space.context);
+	wr(apps_smmu_wifi.base + SMMU_CB_TLBSYNC, 1);
+	for (unsigned ms = 0; rd(apps_smmu_wifi.base + SMMU_CB_TLBSTATUS) & 1; ms++) {
+		if (ms == 100) {
+			lck_mtx_unlock(&hakios_smmu_lock);
+			printf("mpss: wifi: the SMMU does not finish forgetting old translations\n");
+			return false;
+		}
+		sleep_ms(1);
+	}
+	wr(apps_smmu_wifi.base + SMMU_CB_SCTLR, SMMU_SCTLR_ON);
+	wifi_space.on = true;
+	wr(apps_smmu.base + SMMU_S2CR(wifi_space.match), wifi_space.context);
+	wr(apps_smmu.base + SMMU_SMR(wifi_space.match), sees);
+	if (rd(apps_smmu.base + SMMU_SMR(wifi_space.match)) != sees ||
+	    (rd(apps_smmu.base + SMMU_S2CR(wifi_space.match)) & 0x300ff) != wifi_space.context ||
+	    !(rd(apps_smmu_wifi.base + SMMU_CB_SCTLR) & 1) || rd(apps_smmu_wifi.base + SMMU_CB_TTBR0) != (uint32_t)ttbr) {
+		lck_mtx_unlock(&hakios_smmu_lock);
+		printf("mpss: wifi: THE SMMU DID NOT TAKE WHAT WAS WRITTEN: stream %#x does not go through context %u (smr %#x s2cr %#x, "
+		    "sctlr %#x)\n", WIFI_STREAM, wifi_space.context, rd(apps_smmu.base + SMMU_SMR(wifi_space.match)),
+		    rd(apps_smmu.base + SMMU_S2CR(wifi_space.match)), rd(apps_smmu_wifi.base + SMMU_CB_SCTLR));
+		return false;
+	}
+	lck_mtx_unlock(&hakios_smmu_lock);
+	tell("mpss: wifi: THE RADIO'S STREAM %#x GOES THROUGH CONTEXT %u OF THE SMMU, DDR as it is (match register %u)\n", WIFI_STREAM,
+	    wifi_space.context, wifi_space.match);
+	return true;
+}
+
+void
+hakios_mpss_wifi_space_off(void)
+{
+	if (!wifi_space.on) {
+		return;
+	}
+	hakios_mpss_wifi_faults("at the end");
+	lck_mtx_lock(&hakios_smmu_lock);
+	wr(apps_smmu.base + SMMU_SMR(wifi_space.match), wifi_space.old_smr);
+	wr(apps_smmu.base + SMMU_S2CR(wifi_space.match), wifi_space.old_s2cr);
+	wr(apps_smmu_wifi.base + SMMU_CB_SCTLR, wifi_space.old_sctlr);
+	lck_mtx_unlock(&hakios_smmu_lock);
+	wifi_space.on = false;
+	printf("mpss: wifi: the radio's stream and context %u of the SMMU are put back as they were found\n", wifi_space.context);
 }
 
 static bool
@@ -5404,6 +5589,49 @@ wlfw_msa_back(void)
 		}
 	}
 	wlfw_regions = 0;
+}
+
+/*
+ * For ath10k's qmi.c (drivers/wifi/hakios.wifi10.c: qcom_scm_assign_mem()): the hypervisor's MP_ASSIGN of the MSA's
+ * regions, from the VMIDs in `from` (a bit each) to the (VMID, permission) pairs. What goes away from us is kept in
+ * wlfw_region[], and taken back by wlfw_msa_back() once the modem is in reset (dsp_shutdown()), as for step 11. 0, or -1.
+ */
+int
+hakios_mpss_assign(uint64_t pa, uint64_t size, uint64_t from, const int *vmid, const int *perm, unsigned count)
+{
+	uint32_t sources[4], to[4][2];
+	unsigned n = 0, i;
+	bool to_us, wlan_ce = false;
+
+	for (unsigned b = 0; b < 64 && n < 4; b++) {
+		if (from & 1ull << b) {
+			sources[n++] = b;
+		}
+	}
+	if (n == 0 || count == 0 || count > 4) {
+		return -1;
+	}
+	for (i = 0; i < count; i++) {
+		to[i][0] = (uint32_t)vmid[i];
+		to[i][1] = (uint32_t)perm[i];
+		wlan_ce |= vmid[i] == VMID_WLAN_CE;
+	}
+	if (!scm_assign("the Wi-Fi driver's MSA region", pa, (uint32_t)size, sources, n, to, count)) {
+		return -1;
+	}
+	to_us = count == 1 && vmid[0] == VMID_HLOS;
+	for (i = 0; i < wlfw_regions && wlfw_region[i].address != pa; i++) {
+	}
+	if (i == wlfw_regions && !to_us && wlfw_regions < sizeof(wlfw_region) / sizeof(wlfw_region[0])) {
+		wlfw_regions++;
+	}
+	if (i < wlfw_regions) {
+		wlfw_region[i].address = pa;
+		wlfw_region[i].size = (uint32_t)size;
+		wlfw_region[i].secure = !wlan_ce;
+		wlfw_region[i].ours = !to_us;
+	}
+	return 0;
 }
 
 /*

@@ -2,14 +2,25 @@
 # CONFIG_HAKIOS_<NAME>=y in a defconfig builds a driver into the kernel; "standard" files are always built.
 # tools/hakios-config.py reads this file; docs/drivers-config.md says what each word means and how it reaches XNU.
 
-driver WIFI
-	file    bsd/dev/hakios.wifi.c
-	file    bsd/dev/hakios.wlfw.c
+driver WIFILX
 	file    bsd/dev/hakios.lx.c
 	file    bsd/dev/hakios.sta.c
 	file    bsd/dev/hakios.apple80211.c
 	file    iokit/Kernel/hakios.wlan.cpp iokitcpp
-	requires QMI
+	help    The kernel's side of a Linux Wi-Fi driver's object (wifi/lx), the station and the Apple80211 surface Darwin's
+	help    wifid talks to: what WIFI (the reference phone's WCN6750) and WIFI10 (the OnePlus 6T's WCN3990) share
+
+driver WIFI
+	file    bsd/dev/hakios.wifi.c
+	file    bsd/dev/hakios.wlfw.c
+	requires QMI WIFILX
 	help    Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k
 	help    (its object, made by tools/mk-ath11k.sh, is linked in only with this), a station, and the Apple80211
 	help    surface Darwin's wifid talks to. Needs fw-wifi/ from the phone
+
+driver WIFI10
+	file    bsd/dev/hakios.wifi10.c
+	requires MPSS845 QMI WIFILX
+	help    The OnePlus 6T's Wi-Fi (wifi=1, with modem_step=10 modem_keep=1): the WCN3990 of the SDM845, whose firmware the
+	help    modem runs (drivers/modem/hakios.mpss845.c), Linux's ath10k (its object, made by tools/mk-ath10k.sh, is linked
+	help    in only with this), a station, and the Apple80211 surface. Not with WIFI (the two give the same names)

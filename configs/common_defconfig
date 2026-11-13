@@ -104,6 +104,8 @@ CONFIG_HAKIOS_VIRTIO_BLK=y
 
 # Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k (its object, made ... [hakios.wifi.c, hakios.wlfw.c, hakios.lx.c, hakios.sta.c, hakios.apple80211.c, hakios.wlan.cpp; requires CONFIG_HAKIOS_QMI]
 CONFIG_HAKIOS_WIFI=y
+CONFIG_HAKIOS_WIFILX=y
+# CONFIG_HAKIOS_WIFI10 is not set
 
 #
 # CPU, memory and boot (21)

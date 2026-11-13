@@ -379,6 +379,7 @@ static struct {
 	bool attached;
 } lx_vector[LX_VECTORS];
 static uint32_t lx_irq_first;                   /* the GIC's number of vector 0; 0: no interrupts */
+static bool lx_irq_level;                       /* wired lines, levels (the 6T's WCN3990): no MSI address was given */
 static uint32_t lx_irq_pending;                 /* the vectors that have fired and are not dealt with yet */
 static uint32_t lx_irq_running;                 /* the vectors whose function the thread is in */
 static thread_t lx_irq_thread;
@@ -436,6 +437,7 @@ lx_os_irq_msi(unsigned long long *address, unsigned *data)
 		return 0;
 	}
 	lx_irq_first = first;
+	lx_irq_level = *address == 0;
 	return 1;
 }
 
@@ -448,8 +450,8 @@ lx_os_irq_attach(unsigned vector, void (*function)(void *), void *argument)
 		return EINVAL;
 	}
 	if (lx_irq_thread == THREAD_NULL) {
-		hakios_wifi_tell("lx: wifi_irq: THE GIC'S DISTRIBUTOR IS WRITTEN for the radio's interrupts: each vector's SPI (%u + v) edge-"
-		    "triggered, group 1, routed to this processor, then enabled\n", lx_irq_first);
+		hakios_wifi_tell("lx: wifi_irq: THE GIC'S DISTRIBUTOR IS WRITTEN for the radio's interrupts: each vector's SPI (%u + v) %s, "
+		    "group 1, routed to this processor, then enabled\n", lx_irq_first, lx_irq_level ? "a level" : "edge-triggered");
 		if (kernel_thread_start(lx_irq_runs, NULL, &lx_irq_thread) != KERN_SUCCESS) {
 			lx_irq_thread = THREAD_NULL;
 			return ENOMEM;
@@ -461,7 +463,7 @@ lx_os_irq_attach(unsigned vector, void (*function)(void *), void *argument)
 	lx_vector[vector].argument = argument;
 	lx_vector[vector].attached = true;
 	lck_mtx_unlock(&lx_irq_lock);
-	if ((kr = gic_v3_spi_attach(lx_irq_first + vector, true, lx_irq_arrived, NULL)) != KERN_SUCCESS) {
+	if ((kr = gic_v3_spi_attach(lx_irq_first + vector, !lx_irq_level, lx_irq_arrived, NULL)) != KERN_SUCCESS) {
 		lck_mtx_lock(&lx_irq_lock);
 		lx_vector[vector].attached = false;
 		lck_mtx_unlock(&lx_irq_lock);

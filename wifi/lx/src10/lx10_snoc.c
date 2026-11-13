@@ -380,7 +380,7 @@ const uint32_t crc32_tab[256] = {
 static struct {
 	irq_handler_t handler, thread;
 	void *argument;
-	bool attached;
+	bool attached, disabled;        /* disabled: by the driver (disable_irq()), not to be unmasked behind its back */
 } lx10_irq[LX10_IRQS];
 static bool lx10_irq_ready;
 
@@ -389,9 +389,16 @@ lx10_irq_arrived(void *argument)
 {
 	unsigned vector = (unsigned)(uintptr_t)argument;
 
-	if (vector < LX10_IRQS && lx10_irq[vector].handler != NULL &&
-	    lx10_irq[vector].handler((int)vector, lx10_irq[vector].argument) == IRQ_WAKE_THREAD && lx10_irq[vector].thread != NULL) {
+	if (vector >= LX10_IRQS || lx10_irq[vector].handler == NULL) {
+		return;
+	}
+	if (lx10_irq[vector].handler((int)vector, lx10_irq[vector].argument) == IRQ_WAKE_THREAD && lx10_irq[vector].thread != NULL) {
 		lx10_irq[vector].thread((int)vector, lx10_irq[vector].argument);
+	}
+	/* the copy engines' interrupts are levels: the kernel masked this one when it came; snoc.c's handler has turned the
+	 * engine's own interrupt off (and NAPI turns it on again), so the line is let through again here */
+	if (lx10_irq[vector].attached && !lx10_irq[vector].disabled) {
+		lx_os_irq_enable(vector);
 	}
 }
 
@@ -424,7 +431,8 @@ lkpi_request_irq(struct device *dev, unsigned int irq, irq_handler_t handler, ir
 		return (-error);
 	}
 	lx10_irq[irq].attached = true;
-	if (!(flags & IRQF_NO_AUTOEN)) {
+	lx10_irq[irq].disabled = (flags & IRQF_NO_AUTOEN) != 0;
+	if (!lx10_irq[irq].disabled) {
 		lx_os_irq_enable(irq);
 	}
 	return (0);
@@ -434,6 +442,7 @@ int
 lkpi_enable_irq(unsigned int irq)
 {
 	if (irq < LX10_IRQS && lx10_irq[irq].attached) {
+		lx10_irq[irq].disabled = false;
 		lx_os_irq_enable(irq);
 	}
 	return (0);
@@ -443,6 +452,7 @@ void
 lkpi_disable_irq(unsigned int irq)
 {
 	if (irq < LX10_IRQS && lx10_irq[irq].attached) {
+		lx10_irq[irq].disabled = true;
 		lx_os_irq_disable(irq);
 	}
 }
@@ -670,7 +680,7 @@ lx_qmi_send_request(struct qmi_handle *qmi, struct sockaddr_qrtr *sq, struct qmi
 /* ---- FreeBSD's, as LinuxKPI's headers reach them ------------------------------------------------------- */
 
 const uint8_t rfc1042_header[6] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 };
-int linuxkpi_debug_80211;
+/* (linuxkpi_debug_80211: lx_80211.c's) */
 
 void
 DELAY(int usec)
@@ -690,7 +700,9 @@ pause_sbt(const char *wmesg, sbintime_t sbt, sbintime_t pr, int flags)
 	(void)wmesg;
 	(void)pr;
 	(void)flags;
+	lx_os_lock();                   /* (lx_os_sleep() sleeps on the layer's lock, as lx_pause_ms() does) */
 	lx_os_sleep(&nobody, ns != 0 ? ns : 1);
+	lx_os_unlock();
 	return (0);
 }
 
@@ -738,6 +750,164 @@ lkpi_hex_dump_to_buffer(const void *buf, size_t len, int rowsize, int groupsize,
 		linebuf[0] = 0;
 	}
 	return (0);
+}
+
+/* ---- the network device ath10k makes for NAPI alone (alloc_netdev_dummy()), and NAPI ---------------------- */
+
+struct net_device *
+linuxkpi_alloc_netdev(size_t private, const char *name, uint32_t assign, void (*setup)(struct net_device *))
+{
+	struct net_device *ndev = lkpi_kmalloc(sizeof(*ndev) + private, GFP_KERNEL | __GFP_ZERO);
+
+	(void)assign;
+	if (ndev == NULL) {
+		return (NULL);
+	}
+	strlcpy(ndev->name, name, sizeof(ndev->name));
+	if (setup != NULL) {
+		setup(ndev);
+	}
+	return (ndev);
+}
+
+void
+linuxkpi_free_netdev(struct net_device *ndev)
+{
+	lkpi_kfree(ndev);
+}
+
+void
+netif_threaded_enable(struct net_device *dev)
+{
+	(void)dev;
+}
+
+/*
+ * NAPI: what a copy engine's interrupt schedules is polled on one thread of the layer's, as Linux's softirq would,
+ * until the poll says it is done (napi_complete()). The state's bits: scheduled, disabled, polled right now.
+ */
+#define LX10_NAPI_MAX           4
+#define NAPI_SCHEDULED          (1ul << 0)
+#define NAPI_DISABLED           (1ul << 1)
+#define NAPI_POLLING            (1ul << 2)
+static struct napi_struct *lx10_napi[LX10_NAPI_MAX];
+static bool lx10_napi_thread;
+static int lx10_napi_work;              /* (what the thread sleeps on) */
+
+static void
+lx10_napi_runs(void *argument)
+{
+	(void)argument;
+	lx_os_lock();
+	for (;;) {
+		bool polled = false;
+
+		for (unsigned i = 0; i < LX10_NAPI_MAX; i++) {
+			struct napi_struct *n = lx10_napi[i];
+			int done;
+
+			if (n == NULL || (n->state & (NAPI_SCHEDULED | NAPI_DISABLED)) != NAPI_SCHEDULED) {
+				continue;
+			}
+			n->state |= NAPI_POLLING;
+			lx_os_unlock();
+			done = n->poll(n, n->budget);
+			lx_os_lock();
+			n->state &= ~NAPI_POLLING;
+			lx_os_wakeup(n);
+			polled = true;
+			(void)done;
+		}
+		if (!polled) {
+			lx_os_sleep(&lx10_napi_work, 0);
+		}
+	}
+}
+
+void
+linuxkpi_netif_napi_add(struct net_device *ndev, struct napi_struct *napi, int (*poll)(struct napi_struct *, int))
+{
+	napi->dev = ndev;
+	napi->poll = poll;
+	napi->budget = 64;
+	napi->state = NAPI_DISABLED;    /* (as Linux's: off until napi_enable()) */
+	lx_os_lock();
+	for (unsigned i = 0; i < LX10_NAPI_MAX; i++) {
+		if (lx10_napi[i] == NULL) {
+			lx10_napi[i] = napi;
+			break;
+		}
+	}
+	lx_os_unlock();
+	if (!lx10_napi_thread && lx_os_thread("wifi-napi", lx10_napi_runs, NULL) == 0) {
+		lx10_napi_thread = true;
+	}
+}
+
+void
+linuxkpi_netif_napi_del(struct napi_struct *napi)
+{
+	lx_os_lock();
+	for (unsigned i = 0; i < LX10_NAPI_MAX; i++) {
+		if (lx10_napi[i] == napi) {
+			lx10_napi[i] = NULL;
+		}
+	}
+	lx_os_unlock();
+}
+
+bool
+linuxkpi_napi_schedule(struct napi_struct *napi)
+{
+	bool now;
+
+	lx_os_lock();
+	now = (napi->state & (NAPI_SCHEDULED | NAPI_DISABLED)) == 0;
+	if (now) {
+		napi->state |= NAPI_SCHEDULED;
+		lx_os_wakeup(&lx10_napi_work);
+	}
+	lx_os_unlock();
+	return (now);
+}
+
+bool
+linuxkpi_napi_complete(struct napi_struct *napi)
+{
+	lx_os_lock();
+	napi->state &= ~NAPI_SCHEDULED;
+	lx_os_unlock();
+	return (true);
+}
+
+void
+linuxkpi_napi_enable(struct napi_struct *napi)
+{
+	lx_os_lock();
+	napi->state &= ~(NAPI_DISABLED | NAPI_SCHEDULED);
+	lx_os_unlock();
+}
+
+void
+linuxkpi_napi_synchronize(struct napi_struct *napi)
+{
+	lx_os_lock();
+	while (napi->state & NAPI_POLLING) {
+		lx_os_sleep(napi, 0);
+	}
+	lx_os_unlock();
+}
+
+void
+linuxkpi_napi_disable(struct napi_struct *napi)
+{
+	lx_os_lock();
+	napi->state |= NAPI_DISABLED;
+	while (napi->state & NAPI_POLLING) {
+		lx_os_sleep(napi, 0);
+	}
+	napi->state &= ~NAPI_SCHEDULED;
+	lx_os_unlock();
 }
 
 /* ---- the kernel's way in (sys/hakios.lx.h) ------------------------------------------------------------------ */

@@ -93,10 +93,13 @@ void hakios_adreno_stop(void) {}
 void hakios_adreno_minute(void) {}
 #endif
 
-#ifndef HAKIOS_WIFI
+#if !defined(HAKIOS_WIFI) && !defined(HAKIOS_WIFI10)
 void hakios_wifi_init(void) {}
 void hakios_wifi_stop(void) {}
 void hakios_wifi_quiesce(void) {}
+#endif
+
+#ifndef HAKIOS_WIFILX
 errno_t hakios_apple80211_ioctl(__unused u_long command, __unused void *data) { return EOPNOTSUPP; }
 void HakiosWLANStart(__unused const char *interface, __unused const uint8_t *address) {}
 #endif

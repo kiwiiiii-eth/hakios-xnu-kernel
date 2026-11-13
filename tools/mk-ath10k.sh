@@ -115,14 +115,14 @@ compile() {		# compile SOURCE OBJECT [FLAGS]: only when the object is older than
 	$CC $CFLAGS "$@" -MMD -MF "$obj.d" -c "$src" -o "$obj" 2> "$obj.err" || rm -f "$obj"
 }
 for f in $DRIVER; do compile src/$f.c obj/ath10k_$f.o $DFLAGS & done
-for f in "$W"/src/lx_base.c "$W"/src10/*.c; do [ -f "$f" ] && compile "$f" obj/lx_$(basename "$f" .c).o $DFLAGS -I$W/src & done
+for f in "$W"/src/lx_base.c "$W"/src/lx_80211.c "$W"/src/lx_wpa.c "$W"/src10/*.c; do [ -f "$f" ] && compile "$f" obj/lx_$(basename "$f" .c).o $DFLAGS -I$W/src & done
 wait
 bad=
 for f in obj/*.err; do
 	[ -s "$f" ] && [ ! -f "${f%.err}" ] && { echo "--- $(basename "$f" .o.err)"; grep -m6 -A3 "error:" "$f"; bad=1; }
 done
 [ -z "$bad" ] || exit 1
-OBJECTS=$(for f in $DRIVER; do echo obj/ath10k_$f.o; done; echo obj/lx_lx_base.o; for f in "$W"/src10/*.c; do echo obj/lx_$(basename "$f" .c).o; done)
+OBJECTS=$(for f in $DRIVER; do echo obj/ath10k_$f.o; done; echo obj/lx_lx_base.o obj/lx_lx_80211.o obj/lx_lx_wpa.o; for f in "$W"/src10/*.c; do echo obj/lx_$(basename "$f" .c).o; done)
 
 # --- tie it all into one object. What it then still wants is one of three things: a call of the
 # kernel's (hakios.lx.h; the QMI helpers; the handful of C library functions XNU has under the same

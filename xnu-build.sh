@@ -7,6 +7,10 @@ cd "$XNU_SRC" || exit 1
 LX=$XNUDEPS/build/ath11k/out/ath11k.o
 # ... only into a kernel that has the Wi-Fi driver (CONFIG_HAKIOS_WIFI): the object's calls are answered by hakios.lx.c
 if [ -f config/MASTER.hakios ] && ! grep -q '^#  HAKIOS_DRIVERS = \[.* hakios_wifi ' config/MASTER.hakios; then LX=/nonexistent; fi
+# ... or, for the OnePlus 6T (CONFIG_HAKIOS_WIFI10), ath10k's (tools/mk-ath10k.sh)
+if [ -f config/MASTER.hakios ] && grep -q '^#  HAKIOS_DRIVERS = \[.* hakios_wifi10 ' config/MASTER.hakios; then
+	LX=$XNUDEPS/build/ath10k/out/ath10k.o
+fi
 STAMP=BUILD/obj/hakios-objects
 mtime() { if [ "$XNU_HOST_OS" = Darwin ]; then stat -f %m "$1"; else stat -c %Y "$1"; fi; }
 if [ -f "$LX" ]; then now="$LX $(mtime "$LX")"; else LX= now=; fi

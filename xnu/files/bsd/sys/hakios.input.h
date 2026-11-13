@@ -89,6 +89,12 @@ void hakios_adreno_minute(void);       /* once a minute: a line about how warm t
 void hakios_wifi_init(void);           /* boot-arg wifi=1: the phone's Wi-Fi; wifi_step=N: the first N steps of it */
 void hakios_adsp_init(void);           /* boot-arg adsp=1: the phone's audio DSP started and linked; adsp_step=N: the first N steps */
 void hakios_mpss_init(void);           /* boot-arg modem=1: the phone's modem started and linked; modem_step=N: the first N steps */
+/* the 6T's modem driver (drivers/modem/hakios.mpss845.c) for the 6T's Wi-Fi (drivers/wifi/hakios.wifi10.c, ath10k) */
+const uint8_t *hakios_mpss_root_file(const char *name, uint64_t *size);    /* a file of /fw, whole, never given back */
+int hakios_mpss_assign(uint64_t pa, uint64_t size, uint64_t from, const int *vmid, const int *perm, unsigned count); /* MP_ASSIGN */
+bool hakios_mpss_wifi_space(void);     /* the radio's SMMU stream (0x40) through a context of ours: DDR as it is */
+void hakios_mpss_wifi_space_off(void); /* ... and put back */
+void hakios_mpss_wifi_faults(const char *when);    /* what the SMMU has refused the radio, said */
 void hakios_wifi_stop(void);           /* where a run ends in order: the Wi-Fi DSP, if it was started, shut down */
 int hakios_wifi_say(const char *format, ...) __printflike(1, 2);      /* a line of the Wi-Fi steps' log */
 int hakios_wifi_tell(const char *format, ...) __printflike(1, 2);     /* ... one that is said even with wifi=1 */

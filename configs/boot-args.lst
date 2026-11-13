@@ -176,6 +176,7 @@ haptic_ms	k
 haptic_strength	k
 hv_wdt_pet	k
 ipa845	k
+ipa_gsi_look	k
 ipa_iram_look	k
 loader_return_after	kl
 m2v_utrace	u

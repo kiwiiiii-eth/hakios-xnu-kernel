@@ -2035,12 +2035,15 @@ ipa_status(const char *when)
 	need(&ipa_regs);
 	need(&ipa_sram);
 	need(&gsi_ee0);
+	bb_say("ipa: status: the IPA's 0x54\n");
 	shared = rd(ipa_regs.base + 0x54);
+	bb_say("ipa: status: its shared memory\n");
 	uc0 = rd(ipa_sram.base + 0x00);         /* command (byte 0) */
 	uc3 = rd(ipa_sram.base + 0x0c);         /* response (byte 0) */
 	uc5 = rd(ipa_sram.base + 0x14);         /* event (byte 0) */
 	uc7 = rd(ipa_sram.base + 0x1c);         /* first error address */
 	uc8 = rd(ipa_sram.base + 0x20);         /* hw_state (byte 0), warning counter (byte 1) */
+	bb_say("ipa: status: GSI's EE 0\n");
 	gsi = rd(gsi_ee0.base + 0x000);         /* GSI_STATUS */
 	error = rd(gsi_ee0.base + 0x200);       /* ERROR_LOG */
 	tell("mpss: ipa: %s: shared memory %#x (offset %u, %u bytes); uC command %#x response %#x (1: booted) event %#x error address %#x "
@@ -2771,6 +2774,10 @@ ipa_firmware_load(void)
 	{
 		struct block gsi = { "gsi", 0x01e04000, 0xc000 };       /* GSI_CFG at 0, MCS_CFG at 0xb000 (the panic of cycle 26: 0x1000 mapped) */
 
+		/* (GSI 2.x's layout: not read on the 6T's GSI 1.3, run 62, unless ipa_gsi_look=1) */
+		if (!option("ipa_gsi_look")) {
+			goto gsi_looked;
+		}
 		need(&gsi);
 		tell("mpss: %u: GSI_CFG %#x (bit 0 GSI enable, 1 MCS enable, 2 double MCS clock, 3 uC is MCS, 4 power collapse, 5 bypass matrix off, "
 		    "[11:8] sleep clock divider), MCS_CFG %#x (bit 0: the sequencer runs)\n", step, rd(gsi.base + 0), rd(gsi.base + 0xb000));
@@ -2788,11 +2795,16 @@ ipa_firmware_load(void)
 			    rd(gsi_ee0.base + 0));
 		}
 	}
+gsi_looked:
 	sleep_ms(50);
 	if (!option("modem_ipa_quiet")) {
 		ipa_status("after its firmware's start");
 	}
-	if (!option("modem_ipa_raw")) {
+	/*
+	 * (Not on the 6T yet, run 62: Android's IPA 4.11 values, written to an IPA 3.5.1 and a GSI 1.3, hung the bus -- the
+	 * secure watchdog right after TrustZone started the firmware. ipa845=8 once they are the 6T's.)
+	 */
+	if (ipa_stage >= 8 && !option("modem_ipa_raw")) {
 		ipa_memory_init();
 		ipa_hardware_init();
 		/* this processor's own channels and endpoints, and the IPA's tables, before the modem (hakios.ipa.c); then en1 on them */

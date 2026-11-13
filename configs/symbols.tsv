@@ -176,6 +176,7 @@ GPU_LOG	arg	gpu_log	GPU and display	k	hakios.a630.c,hakios.adreno.c
 HAPTIC_EFFECT	arg	haptic_effect	Haptics and torch	k	hakios.haptic.c	
 HAPTIC_MS	arg	haptic_ms	User space	k	hakios.haptic8998.c	
 HAPTIC_STRENGTH	arg	haptic_strength	User space	k	hakios.haptic8998.c	
+HID_RESOURCE	arg	hid_resource	User space	k	hakios.hidres.c	neither (the default is on, for bluetoothd's keyboards and mice)
 IPA8	arg	ipa8	User space	k	hakios.mpss845.c	the IPA 3.5.1 is set up before the modem (its firmware, memory, hardware, our data path): the entry
 IPA_GSI_LOOK	arg	ipa_gsi_look	User space	k	hakios.mpss845.c	
 IPA_IRAM_LOOK	arg	ipa_iram_look	User space	k	hakios.mpss845.c	

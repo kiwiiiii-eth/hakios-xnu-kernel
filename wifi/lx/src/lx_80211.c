@@ -482,15 +482,39 @@ linuxkpi_ieee80211_handle_wake_tx_queue(struct ieee80211_hw *hw, struct ieee8021
 {
 }
 
+/*
+ * What became of a frame we sent: whether the access point acknowledged it (run 40: DHCP unanswered; was it
+ * heard?). The first eight once a network is joined are said, then every 64th, with the counts so far.
+ */
+static void
+tx_noted(struct lx_radio *radio, const struct ieee80211_tx_info *info, unsigned length)
+{
+	static unsigned acked, unacked;
+	bool ack = (info->flags & IEEE80211_TX_STAT_ACK) != 0;
+
+	if (!radio->joined) {
+		return;
+	}
+	ack ? acked++ : unacked++;
+	if (acked + unacked <= 8 || (acked + unacked) % 64 == 0) {
+		printf("lx: a frame of %u bytes sent: %s; so far %u acknowledged, %u not\n", length, ack ? "ACKNOWLEDGED" :
+		    "NOT ACKNOWLEDGED", acked, unacked);
+	}
+}
+
 void
 linuxkpi_ieee80211_tx_status(struct ieee80211_hw *hw, struct sk_buff *skb)
 {
+	tx_noted(radio_of(hw), IEEE80211_SKB_CB(skb), skb->len);
 	dev_kfree_skb_any(skb);
 }
 
 void
 linuxkpi_ieee80211_tx_status_ext(struct ieee80211_hw *hw, struct ieee80211_tx_status *status)
 {
+	if (status->info != NULL) {
+		tx_noted(radio_of(hw), status->info, status->skb != NULL ? status->skb->len : 0);
+	}
 	if (status->skb != NULL) {
 		dev_kfree_skb_any(status->skb);
 	}

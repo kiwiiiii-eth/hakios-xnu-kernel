@@ -1989,7 +1989,7 @@ static uint32_t pas_ipa = PAS_IPA_DEFAULT;
  * which starts it, never answered INIT_DRIVER. Should the microcontroller fetch its code from DDR at
  * the address Android uses, this is why. modem_ipa_fw_at=ADDRESS chooses (0x8b700000 allows 0x1a000).
  */
-static uint32_t ipa_fw_memory = 0x8b710000u, ipa_fw_size = 0xa000u;
+static uint32_t ipa_fw_memory = 0x8c400000u, ipa_fw_size = 0x10000u;      /* the 6T: dt ipa_fw_mem, ipa-fw@8c400000 (64 KB) */
 
 
 /*
@@ -1999,8 +1999,8 @@ static uint32_t ipa_fw_memory = 0x8b710000u, ipa_fw_size = 0xa000u;
  * status (bit 0: the GSI firmware is enabled) and error log, for our execution environment.
  */
 static struct block ipa_regs = { "ipa", 0x01e40000, 0x1000 };
-static struct block ipa_sram = { "ipa-shared", 0x01e50000, 0x4000 };  /* the local memory: 0x3000 bytes (SHARED_MEM_SIZE) */
-static struct block gsi_ee0 = { "gsi-ee0", 0x01e16000, 0x1000 };
+static struct block ipa_sram = { "ipa-shared", 0x01e47000, 0x2000 };  /* the local memory (the 6T, SDM845: dt ipa-shared, 0x2000) */
+static struct block gsi_ee0 = { "gsi-ee0", 0x01e23000, 0x1000 };       /* GSI 1.3 (IPA 3.5.1): its EE registers at 0x1f000, not 0x12000 */
 
 static void
 ipa_status(const char *when)
@@ -2151,8 +2151,8 @@ ipa_hardware_init(void)
  * gives the IPA's streams the mask 0, so each takes a match register of its own, with the mask 0,
  * both sending to the one context.
  */
-#define IPA_STREAM_DEFAULT      0x480u
-#define IPA_STREAM_UC_DEFAULT   0x482u          /* the IPA's microcontroller: its own match register */
+#define IPA_STREAM_DEFAULT      0x720u          /* the 6T (SDM845): dt iommus of ipa, <&apps_smmu 0x720 0x0> */
+#define IPA_STREAM_UC_DEFAULT   0x722u          /* the IPA's microcontroller: its own match register (the 6T: 0x722) */
 static uint32_t ipa_stream = IPA_STREAM_DEFAULT, ipa_stream_uc = IPA_STREAM_UC_DEFAULT;  /* dt: iommus of ipa_smmu_ap and ipa_smmu_uc */
 #define IPA_SPACE_BASE          0x80000000ull   /* a gigabyte from here, as it is */
 #define IPA_IMEM_DEFAULT        0x14600000u   /* the 2 MB block that holds the SoC internal memory (dt: qcom,msm-imem) */
@@ -2240,7 +2240,7 @@ ipa_space_on(void)
 	contexts = idr1 & 0xff;
 	ipa_space.page = idr1 >> 31 ? 0x10000 : 0x1000;
 	ipa_space.pages = 2u << (idr1 >> 28 & 7);
-	if ((scr0 & 1u << 3) || 2 * ipa_space.pages * ipa_space.page != 0x100000) {
+	if ((scr0 & 1u << 3) || 2 * ipa_space.pages * ipa_space.page < 0x100000) {      /* (the 6T's: 64 pages of 4K a side, as for Wi-Fi) */
 		lck_mtx_unlock(&hakios_smmu_lock);
 		printf("mpss: ipa: the SMMU is not of the shape this knows (scr0 %#x, idr1 %#x)\n", scr0, idr1);
 		return false;
@@ -2563,7 +2563,7 @@ ipa_firmware_load(void)
 	bool ok = false;
 
 	PE_parse_boot_argn("modem_ipa_fw_at", &ipa_fw_memory, sizeof(ipa_fw_memory));
-	ipa_fw_size = ipa_fw_memory == 0x8b700000u ? 0x1a000u : 0xa000u;
+	ipa_fw_size = ipa_fw_memory == 0x8c400000u ? 0x10000u : ipa_fw_memory == 0x8b700000u ? 0x1a000u : 0xa000u;
 	announce("turn the IPA's clock on (RPMh), load the IPA's firmware (image 15) into its memory and have TrustZone start it, as "
 	    "Android does before the modem");
 	printf("mpss: %u: the IPA's image goes at %#x (%#x bytes allowed)\n", step, ipa_fw_memory, ipa_fw_size);
@@ -2579,7 +2579,7 @@ ipa_firmware_load(void)
 		 * on the first phone, something else on another SoC); soc_ipa_fw= overrides the name */
 		char fw[80], path[96];
 
-		strlcpy(fw, "yupik_ipa_fws", sizeof(fw));
+		strlcpy(fw, "ipa_fws", sizeof(fw));       /* the 6T: pmOS's ipa_fws.mbn, split into .mdt and .b02-.b04 */
 		PE_parse_boot_argn("soc_ipa_fw", fw, sizeof(fw));
 		snprintf(path, sizeof(path), "image/%s.mdt", fw);
 		header = root_file(path, &header_size);
@@ -2590,7 +2590,7 @@ ipa_firmware_load(void)
 	}
 	count = header_size >= 52 ? header[44] | header[45] << 8 : 0;
 	if (memcmp(header, "\177ELF\1", 5) != 0 || count == 0 || count > 8 || 52 + 32 * count > header_size) {
-		printf("mpss: %u: yupik_ipa_fws.mdt is not such a header (%u segments)\n", step, count);
+		printf("mpss: %u: the IPA's .mdt is not such a header (%u segments)\n", step, count);
 		goto out;
 	}
 	/* (the image is relocatable, bit 27 of the flags: its addresses count from the lowest, which goes at the region's start) */
@@ -2625,7 +2625,7 @@ ipa_firmware_load(void)
 			goto out;
 		}
 		if (segments[i].file_size != 0) {
-			snprintf(name, sizeof(name), "image/yupik_ipa_fws.b%02u", i);
+			snprintf(name, sizeof(name), "image/ipa_fws.b%02u", i);
 			segment_file[i] = root_file(name, &segment_size[i]);
 			if (segment_file[i] == NULL || segment_size[i] != segments[i].file_size) {
 				printf("mpss: %u: fw/%s: %s\n", step, name, segment_file[i] == NULL ? "not there" : "not the size the header says");
@@ -7018,6 +7018,18 @@ step_nas(void)
 
 	if (!glink.channel[CHANNEL_QRTR].open) {
 		return false;
+	}
+	/*
+	 * The IPA, first part (ipa845=1): its clock, its SMMU streams, its firmware through TrustZone (image 15, pmOS's
+	 * ipa_fws into ipa_fw_mem), then its status read -- nothing more, and the modem not told of it (no SMP2P "ipa",
+	 * no QMI): what the 6T's IPA is, before the modem is asked to use it (run 53: without it, LTE makes the modem assert).
+	 */
+	if (option("ipa845") && !ipa_loaded) {
+		ipa_loaded = ipa_firmware_load();
+		if (ipa_loaded) {
+			ipa_status("its firmware loaded (ipa845=1; the modem not told)");
+			ipa_space_faults("its firmware loaded");
+		}
 	}
 	PE_parse_boot_argn("modem_nas_wait", &wait_seconds, sizeof(wait_seconds));
 	PE_parse_boot_argn("modem_online", &online, sizeof(online));

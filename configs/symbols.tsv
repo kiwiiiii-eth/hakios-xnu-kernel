@@ -154,6 +154,7 @@ GPU_LOG	arg	gpu_log	GPU and display	k	hakios.a630.c,hakios.adreno.c
 HAPTIC_EFFECT	arg	haptic_effect	Haptics and torch	k	hakios.haptic.c	
 HAPTIC_MS	arg	haptic_ms	User space	k	hakios.haptic8998.c	
 HAPTIC_STRENGTH	arg	haptic_strength	User space	k	hakios.haptic8998.c	
+IPA845	arg	ipa845	User space	k	hakios.mpss845.c	
 M2V_UTRACE	arg	m2v_utrace	User space	u	HakiosMetalCA.m	Turnip's GPU trace of every render pass (u_trace) into a file, printed during the run
 MACHINE_NAME	arg	machine_name	CPU, memory and boot	k	GenericARMPE.cpp	
 MEMBENCH	arg	membench	CPU, memory and boot	k	hakios.cpufreq.c	

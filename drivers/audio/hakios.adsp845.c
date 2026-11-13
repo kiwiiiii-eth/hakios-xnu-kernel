@@ -143,7 +143,7 @@ static LCK_GRP_DECLARE(adsp_lock_group, "hakios-adsp845");
 
 static void bb_say(const char *format, ...) __printflike(1, 2);
 
-#define STEPS                   24
+#define STEPS                   25
 #define FIRST_INDEPENDENT_STEP  12      /* the steps from here on do not need the DSP (800 of adsp8=N leaves it alone) */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
@@ -5687,7 +5687,8 @@ mic_ngd_answer(uint8_t tid, uint8_t *data, uint32_t room, unsigned ms)
 static uint8_t
 mic_laddr(const uint8_t ea[6], const char *what)
 {
-	for (unsigned tries = 0; tries < 5; tries++) {
+	/* (r114: five tries in the first ~0.3 s after the reset all had an empty answer: the device needs its time to report present) */
+	for (unsigned tries = 0; tries < 30; tries++) {
 		uint8_t q[10] = { 9 | 2 << 5, 0x0d, 0xff, mic_tid, ea[0], ea[1], ea[2], ea[3], ea[4], ea[5] }, r[16] = { 0 };
 		uint8_t tid = mic_tid++;
 		uint32_t n;
@@ -5701,8 +5702,12 @@ mic_laddr(const uint8_t ea[6], const char *what)
 			printf("adsp845: %u: SLIMbus: %s has logical address %#x\n", step, what, r[6]);
 			return r[6];
 		}
-		printf("adsp845: %u: SLIMbus: %s: %s (try %u)\n", step, what, n ? "not on the bus (an empty answer)" : "no answer", tries + 1);
-		sleep_ms(20);
+		if (tries % 5 == 0) {
+			printf("adsp845: %u: SLIMbus: %s: %s (try %u; the NGD's status %#x, its interrupts %#x)\n", step, what,
+			    n ? "not on the bus (an empty answer)" : "no answer", tries + 1, get(&mic_ngd, "ngd 1 status", 0x1004),
+			    get(&mic_ngd, "ngd 1 interrupts", 0x1014));
+		}
+		sleep_ms(100);
 	}
 	return 0;
 }
@@ -5787,8 +5792,10 @@ mic_codec_up(void)
 	put(&mic_pins[1].page, "control (an output)", 0, 1u << 9 | 1u << 6);
 	sleep_ms(20);
 	put(&mic_pins[1].page, "I/O (high: the codec runs)", 4, 2);
-	sleep_ms(20);
-	printf("adsp845: %u: the codec's reset released\n", step);
+	sleep_ms(100);
+	printf("adsp845: %u: the codec's reset released 100 ms ago (gpio64 reads %u; gpio70-72 functions %u %u %u)\n", step,
+	    get(&mic_pins[1].page, "I/O", 4) & 1, (get(&mic_pins[2].page, "control", 0) >> 2) & 0xf,
+	    (get(&mic_pins[3].page, "control", 0) >> 2) & 0xf, (get(&mic_pins[4].page, "control", 0) >> 2) & 0xf);
 	mic_la_ifd = mic_laddr(ea_ifd, "the codec's interface device");
 	mic_la_codec = mic_laddr(ea_codec, "the codec");
 	if (mic_la_codec == 0 || mic_la_ifd == 0) {
@@ -5843,6 +5850,384 @@ step_mic_codec(void)
 	return ok;
 }
 
+/* ---- M5..M7: the codec's capture path, the DSP's (AFE 0x4001, ADM, ASM reading), the SLIMbus channel, and what it hears ------ */
+#define MIC_AFE_PORT            0x4001u         /* AFE_PORT_ID_SLIMBUS_MULTI_CHAN_0_TX */
+#define MIC_ASM_PORT            (2 << 8 | 1)    /* session 2, stream 1 */
+#define MIC_CHANNEL             128u            /* the SLIMbus data channel (Linux's sdm845 machine: tx_ch 128..) */
+#define MIC_READ_TOKEN          0x40000000u
+#define MIC_PERIOD_FRAMES       960u            /* 20 ms, one channel of 16 bits */
+#define AFE_PARAM_ID_SLIMBUS_CONFIG     0x00010212u
+#define ASM_STREAM_CMD_OPEN_READ_V3     0x00010db4u
+#define ASM_STREAM_CMD_SET_ENCDEC_PARAM 0x00010c10u
+#define ASM_PARAM_ID_ENC_CFG_BLK_V2     0x00010da3u
+#define ASM_DATA_CMD_READ_V2            0x00010dacu
+#define ASM_DATA_EVENT_READ_DONE_V2     0x00010d9au
+
+static volatile uint32_t mic_returned, mic_reads, mic_read_errors;
+static volatile uint64_t mic_sum_squares, mic_frames_heard;
+static volatile uint32_t mic_peak;
+
+static bool
+mic_events(uint8_t service, __unused uint16_t port, uint32_t opcode, uint32_t token, const uint32_t *payload, uint32_t length)
+{
+	if (service != S_ASM || !(token & MIC_READ_TOKEN)) {
+		return false;
+	}
+	if (opcode == ASM_DATA_EVENT_READ_DONE_V2 || opcode == APR_BASIC_RSP_RESULT) {
+		unsigned period = token & 31;
+
+		if (opcode == APR_BASIC_RSP_RESULT || length < 24 || payload[0] != 0) {
+			os_atomic_inc(&mic_read_errors, relaxed);
+		} else {
+			uint32_t bytes = payload[4] < 4096 ? payload[4] : 4096, peak = mic_peak;
+			const int16_t *samples = (const int16_t *)(s5_buffer + 4096 * period + (payload[5] < 4096 ? payload[5] : 0));
+			uint64_t squares = 0;
+
+			for (vm_offset_t line = s5_buffer + 4096 * period; line < s5_buffer + 4096 * (period + 1); line += 64) {
+				__asm__ volatile ("dc ivac, %0" : : "r" (line));
+			}
+			__asm__ volatile ("dsb sy");
+			for (uint32_t i = 0; i < bytes / 2; i++) {
+				int32_t v = samples[i];
+
+				squares += (uint64_t)((int64_t)v * v);
+				peak = (uint32_t)(v < 0 ? -v : v) > peak ? (uint32_t)(v < 0 ? -v : v) : peak;
+			}
+			mic_sum_squares += squares;
+			mic_frames_heard += bytes / 2;
+			mic_peak = peak;
+		}
+		os_atomic_inc(&mic_reads, relaxed);
+		os_atomic_or(&mic_returned, 1u << period, relaxed);
+		return true;
+	}
+	return false;
+}
+
+static bool
+mic_read(unsigned period, uint32_t handle)
+{
+	uint32_t read[5] = { (uint32_t)(s5_address + 4096 * period), (uint32_t)((s5_address + 4096 * period) >> 32), handle,
+		             MIC_PERIOD_FRAMES * 2, period };
+
+	return apr_exchange(S_ASM, MIC_ASM_PORT, MIC_READ_TOKEN | period, false, ASM_DATA_CMD_READ_V2, read, sizeof(read), 0, NULL);
+}
+
+static uint32_t
+isqrt64(uint64_t v)
+{
+	uint64_t r = 0, bit = 1ull << 62;
+
+	while (bit > v) {
+		bit >>= 2;
+	}
+	while (bit) {
+		if (v >= r + bit) {
+			v -= r + bit;
+			r = (r >> 1) + bit;
+		} else {
+			r >>= 1;
+		}
+		bit >>= 2;
+	}
+	return (uint32_t)r;
+}
+
+/* listen for ms: the periods given back are posted again; the RMS and peak of what came */
+static uint32_t
+mic_listen(const char *what, unsigned ms, uint32_t handle)
+{
+	uint64_t began = now_us();
+	uint32_t rms;
+
+	mic_sum_squares = 0;
+	mic_frames_heard = 0;
+	mic_peak = 0;
+	while (now_us() - began < (uint64_t)ms * 1000) {
+		uint32_t back = mic_returned;
+
+		if (back != 0) {
+			os_atomic_andnot(&mic_returned, back, relaxed);
+			for (unsigned n = 0; n < 8; n++) {
+				if (back & 1u << n) {
+					mic_read(n, handle);
+				}
+			}
+		}
+		sleep_ms(2);
+	}
+	rms = mic_frames_heard ? isqrt64(mic_sum_squares / mic_frames_heard) : 0;
+	printf("adsp845: %u: HEARD (%s): %llu frames in %u ms, RMS %u, peak %u (of 32768); reads %u, errors %u\n", step, what,
+	    mic_frames_heard, ms, rms, mic_peak, mic_reads, mic_read_errors);
+	return rms;
+}
+
+/* a codec register's bits: read, change under mask, write, read back */
+static bool
+mic_codec_update(uint16_t r, uint8_t mask, uint8_t value, const char *what)
+{
+	uint8_t old = 0;
+
+	if (!mic_codec_read(r, &old)) {
+		return false;
+	}
+	return mic_codec_write(r, (uint8_t)((old & ~mask) | (value & mask)), what);
+}
+
+/* a user message to the manager waiting for its GENERIC_ACK (the tid is the payload's last byte but the channels) */
+static bool
+mic_ngd_user(uint8_t mc, const uint8_t *payload, uint32_t n, uint8_t tid, const char *what)
+{
+	uint8_t q[MIC_MSG_LEN] = { (uint8_t)((n + 2) | 2 << 5), mc, 0xff }, r[16];
+
+	memcpy(q + 3, payload, n);
+	if (!mic_ngd_send(q, 3 + n, what)) {
+		return false;
+	}
+	if (mic_ngd_answer(tid, r, sizeof(r), 500) == 0) {
+		printf("adsp845: %u: SLIMbus %s: NO ACKNOWLEDGEMENT\n", step, what);
+		return false;
+	}
+	printf("adsp845: %u: SLIMbus %s: acknowledged (%02x %02x)\n", step, what, r[0], r[1]);
+	return true;
+}
+
+static bool
+mic_codec_capture_on(void)
+{
+	uint8_t v = 0;
+
+	/* B: the codec's clock (9.6 MHz MCLK) and analog bias (Linux's wcd934x_enable_ana_bias_and_sysclk) */
+	if (!mic_codec_update(0x0003, 0x03, 0x01, "CODEC_RPM_CLK_MCLK_CFG: 9.6 MHz") ||
+	    !mic_codec_update(0x0601, 0x80, 0x80, "ANA_BIAS: on") || !mic_codec_update(0x0601, 0x40, 0x40, "ANA_BIAS: precharge")) {
+		return false;
+	}
+	sleep_ms(2);
+	if (!mic_codec_update(0x0601, 0x60, 0x00, "ANA_BIAS: precharge over") ||
+	    !mic_codec_update(0x0711, 0xb3, 0x91, "CLK_SYS_MCLK_PRG: external MCLK / 2, on") ||
+	    !mic_codec_update(0x0d42, 0x01, 0x01, "CDC_CLK_RST_CTRL_FS_CNT_CONTROL") ||
+	    !mic_codec_update(0x0d41, 0x01, 0x01, "CDC_CLK_RST_CTRL_MCLK_CONTROL") ||
+	    !mic_codec_update(0x0002, 0x03, 0x00, "CODEC_RPM_CLK_GATE: open")) {
+		return false;
+	}
+	sleep_ms(1);
+	if (!mic_codec_update(0x0603, 0x80, 0x80, "ANA_RCO: on")) {
+		return false;
+	}
+	sleep_ms(1);
+	(void)mic_codec_update(0x0025, 0x1e, 0x10, "EFUSE_CTL");
+	(void)mic_codec_update(0x0025, 0x01, 0x01, "EFUSE_CTL: sense");
+	sleep_ms(5);
+	(void)mic_codec_read(0x0039, &v);
+	printf("adsp845: %u: codec efuse status %#x (%s)\n", step, v, (v & 1) ? "sensed" : "NOT sensed");
+	/* C: MIC BIAS3 at 2.7 V: the voltage first, then on */
+	if (!mic_codec_update(0x0625, 0x3f, 0x22, "ANA_MICB3: 2700 mV") || !mic_codec_update(0x0625, 0xc0, 0x40, "ANA_MICB3: on")) {
+		return false;
+	}
+	sleep_ms(2);
+	/* D: AMIC5 -> ADC4 -> ADC MUX0 -> DEC0 -> CDC_IF TX0 */
+	if (!mic_codec_update(0x0727, 0x80, 0x80, "TX_NEW_AMIC_4_5_SEL: AMIC5") ||
+	    !mic_codec_update(0x0d1d, 0x07, 0x04, "ADC_MUX0_CFG0: ADC4") || !mic_codec_update(0x0d1e, 0x03, 0x01, "ADC_MUX0_CFG1: AMIC") ||
+	    !mic_codec_update(0x0a32, 0x80, 0x00, "TX0_TX_PATH_CFG0: analog") ||
+	    !mic_codec_update(0x0d3a, 0x03, 0x02, "CDC_IF_ROUTER_TX_MUX_CFG0: TX0 <- DEC0") ||
+	    !mic_codec_update(0x0611, 0x80, 0x80, "ANA_AMIC4: ADC4 on") ||
+	    !mic_codec_update(0x0a31, 0x2f, 0x24, "TX0_TX_PATH_CTL: DEC0 clock, 48 kHz") ||
+	    !mic_codec_update(0x0a32, 0x60, 0x20, "TX0_TX_PATH_CFG0: high-pass 75 Hz") ||
+	    !mic_codec_update(0x0a31, 0x10, 0x00, "TX0_TX_PATH_CTL: not muted")) {
+		return false;
+	}
+	(void)mic_codec_read(0x0a34, &v);
+	(void)mic_codec_write(0x0a34, v, "TX0_TX_VOL_CTL (again, to take)");
+	/* E: the interface device's TX port 0: channel mask 1, 12 bytes of watermark, on */
+	return mic_ve_write(mic_la_ifd, 0x100, 0x01) && mic_ve_write(mic_la_ifd, 0x101, 0x00) && mic_ve_write(mic_la_ifd, 0x050, 0x05) &&
+	       (printf("adsp845: %u: the interface device's TX port 0: channel mask 0x01, configuration 0x05\n", step), true);
+}
+
+static void
+mic_codec_capture_off(void)
+{
+	(void)mic_codec_update(0x0611, 0x80, 0x00, "ANA_AMIC4: ADC4 off");
+	(void)mic_codec_update(0x0625, 0xc0, 0x00, "ANA_MICB3: off");
+	(void)mic_codec_update(0x0622, 0xc0, 0x00, "ANA_MICB1: off");
+}
+
+static bool
+step_mic_capture(void)
+{
+	struct afe_param_slim {
+		uint32_t minor;
+		uint16_t device, bits, format, channels;
+		uint8_t map[8];
+		uint32_t rate;
+	} __attribute__((packed)) slim = { 1, 0, 16, 0, 1, { MIC_CHANNEL }, 48000 };
+	uint8_t packet[16 + sizeof(struct afe_param) + sizeof(slim)];
+	struct afe_param *param = (struct afe_param *)(packet + 16);
+	uint16_t port[2] = { MIC_AFE_PORT, 0 };
+	struct {
+		uint16_t pool, regions;
+		uint32_t property, low, high, size;
+	} __attribute__((packed)) map = { 3, 1, 0, 0, 0, 8 * 4096 };
+	struct {
+		uint32_t mode, endpoint, topology, format;
+		uint16_t bits, reserved;
+	} __attribute__((packed)) reading = { 0, 0, ASM_TOPOLOGY_NONE, ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V2, 16, 0 };
+	struct {
+		uint32_t param, size, frames_per_buffer, block_size;
+		uint16_t channels, bits;
+		uint32_t rate;
+		uint16_t is_signed, reserved;
+		uint8_t map[8];
+	} __attribute__((packed)) encoder = { ASM_PARAM_ID_ENC_CFG_BLK_V2, 28, 0, 20, 1, 16, 48000, 1, 0, { 3 } };
+	struct {
+		uint16_t flags, mode, endpoint1, endpoint2;
+		uint32_t topology;
+		uint16_t channels, bits;
+		uint32_t rate;
+		uint8_t map[8];
+	} __attribute__((packed)) open = { 0, 2, MIC_AFE_PORT, 0xffff, ADM_TOPOLOGY_NONE, 1, 16, 48000, { 3 } };
+	struct {
+		uint32_t matrix, sessions;
+		uint16_t session, copps;
+		uint16_t copp[2];
+	} __attribute__((packed)) route = { 1, 1, 2, 1, { 0, 0 } };
+	struct apr_reply reply;
+	uint32_t handle = 0, copp = 0, rms_on = 0, rms_off = 0, rms_amic4 = 0;
+	bool ok = false, smmu = false, mapped = false, started = false, stream_open = false, copp_open = false, channel = false;
+
+	announce("as step 24, then WRITE the codec's capture path (its clock and bias, MIC BIAS3 2.7 V, AMIC5 -> ADC4 -> DEC0 -> TX0, the "
+	    "interface's TX port 0), ASK the DSP for AFE port 0x4001 (SLIMbus, channel 128, 16 bits, 48 kHz), a recording device path, a "
+	    "stream read into our memory (SMMU 0x1821), and the manager for channel 128 (connect, define and activate); LISTEN: AMIC5 with "
+	    "its bias, without it, then AMIC4 (MIC BIAS1); all off and given back. Nothing is played");
+	if (s5_buffer == 0 && kmem_alloc(kernel_map, &s5_buffer, S5_BYTES, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		s5_buffer = 0;
+		return false;
+	}
+	if (!mic_bus_up() || !mic_codec_up() || !mic_codec_capture_on()) {
+		goto out;
+	}
+	lck_mtx_lock(&hakios_smmu_lock);
+	smmu = s5_space_on();
+	lck_mtx_unlock(&hakios_smmu_lock);
+	if (!smmu) {
+		goto out;
+	}
+	s5_address = s5_space.passed ? (kvtophys(s5_buffer) | AUDIO_STREAM_BITS_6T) : (AUDIO_ADDRESSES_6T | AUDIO_STREAM_BITS_6T);
+	bzero(packet, sizeof(packet));
+	*(uint16_t *)packet = MIC_AFE_PORT;
+	*(uint16_t *)(packet + 2) = (uint16_t)(sizeof(*param) + sizeof(slim));
+	param->module = AFE_MODULE_AUDIO_DEV_INTERFACE;
+	param->param = AFE_PARAM_ID_SLIMBUS_CONFIG;
+	param->size = sizeof(slim);
+	memcpy(packet + 16 + sizeof(*param), &slim, sizeof(slim));
+	if (!afe_command("the port 0x4001: SLIMbus, channel 128, 16 bits, 1 channel, 48 kHz", AFE_PORT_CMD_SET_PARAM_V2, packet,
+	    sizeof(packet))) {
+		goto out;
+	}
+	started = afe_command("the port 0x4001, started", AFE_PORT_CMD_DEVICE_START, port, sizeof(port));
+	if (!started) {
+		goto out;
+	}
+	{
+		uint8_t tid = mic_tid++, connect[4] = { mic_la_codec, 0, MIC_CHANNEL, tid };
+
+		if (!mic_ngd_user(0x2c, connect, sizeof(connect), tid, "CONNECT_SRC (the codec's port 0 to channel 128)")) {
+			goto out;
+		}
+	}
+	{
+		uint8_t tid = mic_tid++, define[6] = { mic_la_codec, 0x24, 0x20, 0x83, tid, MIC_CHANNEL };
+
+		if (!mic_ngd_user(0x21, define, sizeof(define), tid, "DEF_ACT_CHAN (128: 16 bits, ISO, 48 kHz)")) {
+			goto out;
+		}
+	}
+	{
+		uint8_t tid = mic_tid++, now[2] = { tid, mic_la_codec };
+
+		if (!mic_ngd_user(0x24, now, sizeof(now), tid, "RECONFIG_NOW")) {
+			goto out;
+		}
+	}
+	channel = true;
+	map.low = (uint32_t)s5_address;
+	map.high = (uint32_t)(s5_address >> 32);
+	if (!s5_command("our periods for the microphone, mapped for the DSP", S_ASM, 0, ASM_CMD_SHARED_MEM_MAP_REGIONS, &map, sizeof(map),
+	    ASM_CMDRSP_SHARED_MEM_MAP_REGIONS, &reply)) {
+		goto out;
+	}
+	mapped = true;
+	handle = reply.words[0];
+	if (!s5_command("a stream opened for reading (session 2): 16-bit linear PCM, no processing", S_ASM, MIC_ASM_PORT,
+	    ASM_STREAM_CMD_OPEN_READ_V3, &reading, sizeof(reading), 0, NULL)) {
+		goto out;
+	}
+	stream_open = true;
+	if (!s5_command("the stream's format: 1 channel of 16 bits at 48 kHz", S_ASM, MIC_ASM_PORT, ASM_STREAM_CMD_SET_ENCDEC_PARAM, &encoder,
+	    sizeof(encoder), 0, NULL)) {
+		goto out;
+	}
+	if (!s5_command("a recording device path from port 0x4001", S_ADM, MIC_AFE_PORT, ADM_CMD_DEVICE_OPEN_V5, &open, sizeof(open),
+	    ADM_CMDRSP_DEVICE_OPEN_V5, &reply) || reply.words[0] != 0) {
+		goto out;
+	}
+	copp_open = true;
+	copp = reply.words[1] & 0xffff;
+	route.copp[0] = (uint16_t)copp;
+	if (!s5_command("the device path routed to session 2", S_ADM, 0, ADM_CMD_MATRIX_MAP_ROUTINGS_V5, &route, sizeof(route), 0, NULL)) {
+		goto out;
+	}
+	hakios_adsp_apr_events(mic_events);
+	mic_returned = 0;
+	mic_reads = mic_read_errors = 0;
+	for (unsigned n = 0; n < 8; n++) {
+		mic_read(n, handle);
+	}
+	rms_on = mic_listen("AMIC5, MIC BIAS3 on", 3000, handle);
+	(void)mic_codec_update(0x0625, 0xc0, 0x00, "ANA_MICB3: off (to compare)");
+	rms_off = mic_listen("AMIC5, MIC BIAS3 off", 2000, handle);
+	(void)mic_codec_update(0x0625, 0xc0, 0x40, "ANA_MICB3: on again");
+	(void)mic_codec_update(0x0622, 0x3f, 0x22, "ANA_MICB1: 2700 mV");
+	(void)mic_codec_update(0x0622, 0xc0, 0x40, "ANA_MICB1: on");
+	(void)mic_codec_update(0x0727, 0x80, 0x00, "TX_NEW_AMIC_4_5_SEL: AMIC4");
+	rms_amic4 = mic_listen("AMIC4, MIC BIAS1 and 3 on", 3000, handle);
+	hakios_adsp_apr_events(NULL);
+	ok = mic_reads > 0;
+	printf("adsp845: %u: THE MICROPHONE: AMIC5 with its bias RMS %u, without %u; AMIC4 %u; %s\n", step, rms_on, rms_off, rms_amic4,
+	    rms_on > 2 * rms_off + 4 || rms_amic4 > 2 * rms_off + 4 ? "IT HEARS (more with the bias than without)" :
+	    mic_reads ? "samples came, but no more with the bias than without" : "NO SAMPLES CAME");
+out:
+	hakios_adsp_apr_events(NULL);
+	if (stream_open) {
+		s5_command("the stream, closed", S_ASM, MIC_ASM_PORT, ASM_STREAM_CMD_CLOSE, NULL, 0, 0, NULL);
+	}
+	if (copp_open) {
+		s5_command("the device path, closed", S_ADM, (uint16_t)copp, ADM_CMD_DEVICE_CLOSE_V5, NULL, 0, 0, NULL);
+	}
+	if (mapped) {
+		s5_command("our periods, unmapped", S_ASM, 0, ASM_CMD_SHARED_MEM_UNMAP_REGIONS, &handle, sizeof(handle), 0, NULL);
+	}
+	if (channel) {
+		uint8_t tid = mic_tid++, disconnect[3] = { mic_la_codec, 0, tid };
+
+		(void)mic_ngd_user(0x2e, disconnect, sizeof(disconnect), tid, "DISCONNECT_PORT");
+	}
+	if (started) {
+		afe_command("the port 0x4001, stopped", AFE_PORT_CMD_DEVICE_STOP, port, sizeof(port));
+	}
+	if (mic_la_codec != 0) {
+		mic_codec_capture_off();
+	}
+	lck_mtx_lock(&hakios_smmu_lock);
+	if (smmu) {
+		s5_space_off();
+	}
+	lck_mtx_unlock(&hakios_smmu_lock);
+	mic_codec_down();
+	mic_bus_down();
+	printf("adsp845: %u: over: %s\n", step, ok ? "samples came from the microphone" : "no samples");
+	return ok;
+}
+
 /* steps 18 to 20: none (the numbers are kept for the speaker's later steps) */
 static bool
 step_none(void)
@@ -5855,7 +6240,7 @@ step_none(void)
 static bool (*const steps[STEPS])(void) = {
 	step_survey, step_firmware, step_mailbox, step_header, step_image, step_our_item, step_start, step_queues, step_link, step_qrtr,
 	step_apr, step_tfa, step_amplifier, step_afe, step_stream, step_speaker, step_darwin, step_none, step_none, step_none,
-	step_mic_survey, step_mic_qmi, step_mic_bus, step_mic_codec,
+	step_mic_survey, step_mic_qmi, step_mic_bus, step_mic_codec, step_mic_capture,
 };
 
 static bool keep;                       /* the DSP and the link stay up while the system runs (adsp8_keep) */

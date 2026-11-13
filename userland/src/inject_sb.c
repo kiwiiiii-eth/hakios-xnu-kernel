@@ -664,7 +664,7 @@ cellular_fix_entries(id data)
 	if (entry != nil) {
 		set_ivar_integer(entry, "_displayValue", bars);
 		set_ivar_integer(entry, "_rawValue", dbm);
-		set_ivar_integer(entry, "_displayRawValue", dbm);
+		set_ivar_integer(entry, "_displayRawValue", 0);   /* (a flag: the dBm number instead of the bars, as Field Test shows) */
 	}
 	if (second != nil) {
 		set_ivar_integer(second, "_enabled", 0);

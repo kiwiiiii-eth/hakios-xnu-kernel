@@ -466,15 +466,84 @@ linuxkpi_cfg80211_put_bss(struct wiphy *wiphy, struct cfg80211_bss *bss)
 {
 }
 
-/* (nothing is queued for sending: there is nothing to wake, and nothing sent to account for) */
+/*
+ * The driver's flow control. ath10k stops the queues when as many frames wait in its firmware as it may have
+ * (ath10k_mac_tx_lock(): ieee80211_stop_queues()) and wakes them as the reports of frames sent come back. Ignored, what
+ * was given meanwhile it dropped (run 47, an upload: "failed to increase tx pending count: -16, dropping", some 45000
+ * of 196000 frames) and TCP slowed down. Now en0's sender waits (lx_station_send(), from hakios.lx.c's queue, one thread
+ * that may sleep): while the queues are stopped it sleeps, 10 ms at a time and 300 ms at most, and hakios.lx.c's queue
+ * fills behind it instead. Stopping and waking come with the driver's spin locks held: they only set the flag and wake
+ * (no lock of ours; a wakeup lost between the sender's look and its sleep costs it 10 ms).
+ */
+static volatile bool tx_stopped;
+static unsigned tx_stops, tx_waits, tx_given_up;
+
+static void
+tx_stop(void)
+{
+	if (!tx_stopped) {
+		tx_stopped = true;
+		tx_stops++;
+	}
+}
+
+static void
+tx_wake(void)
+{
+	if (tx_stopped) {
+		tx_stopped = false;
+		lx_os_wakeup(__DEVOLATILE(void *, &tx_stopped));
+	}
+}
+
 void
 linuxkpi_ieee80211_wake_queues(struct ieee80211_hw *hw)
 {
+	tx_wake();
 }
 
 void
 linuxkpi_ieee80211_stop_queues(struct ieee80211_hw *hw)
 {
+	tx_stop();
+}
+
+void
+linuxkpi_ieee80211_wake_queue(struct ieee80211_hw *hw, int queue)
+{
+	tx_wake();
+}
+
+void
+linuxkpi_ieee80211_stop_queue(struct ieee80211_hw *hw, int queue)
+{
+	tx_stop();
+}
+
+/* The sender's wait while the driver's queues are stopped (a thread that may sleep). */
+static void
+tx_wait(void)
+{
+	unsigned waited = 0;
+
+	if (!tx_stopped) {
+		return;
+	}
+	tx_waits++;
+	lx_os_lock();
+	while (tx_stopped && waited < 30) {
+		(void)lx_os_sleep(__DEVOLATILE(void *, &tx_stopped), 10000000ull);
+		waited++;
+	}
+	lx_os_unlock();
+	if (tx_stopped && ++tx_given_up <= 8) {
+		lx_tell("lx: the driver's queues stopped for 300 ms: a frame is given to it all the same (%u times so far)\n",
+		    tx_given_up);
+	}
+	if (tx_waits <= 4 || tx_waits % 1024 == 0) {
+		lx_tell("lx: en0's sender waited for the driver's queues %u times (stopped %u times; %u gave up)\n", tx_waits,
+		    tx_stops, tx_given_up);
+	}
 }
 
 void
@@ -2016,6 +2085,7 @@ lx_station_send(const unsigned char *frame, unsigned long length)
 	if (radio == NULL || !radio->joined) {
 		return (ENETDOWN);
 	}
+	tx_wait();
 	return (ethernet_send(radio, frame, (unsigned)length) ? 0 : ENOBUFS);
 }
 

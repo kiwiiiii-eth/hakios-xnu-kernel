@@ -754,7 +754,10 @@ static void
 apss_ring(unsigned bit)
 {
 	need(&apss);
-	bb_say("%u: ring apss_shared bit %u\n", step, bit);
+	/* (only while the steps run: kept up, the link's doorbells filled the box and pushed out what came before a crash) */
+	if (step < 10) {
+		bb_say("%u: ring apss_shared bit %u\n", step, bit);
+	}
 	wr(apss.base + APSS_IPC, 1u << bit);
 }
 
@@ -2602,7 +2605,9 @@ ipa_firmware_load(void)
 	announce("turn the IPA's clock on (RPMh), load the IPA's firmware (image 15) into its memory and have TrustZone start it, as "
 	    "Android does before the modem");
 	printf("mpss: %u: the IPA's image goes at %#x (%#x bytes allowed)\n", step, ipa_fw_memory, ipa_fw_size);
-	PE_parse_boot_argn("ipa845", &ipa_stage, sizeof(ipa_stage));
+	if (ipa_stage == 0) {
+		PE_parse_boot_argn("ipa845", &ipa_stage, sizeof(ipa_stage));
+	}
 	bb_say("ipa: the clock (IP0)\n");
 	if (!ipa_clock(true)) {
 		printf("mpss: %u: the IPA's clock is not on: its firmware is not loaded (a start without the clock ends the kernel)\n", step);
@@ -7076,7 +7081,7 @@ step_nas(void)
 	 * ipa_fws into ipa_fw_mem), then its status read -- nothing more, and the modem not told of it (no SMP2P "ipa",
 	 * no QMI): what the 6T's IPA is, before the modem is asked to use it (run 53: without it, LTE makes the modem assert).
 	 */
-	if (option("ipa845") && !ipa_loaded) {
+	if (option("ipa845") && !ipa_loaded && ipa_stage == 0) {
 		ipa_loaded = ipa_firmware_load();
 		if (ipa_loaded) {
 			ipa_status("its firmware loaded (ipa845=1; the modem not told)");
@@ -7691,6 +7696,23 @@ step_mba(void)
 
 	if (image.segments == 0) {
 		return false;
+	}
+	/*
+	 * ipa845=6 (7: with the SDM845's bus votes): the IPA's firmware before the modem is started, as the reference phone
+	 * and Android do -- runs 56 and 59 asked TrustZone for it with the modem up, and TrustZone hung (its secure watchdog).
+	 */
+	{
+		uint32_t stage = 0;
+
+		PE_parse_boot_argn("ipa845", &stage, sizeof(stage));
+		if (stage >= 6 && !ipa_loaded) {
+			ipa_stage = stage == 7 ? 4 : 1;
+			ipa_loaded = ipa_firmware_load();
+			if (ipa_loaded) {
+				ipa_status("its firmware loaded before the modem (ipa845=6; the modem not told)");
+				ipa_space_faults("its firmware loaded before the modem");
+			}
+		}
 	}
 	PE_parse_boot_argn("modem_mba", &mba_phys, sizeof(mba_phys));
 	PE_parse_boot_argn("modem_tick", &tick_seconds, sizeof(tick_seconds));

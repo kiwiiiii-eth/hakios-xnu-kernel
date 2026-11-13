@@ -6760,7 +6760,9 @@ uim_receive(__unused void *context, __unused uint32_t node, __unused uint32_t po
 				tell("mpss: uim:   application %u: type %u, state %u (%s), PIN1 state %u (0 unknown, 1 enabled not verified, 2 enabled verified, "
 				    "3 disabled, 4 blocked, 5 permanently blocked), retries %u\n", a, type, state, state < 8 ? app_states[state] : "?",
 				    pin + 1 < size ? v[pin + 1] : 0, pin + 2 < size ? v[pin + 2] : 0);
-				if (card == 1 && state == 7 && sim_slot_ready == 0) {
+				/* (the 6T, run 49: the card in slot 2 with its USIM only "detected", never READY, as nothing provisions it:
+				 * that counts too, as a SIM or USIM, or no slot was ever switched to it) */
+				if (card == 1 && (state == 7 || ((type == 2 || type == 1) && state == 1)) && sim_slot_ready == 0) {
 					sim_slot_ready = slot + 1;
 				}
 				/* a USIM (or SIM) in logical slot 1 that is READY, or only "detected" (cycle 37: the card sits in slot 1 with its
@@ -6808,7 +6810,8 @@ uim_receive(__unused void *context, __unused uint32_t node, __unused uint32_t po
 						  1, 1, 0, 1, 2, 4, 0, (uint8_t)sim_slot_ready, 0, 0, 0 };
 
 			sim_slot_switched = true;
-			tell("mpss: uim: LOGICAL SLOT 1 IS POINTED AT PHYSICAL SLOT %u, where the card is ready\n", sim_slot_ready);
+			tell("mpss: uim: LOGICAL SLOT 1 IS POINTED AT PHYSICAL SLOT %u, where the card is (its USIM ready or detected)\n",
+			    sim_slot_ready);
 			qrtr_send(uim_port, uim_node, uim_port_number, sw, sizeof(sw));
 		}
 	}

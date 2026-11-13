@@ -143,7 +143,7 @@ static LCK_GRP_DECLARE(adsp_lock_group, "hakios-adsp845");
 
 static void bb_say(const char *format, ...) __printflike(1, 2);
 
-#define STEPS                   23
+#define STEPS                   24
 #define FIRST_INDEPENDENT_STEP  12      /* the steps from here on do not need the DSP (800 of adsp8=N leaves it alone) */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
@@ -5211,8 +5211,13 @@ step_mic_qmi(void)
 
 
 /* ---- M3: the NGD's messages through the BAM (pipe 3 in, pipe 4 out), and the satellite's handshake with the master ---- */
-/* the NGD's stream through a context of ours whose one table maps DDR as it is in 1 GB blocks, uncached (as the Wi-Fi's) */
-#define MIC_BLOCK               (1ull | 0ull << 2 | 1ull << 6 | 2ull << 8 | 1ull << 10 | 1ull << 11)
+/*
+ * The NGD's stream through a context of ours. The BAM's addresses are 32 bits (r113: our page at 0x23c110000 was asked for as
+ * 0x3c110004, a fault), so its page is shown to it at MIC_IOVA, below 4 GB, through three tables of ours.
+ */
+#define MIC_IOVA                0x20000000ull
+static vm_offset_t mic_dma;             /* the NGD's page: the BAM's two FIFOs and the message buffers */
+static uint64_t mic_dma_phys;
 static struct block mic_smmu_second = { "apps smmu", 0, 0x1000, 0 };
 static struct block mic_smmu_context = { "apps smmu, the microphone's context", 0, 0x1000, 0 };
 static struct {
@@ -5227,9 +5232,9 @@ mic_space_on(void)
 	bool used[256] = { false };
 	uint32_t scr0 = get(&s5_smmu, "scr0", SMMU_SCR0), idr0 = get(&s5_smmu, "idr0", SMMU_IDR0);
 	uint32_t idr1 = get(&s5_smmu, "idr1", SMMU_IDR1), matches = idr0 & 0xff, contexts = idr1 & 0xff, page, pages;
-	uint64_t ttbr, *root;
+	uint64_t ttbr, *root, *second, *third;
 
-	if (scr0 & 1u << 3) {
+	if (scr0 & 1u << 3 || mic_dma == 0) {
 		return false;
 	}
 	page = idr1 >> 31 ? 0x10000 : 0x1000;
@@ -5267,22 +5272,24 @@ mic_space_on(void)
 		return false;
 	}
 	if (mic_space.root == 0 &&
-	    kmem_alloc(kernel_map, &mic_space.root, 4096, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+	    kmem_alloc(kernel_map, &mic_space.root, 3 * 4096, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 		mic_space.root = 0;
 		return false;
 	}
 	root = (uint64_t *)mic_space.root;
-	bzero(root, 4096);
-	for (unsigned g = 2; g < 16; g++) {
-		root[g] = ((uint64_t)g << 30) | MIC_BLOCK;
-	}
-	for (vm_offset_t line = mic_space.root; line < mic_space.root + 4096; line += 64) {
+	second = (uint64_t *)(mic_space.root + 4096);
+	third = (uint64_t *)(mic_space.root + 8192);
+	bzero(root, 3 * 4096);
+	root[MIC_IOVA >> 30 & 0x1ff] = kvtophys((vm_offset_t)second) | 3;
+	second[MIC_IOVA >> 21 & 0x1ff] = kvtophys((vm_offset_t)third) | 3;
+	third[MIC_IOVA >> 12 & 0x1ff] = mic_dma_phys | AUDIO_PTE;
+	for (vm_offset_t line = mic_space.root; line < mic_space.root + 3 * 4096; line += 64) {
 		__asm__ volatile ("dc civac, %0" : : "r" (line));
 	}
 	__asm__ volatile ("dsb sy");
 	ttbr = kvtophys(mic_space.root) | (uint64_t)mic_space.context << 48;
-	printf("adsp845: %u: THE SMMU IS ABOUT TO BE WRITTEN: context %u gets our table (DDR from 0x80000000 to 0x400000000 as it is, in 1 GB "
-	    "blocks), match register %u sends stream 0x1806 (mask 0) through it\n", step, mic_space.context, mic_space.match);
+	printf("adsp845: %u: THE SMMU IS ABOUT TO BE WRITTEN: context %u gets our tables (our page %#llx shown at %#llx), match register %u "
+	    "sends stream 0x1806 (mask 0) through it\n", step, mic_space.context, mic_dma_phys, MIC_IOVA, mic_space.match);
 	put(&mic_smmu_context, "sctlr", SMMU_CB_SCTLR, 0);
 	put(&mic_smmu_second, "cba2r", SMMU_CBA2R(mic_space.context), 1);
 	put(&mic_smmu_second, "cbar", SMMU_CBAR(mic_space.context), SMMU_CBAR_STAGE_1);
@@ -5311,7 +5318,7 @@ mic_space_on(void)
 		printf("adsp845: %u: THE SMMU DID NOT TAKE THE MATCH REGISTER for stream 0x1806\n", step);
 		return false;
 	}
-	printf("adsp845: %u: STREAM 0x1806 GOES THROUGH CONTEXT %u of the SMMU, DDR as it is\n", step, mic_space.context);
+	printf("adsp845: %u: STREAM 0x1806 GOES THROUGH CONTEXT %u of the SMMU, our page at %#llx\n", step, mic_space.context, MIC_IOVA);
 	return true;
 }
 
@@ -5356,9 +5363,7 @@ struct bam_desc {
 	uint32_t address;
 	uint16_t size, flags;
 };
-/* one page for it all, contiguous: the two FIFOs, then the RX buffers, then the TX buffers */
-static vm_offset_t mic_dma;
-static uint64_t mic_dma_phys;
+/* one page for it all, contiguous: the two FIFOs, then the RX buffers, then the TX buffers (mic_dma, declared above) */
 #define MIC_RX_FIFO             0u
 #define MIC_TX_FIFO             (MIC_FIFO_DESCS * 8u)
 #define MIC_RX_BUF(i)           (2u * MIC_FIFO_DESCS * 8u + MIC_MSG_LEN * (i))
@@ -5390,14 +5395,14 @@ mic_pipe_on(unsigned pipe, uint32_t fifo, bool rx)
 	wr(p + BAM_P_RST, 1);
 	__asm__ volatile ("dsb sy");
 	wr(p + BAM_P_RST, 0);
-	wr(p + BAM_P_DESC_FIFO_ADDR, (uint32_t)(mic_dma_phys + fifo));
+	wr(p + BAM_P_DESC_FIFO_ADDR, (uint32_t)(MIC_IOVA + fifo));
 	wr(p + BAM_P_FIFO_SIZES, MIC_FIFO_DESCS * 8u);
 	wr(p + BAM_P_IRQ_EN, 0x31);
 	put(&mic_bam_top, "ee 1 mask", 0x4004, mask | 1u << pipe);
 	wr(p + BAM_P_CTRL, BAM_P_EN | BAM_P_SYS_MODE | (rx ? BAM_P_DIRECTION : 0));
 	__asm__ volatile ("dsb sy");
 	printf("adsp845: %u: BAM pipe %u (%s) on: FIFO at %#llx, control %#x, offsets %#x\n", step, pipe, rx ? "in, the NGD's to us" :
-	    "out, ours to the NGD", mic_dma_phys + fifo, rd(p + BAM_P_CTRL), rd(p + BAM_P_SW_OFSTS));
+	    "out, ours to the NGD", MIC_IOVA + fifo, rd(p + BAM_P_CTRL), rd(p + BAM_P_SW_OFSTS));
 }
 
 static void
@@ -5437,7 +5442,7 @@ mic_ngd_send(const uint8_t *message, uint32_t length, const char *what)
 	mic_tx_next++;
 	bzero((void *)(mic_dma + at), MIC_MSG_LEN);
 	memcpy((void *)(mic_dma + at), message, length);
-	mic_pipe_post(4, MIC_TX_FIFO, &mic_tx_tail, (uint32_t)(mic_dma_phys + at), (uint16_t)padded);
+	mic_pipe_post(4, MIC_TX_FIFO, &mic_tx_tail, (uint32_t)(MIC_IOVA + at), (uint16_t)padded);
 	while ((rd(mic_pipe(4) + BAM_P_SW_OFSTS) & 0xffff) != mic_tx_tail * 8u) {
 		if (now_us() - began > 200000) {
 			printf("adsp845: %u: SLIMbus %s: THE BAM HAS NOT TAKEN IT in 200 ms (offsets %#x, tail %u)\n", step, what,
@@ -5471,7 +5476,7 @@ mic_ngd_receive(uint8_t *out, uint32_t room, unsigned ms)
 			length = length < 4 ? 4 : length > MIC_MSG_LEN ? MIC_MSG_LEN : length;
 			memcpy(out, (const void *)(mic_dma + at), length < room ? length : room);
 			mic_rx_seen = (mic_rx_seen + 1) % MIC_FIFO_DESCS;
-			mic_pipe_post(3, MIC_RX_FIFO, &mic_rx_tail, (uint32_t)(mic_dma_phys + at), MIC_MSG_LEN);
+			mic_pipe_post(3, MIC_RX_FIFO, &mic_rx_tail, (uint32_t)(MIC_IOVA + at), MIC_MSG_LEN);
 			wr(mic_ngd.base + 0x1018, get(&mic_ngd, "ngd 1 interrupts", 0x1014));
 			return length;
 		}
@@ -5513,20 +5518,21 @@ mic_bus_up(void)
 			put(&mic_pins[2 + i].page, "control (lpass_slimbus)", 0, (mic_pins_old[i] & ~0x3fcu) | 1u << 2 | 1u << 6);
 		}
 	}
-	lck_mtx_lock(&hakios_smmu_lock);
-	if (!mic_space_on()) {
-		lck_mtx_unlock(&hakios_smmu_lock);
-		return false;
-	}
-	lck_mtx_unlock(&hakios_smmu_lock);
 	if (mic_dma == 0 && kmem_alloc(kernel_map, &mic_dma, 4096, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 		mic_dma = 0;
 		return false;
 	}
 	bzero((void *)mic_dma, 4096);
 	mic_dma_phys = kvtophys(mic_dma);
+	lck_mtx_lock(&hakios_smmu_lock);
+	if (!mic_space_on()) {
+		lck_mtx_unlock(&hakios_smmu_lock);
+		return false;
+	}
+	lck_mtx_unlock(&hakios_smmu_lock);
 	mic_rx_tail = mic_tx_tail = mic_rx_seen = mic_tx_next = 0;
-	printf("adsp845: %u: the NGD's message buffers at %#llx (its FIFOs, %u in, %u out)\n", step, mic_dma_phys, MIC_RX_BUFS, MIC_TX_BUFS);
+	printf("adsp845: %u: the NGD's message buffers at %#llx, shown at %#llx (its FIFOs, %u in, %u out)\n", step, mic_dma_phys, MIC_IOVA,
+	    MIC_RX_BUFS, MIC_TX_BUFS);
 	mic_ngd_old_cfg = get(&mic_ngd, "ngd 1 config", 0x1000);
 	if (get(&mic_ngd, "ngd 1 status", 0x1004) & 2) {
 		printf("adsp845: %u: the NGD has a logical address already\n", step);
@@ -5535,7 +5541,7 @@ mic_bus_up(void)
 	mic_pipe_on(4, MIC_TX_FIFO, false);
 	mic_pipes_on = true;
 	for (unsigned i = 0; i < MIC_RX_BUFS; i++) {
-		mic_pipe_post(3, MIC_RX_FIFO, &mic_rx_tail, (uint32_t)(mic_dma_phys + MIC_RX_BUF(i)), MIC_MSG_LEN);
+		mic_pipe_post(3, MIC_RX_FIFO, &mic_rx_tail, (uint32_t)(MIC_IOVA + MIC_RX_BUF(i)), MIC_MSG_LEN);
 	}
 	put(&mic_ngd, "ngd 1 interrupt enables", 0x1010, 0xfe000000u);
 	put(&mic_ngd, "ngd 1 rx message queue", 0x1008, get(&mic_ngd, "ngd 1 rx message queue", 0x1008) | 0x10000u);
@@ -5605,6 +5611,238 @@ step_mic_bus(void)
 	return ok;
 }
 
+/* ---- M4: the codec's clock and reset, its logical addresses, its identity and its bring-up ------------------------------------ */
+/* an RPMh resource written through TCS 0 (as rails() does for cx.lvl); true when RPMh says done */
+static bool
+rpmh_vote(const char *what, uint32_t address, uint32_t value)
+{
+	uint32_t done = 0;
+	uint64_t began;
+
+	need(&rsc);
+	lck_mtx_lock(&hakios_rsc_lock);
+	if (rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_STATUS) == 0) {
+		lck_mtx_unlock(&hakios_rsc_lock);
+		printf("adsp845: %u: TCS %u of the sequencer is busy: %s not asked\n", step, RPMH_TCS, what);
+		return false;
+	}
+	printf("adsp845: %u: about to ask RPMh, through TCS %u, for %s: %#x = %u\n", step, RPMH_TCS, what, address, value);
+	wr(rsc.base + RSC_IRQ_CLEAR, 1u << RPMH_TCS);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(0), MSGID_WRITE_WAITED);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(0) + 4, address);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(0) + 8, value);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_WAIT_FOR_DONE, 1);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_ENABLED, 1);
+	settle();
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) & ~TCS_TRIGGER);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) | TCS_ACTIVE_MODE);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) | TCS_TRIGGER);
+	began = now_us();
+	while (now_us() - began < 100000) {
+		done = rd(rsc.base + RSC_IRQ_STATUS) & (1u << RPMH_TCS);
+		if (done) {
+			break;
+		}
+		sleep_us(50);
+	}
+	printf("adsp845: %u: RPMh %s for %s after %llu us; the command's status %#x\n", step, done ? "HAS DONE IT" : "HAS NOT SAID DONE",
+	    what, now_us() - began, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(0) + 12));
+	wr(rsc.base + RSC_IRQ_CLEAR, 1u << RPMH_TCS);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) & ~(TCS_TRIGGER | TCS_ACTIVE_MODE));
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_ENABLED, 0);
+	lck_mtx_unlock(&hakios_rsc_lock);
+	return done != 0;
+}
+
+static uint8_t mic_tid = 1, mic_la_ifd, mic_la_codec, mic_page = 0xff;
+static uint32_t mic_mclk;               /* lnbclka2's address in cmd-db, when the vote is ours to give back */
+static uint32_t mic_reset_ctl, mic_reset_io;
+static bool mic_reset_ours;
+
+/* wait for the answer to tid (a REPLY_VALUE 0x64, an ADDR_REPLY 0x0e or a GENERIC_ACK 0x25): its data from byte 4 */
+static uint32_t
+mic_ngd_answer(uint8_t tid, uint8_t *data, uint32_t room, unsigned ms)
+{
+	uint8_t m[MIC_MSG_LEN];
+	uint64_t began = now_us();
+
+	while (now_us() - began < (uint64_t)ms * 1000) {
+		uint32_t length = mic_ngd_receive(m, sizeof(m), 20);
+
+		if (length == 0) {
+			continue;
+		}
+		if ((m[1] == 0x64 || m[1] == 0x0e || m[1] == 0x25) && length >= 4 && m[3] == tid) {
+			uint32_t n = length - 4 < room ? length - 4 : room;
+
+			memcpy(data, m + 4, n);
+			return n ? n : 1;
+		}
+		mic_say_message("in (not the answer waited for)", m, length);
+	}
+	return 0;
+}
+
+/* ADDR_QUERY to the manager: the logical address of the device whose enumeration address is ea (0: none) */
+static uint8_t
+mic_laddr(const uint8_t ea[6], const char *what)
+{
+	for (unsigned tries = 0; tries < 5; tries++) {
+		uint8_t q[10] = { 9 | 2 << 5, 0x0d, 0xff, mic_tid, ea[0], ea[1], ea[2], ea[3], ea[4], ea[5] }, r[16] = { 0 };
+		uint8_t tid = mic_tid++;
+		uint32_t n;
+
+		if (!mic_ngd_send(q, sizeof(q), "ADDR_QUERY")) {
+			sleep_ms(20);
+			continue;
+		}
+		n = mic_ngd_answer(tid, r, sizeof(r), 300);
+		if (n >= 7 && (r[0] | r[1] | r[2] | r[3] | r[4] | r[5]) != 0) {
+			printf("adsp845: %u: SLIMbus: %s has logical address %#x\n", step, what, r[6]);
+			return r[6];
+		}
+		printf("adsp845: %u: SLIMbus: %s: %s (try %u)\n", step, what, n ? "not on the bus (an empty answer)" : "no answer", tries + 1);
+		sleep_ms(20);
+	}
+	return 0;
+}
+
+/* a value element of a device: REQUEST_VALUE (0x60, a tid) and its REPLY_VALUE; n bytes (1 or 2) */
+static bool
+mic_ve_read(uint8_t la, uint16_t element, uint8_t *value, uint32_t n)
+{
+	uint8_t slice = n == 1 ? 0 : 1, tid = mic_tid++;
+	uint16_t ec = (uint16_t)(slice | 1u << 3 | (element & 0xfffu) << 4);
+	uint8_t q[6] = { 5 | 0 << 5, 0x60, la, tid, (uint8_t)ec, (uint8_t)(ec >> 8) }, r[16] = { 0 };
+
+	if (!mic_ngd_send(q, sizeof(q), "REQUEST_VALUE")) {
+		return false;
+	}
+	if (mic_ngd_answer(tid, r, sizeof(r), 200) < n) {
+		printf("adsp845: %u: SLIMbus: element %#x of %#x: no answer\n", step, element, la);
+		return false;
+	}
+	memcpy(value, r, n);
+	return true;
+}
+
+/* a value element written: CHANGE_VALUE (0x68), one byte, no answer */
+static bool
+mic_ve_write(uint8_t la, uint16_t element, uint8_t value)
+{
+	uint16_t ec = (uint16_t)(0 | 1u << 3 | (element & 0xfffu) << 4);
+	uint8_t q[6] = { 5 | 0 << 5, 0x68, la, (uint8_t)ec, (uint8_t)(ec >> 8), value };
+
+	return mic_ngd_send(q, sizeof(q), "CHANGE_VALUE");
+}
+
+/* the codec's registers: a page (r >> 8) in element 0x800, then element 0x800 + (r & 0xff) */
+static bool
+mic_codec_read(uint16_t r, uint8_t *value)
+{
+	if ((r >> 8) != mic_page) {
+		if (!mic_ve_write(mic_la_codec, 0x800, (uint8_t)(r >> 8))) {
+			return false;
+		}
+		mic_page = (uint8_t)(r >> 8);
+	}
+	return mic_ve_read(mic_la_codec, (uint16_t)(0x800 + (r & 0xff)), value, 1);
+}
+
+static bool
+mic_codec_write(uint16_t r, uint8_t value, const char *what)
+{
+	uint8_t back = 0;
+
+	if ((r >> 8) != mic_page) {
+		if (!mic_ve_write(mic_la_codec, 0x800, (uint8_t)(r >> 8))) {
+			return false;
+		}
+		mic_page = (uint8_t)(r >> 8);
+	}
+	if (!mic_ve_write(mic_la_codec, (uint16_t)(0x800 + (r & 0xff)), value) || !mic_codec_read(r, &back)) {
+		printf("adsp845: %u: codec %#06x (%s) <- %#04x: NOT SENT OR NOT READ BACK\n", step, r, what, value);
+		return false;
+	}
+	printf("adsp845: %u: codec %#06x (%s) <- %#04x: reads %#04x%s\n", step, r, what, value, back, back == value ? "" : " (NOT WHAT WAS WRITTEN)");
+	return true;
+}
+
+static bool
+mic_codec_up(void)
+{
+	static const uint8_t ea_ifd[6] = { 0, 0, 0x50, 0x02, 0x17, 0x02 }, ea_codec[6] = { 0, 1, 0x50, 0x02, 0x17, 0x02 };
+	uint8_t id0[2] = { 0 }, id2[2] = { 0 };
+
+	mic_mclk = cmd_db_address("lnbclka2");
+	if (mic_mclk == 0 || !rpmh_vote("LN_BB_CLK2, the codec's MCLK (on)", mic_mclk + 4, 1)) {
+		mic_mclk = 0;
+		return false;
+	}
+	mic_reset_ctl = get(&mic_pins[1].page, "control", 0);
+	mic_reset_io = get(&mic_pins[1].page, "I/O", 4);
+	mic_reset_ours = true;
+	printf("adsp845: %u: about to pulse the codec's reset (gpio64): low 20 ms, then high (running), 20 ms\n", step);
+	put(&mic_pins[1].page, "I/O (low)", 4, 0);
+	put(&mic_pins[1].page, "control (an output)", 0, 1u << 9 | 1u << 6);
+	sleep_ms(20);
+	put(&mic_pins[1].page, "I/O (high: the codec runs)", 4, 2);
+	sleep_ms(20);
+	printf("adsp845: %u: the codec's reset released\n", step);
+	mic_la_ifd = mic_laddr(ea_ifd, "the codec's interface device");
+	mic_la_codec = mic_laddr(ea_codec, "the codec");
+	if (mic_la_codec == 0 || mic_la_ifd == 0) {
+		printf("adsp845: %u: THE CODEC IS NOT ON THE BUS\n", step);
+		return false;
+	}
+	mic_page = 0xff;
+	if (mic_codec_read(0x0021, &id0[0]) && mic_codec_read(0x0022, &id0[1]) && mic_codec_read(0x0023, &id2[0]) &&
+	    mic_codec_read(0x0024, &id2[1])) {
+		printf("adsp845: %u: THE CODEC ANSWERS: chip id %02x %02x %02x %02x\n", step, id0[0], id0[1], id2[0], id2[1]);
+	} else {
+		printf("adsp845: %u: the codec's chip id could not be read\n", step);
+		return false;
+	}
+	/* the bring-up (Linux's mfd wcd934x_bring_up) */
+	return mic_codec_write(0x0009, 0x01, "CODEC_RPM_RST_CTL") && mic_codec_write(0x071b, 0x19, "SIDO_NEW_VOUT_A_STARTUP") &&
+	    mic_codec_write(0x071c, 0x15, "SIDO_NEW_VOUT_D_STARTUP") && (sleep_ms(2), true) &&
+	    mic_codec_write(0x0011, 0x05, "CODEC_RPM_PWR_CDC_DIG_HM_CTL") && mic_codec_write(0x0011, 0x07, "CODEC_RPM_PWR_CDC_DIG_HM_CTL") &&
+	    mic_codec_write(0x0009, 0x03, "CODEC_RPM_RST_CTL") && mic_codec_write(0x0009, 0x07, "CODEC_RPM_RST_CTL") &&
+	    mic_codec_write(0x0011, 0x03, "CODEC_RPM_PWR_CDC_DIG_HM_CTL");
+}
+
+static void
+mic_codec_down(void)
+{
+	if (mic_reset_ours) {
+		printf("adsp845: %u: the codec back in reset (gpio64 as found: control %#x, I/O %#x)\n", step, mic_reset_ctl, mic_reset_io);
+		put(&mic_pins[1].page, "I/O (low)", 4, 0);
+		put(&mic_pins[1].page, "control (given back)", 0, mic_reset_ctl);
+		mic_reset_ours = false;
+	}
+	if (mic_mclk != 0) {
+		rpmh_vote("LN_BB_CLK2, the codec's MCLK (off)", mic_mclk + 4, 0);
+		mic_mclk = 0;
+	}
+	mic_la_ifd = mic_la_codec = 0;
+}
+
+/* M4: as M3, then the codec's clock, reset, addresses, identity and bring-up; all off again */
+static bool
+step_mic_codec(void)
+{
+	bool ok;
+
+	announce("as step 23, then ASK RPMh for LN_BB_CLK2 (the codec's 9.6 MHz MCLK), WRITE gpio64 (the codec's reset: low, then high), "
+	    "ask the manager for the codec's logical addresses, READ its chip id and WRITE its bring-up (Linux's seven writes); all off and "
+	    "given back");
+	ok = mic_bus_up() && mic_codec_up();
+	mic_codec_down();
+	mic_bus_down();
+	printf("adsp845: %u: over: %s\n", step, ok ? "THE CODEC IS UP AND ANSWERS" : "the codec is not up");
+	return ok;
+}
+
 /* steps 18 to 20: none (the numbers are kept for the speaker's later steps) */
 static bool
 step_none(void)
@@ -5617,7 +5855,7 @@ step_none(void)
 static bool (*const steps[STEPS])(void) = {
 	step_survey, step_firmware, step_mailbox, step_header, step_image, step_our_item, step_start, step_queues, step_link, step_qrtr,
 	step_apr, step_tfa, step_amplifier, step_afe, step_stream, step_speaker, step_darwin, step_none, step_none, step_none,
-	step_mic_survey, step_mic_qmi, step_mic_bus,
+	step_mic_survey, step_mic_qmi, step_mic_bus, step_mic_codec,
 };
 
 static bool keep;                       /* the DSP and the link stay up while the system runs (adsp8_keep) */

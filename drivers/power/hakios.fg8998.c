@@ -46,8 +46,8 @@
 #define POLL_SECONDS            10
 
 /*
- * What the charger is set to, read only (boot-arg fg_charger_look=0 leaves it out), once at the start and again every
- * ten minutes and whenever USB comes or goes: why the battery still gives while USB is in (11-11: 47% to 37% on the Mac;
+ * What the charger is set to, read only (boot-arg fg_charger_look=0 leaves it out), once at the start, every minute for
+ * ten minutes, then every ten, and whenever USB comes or goes: why the battery still gives while USB is in (11-11: 47% to 37% on the Mac;
  * 11-13: "full on" and yet -8 to -158 mA). Slave 2, the charger's registers as Linux's qcom_smbx.c names them; the input
  * current limits are in 25 mA units.
  */
@@ -190,8 +190,9 @@ fg_thread(__unused void *parameter, __unused wait_result_t result)
 			}
 			state.usb_type = plugged ? 1 : 0;
 			hakios_battery_report(&state);
-			if (charger_look && (was_plugged != (int)plugged || (tick != 0 && tick % 60 == 0))) {
-				fg_charger_look(was_plugged != (int)plugged ? (plugged ? "USB in" : "USB out") : "ten minutes on");
+			/* (every minute for the first ten, where a run's log keeps it; then every ten minutes) */
+			if (charger_look && (was_plugged != (int)plugged || (tick != 0 && tick % (tick < 60 ? 6 : 60) == 0))) {
+				fg_charger_look(was_plugged != (int)plugged ? (plugged ? "USB in" : "USB out") : "a while on");
 			}
 			was_plugged = plugged;
 			if (tick % 6 == 0) {

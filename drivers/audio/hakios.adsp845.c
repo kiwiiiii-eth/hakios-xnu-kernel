@@ -6234,20 +6234,39 @@ step_mic_capture(void)
 	for (unsigned n = 0; n < 8; n++) {
 		mic_read(n, handle);
 	}
-	rms_on = mic_listen("AMIC5, MIC BIAS3 on", 3000, handle);
-	mic_ifd_show("after 3 s");
-	(void)mic_codec_update(0x0625, 0xc0, 0x00, "ANA_MICB3: off (to compare)");
-	rms_off = mic_listen("AMIC5, MIC BIAS3 off", 2000, handle);
-	(void)mic_codec_update(0x0625, 0xc0, 0x40, "ANA_MICB3: on again");
+	/*
+	 * (r119: AMIC5 RMS 2 with its bias and without; AMIC4 with MIC BIAS1 and 3 RMS 8, peak 202 -- OnePlus's Android takes the
+	 * handset microphone from AMIC4 too, mixer_paths_tavil.xml "handset-mic" = amic4). Which bias makes the difference, and its gain.
+	 */
+	(void)mic_listen("AMIC5, MIC BIAS3 on (the reference)", 1000, handle);
 	(void)mic_codec_update(0x0622, 0x3f, 0x22, "ANA_MICB1: 2700 mV");
 	(void)mic_codec_update(0x0622, 0xc0, 0x40, "ANA_MICB1: on");
 	(void)mic_codec_update(0x0727, 0x80, 0x00, "TX_NEW_AMIC_4_5_SEL: AMIC4");
-	rms_amic4 = mic_listen("AMIC4, MIC BIAS1 and 3 on", 3000, handle);
+	sleep_ms(50);
+	rms_on = mic_listen("AMIC4, MIC BIAS1 and 3 on, gain 0", 2000, handle);
+	(void)mic_codec_update(0x0622, 0xc0, 0x00, "ANA_MICB1: off");
+	sleep_ms(50);
+	rms_off = mic_listen("AMIC4, MIC BIAS1 off, 3 on, gain 0", 2000, handle);
+	(void)mic_codec_update(0x0622, 0xc0, 0x40, "ANA_MICB1: on");
+	(void)mic_codec_update(0x0625, 0xc0, 0x00, "ANA_MICB3: off");
+	sleep_ms(50);
+	(void)mic_listen("AMIC4, MIC BIAS1 on, 3 off, gain 0", 2000, handle);
+	(void)mic_codec_update(0x0625, 0xc0, 0x40, "ANA_MICB3: on");
+	(void)mic_codec_update(0x0611, 0x1f, 12, "ANA_AMIC4: gain 12 (Android's ADC4 Volume)");
+	sleep_ms(50);
+	rms_amic4 = mic_listen("AMIC4, MIC BIAS1 and 3 on, gain 12", 3000, handle);
+	(void)mic_codec_update(0x0622, 0xc0, 0x00, "ANA_MICB1: off");
+	(void)mic_codec_update(0x0625, 0xc0, 0x00, "ANA_MICB3: off");
+	sleep_ms(50);
+	{
+		uint32_t rms_none = mic_listen("AMIC4, no bias, gain 12", 2000, handle);
+
+		printf("adsp845: %u: THE MICROPHONE (AMIC4): gain 0 RMS %u with MIC BIAS1, %u without; gain 12 RMS %u with the biases, %u "
+		    "without: %s\n", step, rms_on, rms_off, rms_amic4, rms_none,
+		    rms_amic4 > 3 * rms_none + 4 ? "IT HEARS (much more with its bias than without)" : "no clear difference");
+	}
 	hakios_adsp_apr_events(NULL);
 	ok = mic_reads > 0;
-	printf("adsp845: %u: THE MICROPHONE: AMIC5 with its bias RMS %u, without %u; AMIC4 %u; %s\n", step, rms_on, rms_off, rms_amic4,
-	    rms_on > 2 * rms_off + 4 || rms_amic4 > 2 * rms_off + 4 ? "IT HEARS (more with the bias than without)" :
-	    mic_reads ? "samples came, but no more with the bias than without" : "NO SAMPLES CAME");
 out:
 	hakios_adsp_apr_events(NULL);
 	if (stream_open) {

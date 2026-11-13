@@ -6610,6 +6610,35 @@ wds_send_subscription(bool get)
 #define DSD_GET_PS_DATA_AVAIL   0x0061
 #define DSD_GET_CURRENT_DDS     0x004f
 #define DSD_GET_BIND_SUBSCRIPTION 0x0028
+#define DSD_SWITCH_DDS          0x004e
+#define DSD_BIND_SUBSCRIPTION   0x0027
+#define DSD_NOTIFY_DATA_SETTING 0x0034
+static bool dsd_wrote;
+
+/*
+ * ipa8=11 (the user's consent asked first): what Android's RIL tells the modem on every start, which nothing here
+ * had (run 71: the data switch 0, off, and the default data subscription 2 while the card is the primary): the
+ * default data subscription made the primary (Switch DDS 0x4e, TLV 1 u32 1, not permanent), DSD bound to it (0x27),
+ * and the data switch on (Notify Data Setting 0x34, TLV 0x10 u8 1). The modem's storage is not written: rmtfs keeps
+ * its writes in memory, so all of it is gone at the modem's next start.
+ */
+static void
+dsd_write(void)
+{
+	uint8_t dds[7 + 7] = { 0, 0x60, 0, DSD_SWITCH_DDS & 0xff, DSD_SWITCH_DDS >> 8, 7, 0, 0x01, 4, 0, 1, 0, 0, 0 };
+	uint8_t bind[7 + 7] = { 0, 0x62, 0, DSD_BIND_SUBSCRIPTION & 0xff, DSD_BIND_SUBSCRIPTION >> 8, 7, 0, 0x01, 4, 0, 1, 0, 0, 0 };
+	uint8_t on[7 + 4] = { 0, 0x64, 0, DSD_NOTIFY_DATA_SETTING & 0xff, DSD_NOTIFY_DATA_SETTING >> 8, 4, 0, 0x10, 1, 0, 1 };
+
+	if (dsd_wrote || ipa8_asked() < 11 || dsd_port == NULL || dsd_port_number == 0) {
+		return;
+	}
+	dsd_wrote = true;
+	tell("mpss: dsd: ABOUT TO MAKE THE PRIMARY SUBSCRIPTION THE DEFAULT FOR DATA, BIND DSD TO IT AND TURN THE DATA SWITCH ON "
+	    "(ipa8=11; in the modem's memory only)\n");
+	qrtr_send(dsd_port, dsd_node, dsd_port_number, dds, sizeof(dds));
+	qrtr_send(dsd_port, dsd_node, dsd_port_number, bind, sizeof(bind));
+	qrtr_send(dsd_port, dsd_node, dsd_port_number, on, sizeof(on));
+}
 
 static void
 dsd_ask(void)
@@ -6621,6 +6650,9 @@ dsd_ask(void)
 		return;
 	}
 	dsd_asked++;
+	if (dsd_asked >= 2) {
+		dsd_write();            /* (once the modem is up and registered: on the first refusal; the reads below then show it) */
+	}
 	for (unsigned i = 0; i < sizeof(asks) / sizeof(asks[0]); i++) {
 		uint8_t request[7] = { 0, (uint8_t)(0x49 + i * 2), 0, (uint8_t)(asks[i] & 0xff), (uint8_t)(asks[i] >> 8), 0, 0 };
 
@@ -6643,7 +6675,10 @@ dsd_receive(__unused void *context, __unused uint32_t node, __unused uint32_t po
 	if ((uint16_t)(m[3] | m[4] << 8) != DSD_GET_SYSTEM_STATUS) {
 		uint16_t message = (uint16_t)(m[3] | m[4] << 8);
 		uint32_t result = ~0u, error = ~0u, value = ~0u;
-		const char *what = message == DSD_GET_DATA_SETTING ? "THE DATA SWITCH (0 off, 1 on)" :
+		const char *what = message == DSD_SWITCH_DDS ? (m[0] == 4 ? "THE DDS SWITCH'S OUTCOME (0 allowed, 1 not, 2 failed)" :
+		    "THE DDS SWITCH ANSWERED") : message == DSD_BIND_SUBSCRIPTION ? "DSD BOUND" :
+		    message == DSD_NOTIFY_DATA_SETTING ? "THE DATA SWITCH SET" :
+		    message == DSD_GET_DATA_SETTING ? "THE DATA SWITCH (0 off, 1 on)" :
 		    message == DSD_GET_PS_DATA_AVAIL ? "PS DATA AVAILABILITY (1 on, 2 off)" :
 		    message == DSD_GET_CURRENT_DDS ? "THE DEFAULT DATA SUBSCRIPTION (1 primary, 2 secondary)" :
 		    message == DSD_GET_BIND_SUBSCRIPTION ? "DSD'S OWN SUBSCRIPTION" : "an answer";
@@ -6652,7 +6687,7 @@ dsd_receive(__unused void *context, __unused uint32_t node, __unused uint32_t po
 			result = (uint32_t)(v[0] | v[1] << 8);
 			error = (uint32_t)(v[2] | v[3] << 8);
 		}
-		if ((v = qmi_tlv(m, length, 0x10, &size)) != NULL && size >= 1) {
+		if ((v = qmi_tlv(m, length, m[0] == 4 ? 0x01 : 0x10, &size)) != NULL && size >= 1) {
 			value = size >= 4 ? (uint32_t)(v[0] | v[1] << 8 | v[2] << 16 | v[3] << 24) : v[0];
 		}
 		tell("mpss: dsd: %s %#x: %u (result %u, error %u; %s)\n", what, message, value, result, error,

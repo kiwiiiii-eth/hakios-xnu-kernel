@@ -440,8 +440,9 @@ update_signal_item(id self, SEL sel, long item, void *data, id sim, void *getter
 	}
 	/* (only the item with SIM info: the primary's; run 75 turned the secondary's on too, and the status bar drew the
 	 * dual-SIM view, _UIStatusBarDualCellularSignalView, two small rows that looked empty) */
-	if ((up > 0 || registered > 0) && shown > 0 && setter != NULL && data != NULL && sim != nil) {
-		BLOCK_CALL(setter, void (*)(void *, void *, int), data, shown);
+	if ((up > 0 || registered > 0) && shown > 0 && data != NULL && sim != nil) {
+		/* (no setter call: it is not (data, bars) -- it took the data object for the bars, the displayValue that was a
+		 * pointer's half; the bars go into UIKit's cellular entry, cellular_fix_entries()) */
 		((void (*)(id, SEL, long, BOOL))objc_msgSend)(self, sel_registerName("_setItem:enabled:"), item, YES);
 		if (shown != cellular_last_bars) {
 			say("hakios: cellular: %d bars shown (item %ld; kernel bars %d, %d dBm, registered %d)\n", shown, item, bars, dbm, registered);
@@ -476,17 +477,17 @@ update_service_item(id self, SEL sel, long item, void *data, id sim, id other, v
 		say("hakios: cellular: service item %ld: data %p, SIM info %p, other %p; string getter %p setter %p, content type getter %p "
 		    "setter %p; the kernel's network \"%s\"\n", item, data, (void *)sim, (void *)other, g1, s1, g3, s3, name);
 	}
-	if (registered > 0 && name[0] != 0 && s1 != NULL && data != NULL) {
-		CFStringRef string = CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8);
-
-		if (string != NULL) {
-			BLOCK_CALL(s1, void (*)(void *, void *, CFStringRef), data, string);
-			((void (*)(id, SEL, long, BOOL))objc_msgSend)(self, sel_registerName("_setItem:enabled:"), item, YES);
-			if (strcmp(shown, name) != 0) {
-				snprintf(shown, sizeof(shown), "%s", name);
-				say("hakios: cellular: service \"%s\" shown (item %ld)\n", name, item);
-			}
-			CFRelease(string);
+	/*
+	 * (run 85: the string setter is not (data, string) -- called so, it took the data object for the string and
+	 * SpringBoard died of -[STTelephonyStatusDomainData getCString:...], three times in a row, once the kernel had a
+	 * network's name (run 78 on). The name now goes into UIKit's cellular entry instead: cellular_fix_entries().)
+	 */
+	(void)s1;
+	if (registered > 0 && name[0] != 0) {
+		((void (*)(id, SEL, long, BOOL))objc_msgSend)(self, sel_registerName("_setItem:enabled:"), item, YES);
+		if (strcmp(shown, name) != 0) {
+			snprintf(shown, sizeof(shown), "%s", name);
+			say("hakios: cellular: service item %ld on; the name goes into the cellular entry\n", item);
 		}
 	}
 }
@@ -662,6 +663,22 @@ cellular_fix_entries(id data)
 	entry = responds(data, "cellularEntry") ? ((id (*)(id, SEL))objc_msgSend)(data, sel_registerName("cellularEntry")) : nil;
 	second = responds(data, "secondaryCellularEntry") ? ((id (*)(id, SEL))objc_msgSend)(data, sel_registerName("secondaryCellularEntry")) : nil;
 	if (entry != nil) {
+		static CFStringRef name_string;
+		static char name_said[64];
+		char name[64] = "";
+		size_t size = sizeof(name) - 1;
+
+		sysctlbyname("kern.hakios.cellular_operator", name, &size, NULL, 0);
+		if (name[0] != 0 && strcmp(name, name_said) != 0) {
+			if (name_string != NULL) {
+				CFRelease(name_string);
+			}
+			name_string = CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8);
+			snprintf(name_said, sizeof(name_said), "%s", name);
+		}
+		if (name_string != NULL && responds(entry, "setString:")) {
+			((void (*)(id, SEL, id))objc_msgSend)(entry, sel_registerName("setString:"), (id)name_string);  /* (copies) */
+		}
 		set_ivar_integer(entry, "_displayValue", bars);
 		set_ivar_integer(entry, "_rawValue", dbm);
 		set_ivar_integer(entry, "_displayRawValue", 0);   /* (a flag: the dBm number instead of the bars, as Field Test shows) */

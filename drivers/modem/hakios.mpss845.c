@@ -6599,16 +6599,33 @@ wds_send_subscription(bool get)
 	qrtr_send(wds_port, wds_node, wds_port_number, request, sizeof(request));
 }
 
+/*
+ * Read-only questions to DSD, each empty (the lane's lane-b-notes/ipa351-dds.md, from the vendor's headers of the
+ * Android 8/9 era: whether this MPSS has them is what the answers say): the data switch (Get Data Setting 0x35: TLV
+ * 0x10 the switch, 0 off 1 on; 0x11 roaming; 0x12 the RAT preference; 0x13 Wi-Fi), PS data availability (0x61: TLV
+ * 0x10, 1 on 2 off), the default data subscription (0x4f: TLV 0x10, 1 primary 2 secondary 3 tertiary), DSD's own
+ * subscription (0x28: TLV 0x10).
+ */
+#define DSD_GET_DATA_SETTING    0x0035
+#define DSD_GET_PS_DATA_AVAIL   0x0061
+#define DSD_GET_CURRENT_DDS     0x004f
+#define DSD_GET_BIND_SUBSCRIPTION 0x0028
+
 static void
 dsd_ask(void)
 {
-	uint8_t request[7] = { 0, 0x49, 0, DSD_GET_SYSTEM_STATUS & 0xff, DSD_GET_SYSTEM_STATUS >> 8, 0, 0 };
+	static const uint16_t asks[] = { DSD_GET_SYSTEM_STATUS, DSD_GET_DATA_SETTING, DSD_GET_PS_DATA_AVAIL, DSD_GET_CURRENT_DDS,
+		DSD_GET_BIND_SUBSCRIPTION };
 
 	if (dsd_port == NULL || dsd_port_number == 0 || dsd_asked >= 6) {
 		return;
 	}
 	dsd_asked++;
-	qrtr_send(dsd_port, dsd_node, dsd_port_number, request, sizeof(request));
+	for (unsigned i = 0; i < sizeof(asks) / sizeof(asks[0]); i++) {
+		uint8_t request[7] = { 0, (uint8_t)(0x49 + i * 2), 0, (uint8_t)(asks[i] & 0xff), (uint8_t)(asks[i] >> 8), 0, 0 };
+
+		qrtr_send(dsd_port, dsd_node, dsd_port_number, request, sizeof(request));
+	}
 }
 
 static void
@@ -6623,6 +6640,28 @@ dsd_receive(__unused void *context, __unused uint32_t node, __unused uint32_t po
 		return;
 	}
 	probe_dump("dsd", m, length);
+	if ((uint16_t)(m[3] | m[4] << 8) != DSD_GET_SYSTEM_STATUS) {
+		uint16_t message = (uint16_t)(m[3] | m[4] << 8);
+		uint32_t result = ~0u, error = ~0u, value = ~0u;
+		const char *what = message == DSD_GET_DATA_SETTING ? "THE DATA SWITCH (0 off, 1 on)" :
+		    message == DSD_GET_PS_DATA_AVAIL ? "PS DATA AVAILABILITY (1 on, 2 off)" :
+		    message == DSD_GET_CURRENT_DDS ? "THE DEFAULT DATA SUBSCRIPTION (1 primary, 2 secondary)" :
+		    message == DSD_GET_BIND_SUBSCRIPTION ? "DSD'S OWN SUBSCRIPTION" : "an answer";
+
+		if ((v = qmi_tlv(m, length, 2, &size)) != NULL && size >= 4) {
+			result = (uint32_t)(v[0] | v[1] << 8);
+			error = (uint32_t)(v[2] | v[3] << 8);
+		}
+		if ((v = qmi_tlv(m, length, 0x10, &size)) != NULL && size >= 1) {
+			value = size >= 4 ? (uint32_t)(v[0] | v[1] << 8 | v[2] << 16 | v[3] << 24) : v[0];
+		}
+		tell("mpss: dsd: %s %#x: %u (result %u, error %u; %s)\n", what, message, value, result, error,
+		    value == ~0u ? "NOT ANSWERED" : "the value of TLV 0x10");
+		if (message == DSD_GET_DATA_SETTING && (v = qmi_tlv(m, length, 0x11, &size)) != NULL && size >= 1) {
+			tell("mpss: dsd: data roaming %u\n", v[0]);
+		}
+		return;
+	}
 	for (size_t from = 64; from < length; from += 64) {     /* (the rest: its APNs and which systems each may use) */
 		char hex[3 * 64 + 1];
 		size_t n = 0;
@@ -7137,6 +7176,12 @@ uim_receive(__unused void *context, __unused uint32_t node, __unused uint32_t po
 			"illegal", "READY" };
 		unsigned at = 8, slots = v[8], first_card = ~0u, primary_gw = (unsigned)(v[0] | v[1] << 8);
 		uint8_t ready_aid[1 + 32] = { 0 };     /* the AID (a length, then the bytes) of a READY USIM in logical slot 1 */
+		unsigned ready_aid_slot = 1;            /* the logical slot it is in (from 1) */
+		/* (run 71: as postmarketOS's msm-modem-uim-selection does -- the slots left as they are, the card's own slot's USIM
+		 * made the primary GW application; modem_sim_switch=1: logical slot 1 pointed at the card's slot first, as before:
+		 * runs 68-70, registered on LTE, every data session refused "no service", as if the modem's default data
+		 * subscription had stayed with the card's old slot) */
+		bool switching = option("modem_sim_switch") && !option("modem_sim_switch_off");
 
 		tell("mpss: uim: the primary GW application is slot %u application %u (0xff: none)\n", v[1], v[0]);
 		at = 9;
@@ -7164,9 +7209,11 @@ uim_receive(__unused void *context, __unused uint32_t node, __unused uint32_t po
 				}
 				/* a USIM (or SIM) in logical slot 1 that is READY, or only "detected" (cycle 37: the card sits in slot 1 with its
 				 * application detected and never initialized, as no provisioning session names it): either is provisioned below */
-				if (slot == 0 && card == 1 && (state == 7 || state == 1) && (type == 2 || type == 1) && aid <= 32 && at + 7 + aid <= size) {
+				if ((switching ? slot == 0 : ready_aid[0] == 0) && card == 1 && (state == 7 || state == 1) && (type == 2 || type == 1) &&
+				    aid <= 32 && at + 7 + aid <= size) {
 					ready_aid[0] = (uint8_t)aid;
 					memcpy(ready_aid + 1, v + at + 7, aid);
+					ready_aid_slot = slot + 1;
 				}
 				at += 7 + aid + 7;
 			}
@@ -7192,17 +7239,17 @@ uim_receive(__unused void *context, __unused uint32_t node, __unused uint32_t po
 			pr[n++] = 0; pr[n++] = 0;       /* the length, below */
 			pr[n++] = 0x01; pr[n++] = 2; pr[n++] = 0; pr[n++] = 0; pr[n++] = 1;   /* primary GW, activate */
 			pr[n++] = 0x10; pr[n++] = (uint8_t)(2 + ready_aid[0]); pr[n++] = 0;
-			pr[n++] = 1;                    /* logical slot 1 */
+			pr[n++] = (uint8_t)ready_aid_slot; /* the card's logical slot */
 			pr[n++] = ready_aid[0];
 			memcpy(pr + n, ready_aid + 1, ready_aid[0]);
 			n += ready_aid[0];
 			pr[5] = (uint8_t)(n - 7); pr[6] = (uint8_t)((n - 7) >> 8);
 			sim_provisioned = true;
-			tell("mpss: uim: THE USIM OF SLOT 1 IS MADE THE PRIMARY GW APPLICATION (AID of %u bytes; its state is looked at again)\n",
-			    ready_aid[0]);
+			tell("mpss: uim: THE USIM OF SLOT %u IS MADE THE PRIMARY GW APPLICATION (AID of %u bytes; its state is looked at again)\n",
+			    ready_aid_slot, ready_aid[0]);
 			qrtr_send(uim_port, uim_node, uim_port_number, pr, n);
 		}
-		if (first_card != 1 && sim_slot_ready > 1 && !sim_slot_switched && !option("modem_sim_switch_off") && uim_port != NULL) {
+		if (first_card != 1 && sim_slot_ready > 1 && !sim_slot_switched && switching && uim_port != NULL) {
 			uint8_t sw[7 + 4 + 7] = { 0, 0x34, 0, UIM_SWITCH_SLOT & 0xff, UIM_SWITCH_SLOT >> 8, 11, 0,
 						  1, 1, 0, 1, 2, 4, 0, (uint8_t)sim_slot_ready, 0, 0, 0 };
 

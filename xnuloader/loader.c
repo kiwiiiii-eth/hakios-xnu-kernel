@@ -515,6 +515,9 @@ static void
 dt_identity(struct dt_writer *w, const struct identity_prop *props, uint32_t count, const unsigned char *data)
 {
 	for (uint32_t i = 0; i < count; i++) {
+		if (props[i].name[0] == 0) {
+			continue;               /* (a blank loader's unused entry: mkidentity.py --blank) */
+		}
 		if (str_eq(props[i].name, "artwork-display-gamut") && !gamut_p3) {
 			dt_prop(w, props[i].name, "sRGB", 5);
 			continue;
@@ -528,7 +531,7 @@ static void
 dt_identity_one(struct dt_writer *w, const struct identity_prop *props, uint32_t count, const unsigned char *data, const char *name)
 {
 	for (uint32_t i = 0; i < count; i++) {
-		if (str_eq(props[i].name, name)) {
+		if (props[i].name[0] != 0 && str_eq(props[i].name, name)) {
 			dt_prop(w, props[i].name, data + props[i].offset, props[i].length);
 		}
 	}

@@ -1184,11 +1184,10 @@ lx_stop(void)
 	}
 }
 
-/* (frames: W4c/W5) */
+/* An Ethernet frame from the kernel's en0 for the network (hakios.lx.c's queue): lx_80211.c's station sends it, once
+ * joined. (Until run 42 this said ENETDOWN, left from W4b: everything the system sent -- DHCP, ARP -- was dropped.) */
 int
 lx_transmit(const unsigned char *frame, unsigned long length)
 {
-	(void)frame;
-	(void)length;
-	return (ENETDOWN);
+	return (lx_station_send(frame, length));
 }

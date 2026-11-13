@@ -3336,7 +3336,10 @@ step_apr(void)
 #define TFA_REVISION            0x03            /* the NXP driver's tfa98xx_probe(): regmap_read(0x03), (value & 0xff) == 0x94 for the TFA9894 */
 #define TFA_REVISION_9894       0x94
 
-static struct block gcc_block = { "GCC", GCC_PHYS, GCC_SIZE, 0 };
+/* two pages of the GCC, not its 384 KB: so late in the start the kernel's room for mappings is short (hakios.bt3990.c, run 82:
+ * a mapping of 0x60000 refused, a panic) */
+static struct block gcc_vote_block = { "GCC", GCC_PHYS + 0x52000u, 0x1000, 0 };
+static struct block gcc_qup_block = { "GCC", GCC_PHYS + 0x17000u, 0x1000, 0 };
 static struct block se4_block = { "SE4", SE4_PHYS, SE4_SIZE, 0 };
 
 struct pin_look {
@@ -3510,12 +3513,12 @@ step_tfa(void)
 	    "control words of gpio58-61, 69, 89 and 90 (nothing written); if the three clocks run: set up engine 4 as an I2C master "
 	    "(its own registers) and read the speaker amplifier's revision, register 0x03 at address 0x34");
 	snprintf(last_write, sizeof(last_write), "step %u wrote nothing (it only read)", step);
-	vote = get(&gcc_block, "vote word", GCC_VOTE_WORD);
-	m_ahb = get(&gcc_block, "QUP wrapper 0 M_AHB halt", GCC_QUP0_M_AHB_HALT);
-	s_ahb = get(&gcc_block, "QUP wrapper 0 S_AHB halt", GCC_QUP0_S_AHB_HALT);
-	s4 = get(&gcc_block, "engine 4 halt", GCC_QUP0_S4_HALT);
-	cmd = get(&gcc_block, "engine 4 root command", GCC_QUP0_S4_CMD);
-	cfg = get(&gcc_block, "engine 4 root config", GCC_QUP0_S4_CFG);
+	vote = get(&gcc_vote_block, "vote word", GCC_VOTE_WORD - 0x52000u);
+	m_ahb = get(&gcc_qup_block, "QUP wrapper 0 M_AHB halt", GCC_QUP0_M_AHB_HALT - 0x17000u);
+	s_ahb = get(&gcc_qup_block, "QUP wrapper 0 S_AHB halt", GCC_QUP0_S_AHB_HALT - 0x17000u);
+	s4 = get(&gcc_qup_block, "engine 4 halt", GCC_QUP0_S4_HALT - 0x17000u);
+	cmd = get(&gcc_qup_block, "engine 4 root command", GCC_QUP0_S4_CMD - 0x17000u);
+	cfg = get(&gcc_qup_block, "engine 4 root config", GCC_QUP0_S4_CFG - 0x17000u);
 	clocks_on = !(m_ahb >> 31) && !(s_ahb >> 31) && !(s4 >> 31);
 	printf("adsp845: %u: the clocks of engine 4: M_AHB %s, S_AHB %s, the engine's own %s (the vote word %#x: bits 6, 7 and 14 are %u %u %u; bits 8 and 9, the wrapper's core clocks, "
 	    "by the gap in gcc-sdm845.c's list that is wrapper 1's 18 and 19 of hakios.rmi4.c: %u %u)\n",
@@ -3528,7 +3531,7 @@ step_tfa(void)
 		printf("adsp845: %u: ENGINE 4'S CLOCKS ARE NOT ALL RUNNING: the serial engine is not touched (its registers behind a clock that is off "
 		    "would take the phone to CrashDump). Nothing was written. Turning them on is a separate step: see the plan (B2-test-plan.md)\n",
 		    step);
-		return false;
+		return true;    /* (a look, done: step 13 reaches the amplifier without the engine) */
 	}
 	if ((cfg & 0x371fu) > 1) {
 		/* [4:0] divider (0 and 1: by one), [10:8] source (0: the 19.2 MHz crystal), [13:12] mode (0: bypass) */
@@ -3557,7 +3560,7 @@ step_tfa(void)
 		if (se4 == 0) {
 			printf("adsp845: %u: engine 4's registers would be written next: not without adsp8_se4=1 (not agreed to): nothing more is done\n",
 			    step);
-			return false;
+			return true;    /* (a look, done: step 13 reaches the amplifier without the engine) */
 		}
 	}
 	printf("adsp845: %u: about to write engine 4's own setup registers (as hakios.rmi4.c does the touch engine's): FIFO mode, 100 kHz at 19.2 MHz\n",
@@ -3599,25 +3602,221 @@ step_tfa(void)
 	return value[1] == TFA_REVISION_9894;
 }
 
-/* ---- step 13: playback, a design only ----------------------------------------------------------------- */
+/* ---- step 13: the speaker amplifier, reached by I2C made by hand on its two pins ------------------------------ */
 
 /*
- * The whole sequence is written in lane-b-notes/B2-test-plan.md (chapter 6), with what each part writes and which kinds of write would
- * be new to the 6T. It is not code yet: four of its writes are of kinds this driver has not made (the GCC's root clock and votes, the
- * pins' mux, the amplifier's reset line and its registers, and the DSP's AFE and ASM with memory it reads through the SMMU).
+ * S3 of lane-b-notes/sound-shortest-path.md (agreed to by the user, 11-13: the pins gpio89, 90 and 69, and reading the
+ * amplifier). Engine 4 is not used: its clocks are off and turning them on is the GCC's (not agreed to); the two pins of its
+ * I2C are made plain GPIOs for the while and driven as an open-drain bus by hand (a line is let go -- an input with its pull-up --
+ * for a one, and pulled low -- an output at 0 -- for a zero), about 50 kHz. gpio89 is taken for the data and gpio90 for the clock,
+ * QUP's order (the other way round is tried too if nothing answers). What is said to the amplifier (address 0x34): the number of a
+ * register to read, then a read of two bytes (8-bit registers, 16-bit values, most significant byte first: the NXP driver's regmap).
+ *   a  READS gpio89, 90 and 69's control and I/O words (kept, to be given back)
+ *   b  WRITES gpio89 and 90 to plain GPIO inputs with pull-ups; if either line reads low the bus is not idle: given back, stop
+ *   c  reads register 0x03 (the revision: 0x?a94 for a TFA9894) -- the ladder, until something answers: as found; gpio69 (the
+ *      reset) WRITTEN low (the NXP driver's "running"), 2 ms; a pulse, high 1 ms then low, 2 ms; gpio69 high (the other polarity),
+ *      2 ms. Nothing answering at all: said, and nothing more (the supply would be the PMIC's: not agreed to, not done)
+ *   d  if it answers: READS registers 0x00-0x04, 0x10, 0x20-0x24, 0x50, 0x52, 0x57, 0x71, each compared with its value after a
+ *      reset where the NXP sources say it (0x00 0x8245, 0x02 0x55c8, 0x52 0xb617, 0x57 0x0366)
+ *   e  gives gpio89, 90 and 69 back as they were found
+ * Nothing is written to the amplifier but the numbers of the registers read.
  */
-static bool
-step_playback(void)
+#define BB_HALF_US      10u                     /* half a bit: 10 us, about 50 kHz */
+
+struct bitbang {
+	struct pin_look *sda, *scl;
+};
+
+static void
+bb_line(struct pin_look *p, bool high)
 {
-	printf("adsp845: %u: step 13 is a design only (lane-b-notes/B2-test-plan.md, chapter 6) and does not run: nothing is written\n", step);
-	return false;
+	vm_offset_t ctl = p->page.base, io = p->page.base + 4;
+
+	if (high) {
+		wr(ctl, 3);                             /* GPIO, input, pull-up: the line let go */
+	} else {
+		wr(io, 0);                              /* the level it would drive: 0 */
+		wr(ctl, 3u | 1u << 9);                  /* ... and an output */
+	}
+	__builtin_arm_dsb(0xf);
+	delay(BB_HALF_US);
+}
+
+static bool
+bb_level(struct pin_look *p)
+{
+	return rd(p->page.base + 4) & 1;
+}
+
+static void
+bb_start(struct bitbang *b)
+{
+	bb_line(b->sda, true);
+	bb_line(b->scl, true);
+	bb_line(b->sda, false);
+	bb_line(b->scl, false);
+}
+
+static void
+bb_stop(struct bitbang *b)
+{
+	bb_line(b->sda, false);
+	bb_line(b->scl, true);
+	bb_line(b->sda, true);
+}
+
+/* a byte out; true if the other side pulled the data low on the ninth clock */
+static bool
+bb_write(struct bitbang *b, uint8_t byte)
+{
+	bool ack;
+
+	for (int bit = 7; bit >= 0; bit--) {
+		bb_line(b->sda, (byte >> bit) & 1);
+		bb_line(b->scl, true);
+		for (unsigned stretch = 0; stretch < 100 && !bb_level(b->scl); stretch++) {
+			delay(BB_HALF_US);
+		}
+		bb_line(b->scl, false);
+	}
+	bb_line(b->sda, true);
+	bb_line(b->scl, true);
+	ack = !bb_level(b->sda);
+	bb_line(b->scl, false);
+	return ack;
+}
+
+static uint8_t
+bb_read(struct bitbang *b, bool ack)
+{
+	uint8_t byte = 0;
+
+	bb_line(b->sda, true);
+	for (int bit = 7; bit >= 0; bit--) {
+		bb_line(b->scl, true);
+		byte = (uint8_t)(byte << 1 | (bb_level(b->sda) ? 1 : 0));
+		bb_line(b->scl, false);
+	}
+	bb_line(b->sda, !ack);
+	bb_line(b->scl, true);
+	bb_line(b->scl, false);
+	bb_line(b->sda, true);
+	return byte;
+}
+
+/* register reg of the amplifier: true and its value if it answered */
+static bool
+tfa_read(struct bitbang *b, uint8_t reg, uint16_t *value)
+{
+	bool ok;
+	uint8_t high, low;
+
+	bb_start(b);
+	ok = bb_write(b, TFA_ADDRESS << 1) && bb_write(b, reg);
+	if (ok) {
+		bb_start(b);                            /* a repeated start */
+		ok = bb_write(b, TFA_ADDRESS << 1 | 1);
+		if (ok) {
+			high = bb_read(b, true);
+			low = bb_read(b, false);
+			*value = (uint16_t)(high << 8 | low);
+		}
+	}
+	bb_stop(b);
+	return ok;
+}
+
+static bool
+step_amplifier(void)
+{
+	struct pin_look *reset = &pins[4], *p89 = &pins[5], *p90 = &pins[6];
+	uint32_t ctl89, io89, ctl90, io90, ctl69, io69;
+	struct bitbang bus = { p89, p90 };
+	uint16_t revision = 0;
+	bool answered = false;
+	unsigned rung = 0;
+
+	announce("READ gpio89, 90 and 69; WRITE gpio89 and 90 to plain GPIOs (I2C by hand, the bus to the speaker amplifier) and, "
+	    "only if it does not answer as found, gpio69 (its reset); READ the amplifier's registers; give the three pins back");
+	ctl89 = get(&p89->page, "gpio89 control", 0);
+	io89 = get(&p89->page, "gpio89 I/O", 4);
+	ctl90 = get(&p90->page, "gpio90 control", 0);
+	io90 = get(&p90->page, "gpio90 I/O", 4);
+	ctl69 = get(&reset->page, "gpio69 control", 0);
+	io69 = get(&reset->page, "gpio69 I/O", 4);
+	printf("adsp845: %u: about to make gpio89 and gpio90 GPIO inputs with pull-ups (control 0x3), the bus let go\n", step);
+	snprintf(last_write, sizeof(last_write), "step %u wrote gpio89/90 (I2C by hand) and gave them back", step);
+	bb_line(p89, true);
+	bb_line(p90, true);
+	delay(50);
+	if (!bb_level(p89) || !bb_level(p90)) {
+		printf("adsp845: %u: THE BUS IS NOT IDLE (gpio89 reads %u, gpio90 %u, both let go): given back, nothing said on it\n", step,
+		    bb_level(p89), bb_level(p90));
+		goto give_back;
+	}
+	for (rung = 0; rung < 4 && !answered; rung++) {
+		if (rung == 1) {
+			printf("adsp845: %u: about to write gpio69 a GPIO output, LOW (the NXP driver's \"running\"), then wait 2 ms\n", step);
+			wr(reset->page.base + 4, 0);
+			wr(reset->page.base, 1u << 9);
+			delay(2000);
+		} else if (rung == 2) {
+			printf("adsp845: %u: about to pulse gpio69: HIGH 1 ms, then LOW, then wait 2 ms (tfa98xx_ext_reset())\n", step);
+			wr(reset->page.base + 4, 2);
+			delay(1000);
+			wr(reset->page.base + 4, 0);
+			delay(2000);
+		} else if (rung == 3) {
+			printf("adsp845: %u: about to write gpio69 HIGH (the other polarity), then wait 2 ms\n", step);
+			wr(reset->page.base + 4, 2);
+			delay(2000);
+		}
+		for (unsigned order = 0; order < 2 && !answered; order++) {
+			bus.sda = order ? p90 : p89;
+			bus.scl = order ? p89 : p90;
+			answered = tfa_read(&bus, TFA_REVISION, &revision);
+			printf("adsp845: %u: rung %u, data on gpio%u: register 0x03 %s\n", step, rung, bus.sda->number,
+			    answered ? "ANSWERED" : "no acknowledgement");
+		}
+	}
+	if (!answered) {
+		printf("adsp845: %u: THE AMPLIFIER DOES NOT ANSWER at 0x34 on any rung (as found, reset low, a reset pulse, reset high), either "
+		    "pin order: its supply may be off (the PMIC's: not agreed to, not done). Nothing more\n", step);
+		goto give_back;
+	}
+	printf("adsp845: %u: THE AMPLIFIER ANSWERS: register 0x03 = %#06x (%s; data on gpio%u, rung %u)\n", step, revision,
+	    (revision & 0xff) == TFA_REVISION_9894 ? "a TFA9894" : "NOT a TFA9894's 0x?a94", bus.sda->number, rung - 1);
+	{
+		static const struct { uint8_t reg; uint16_t por; } regs[] = {
+			{ 0x00, 0x8245 }, { 0x01, 0 }, { 0x02, 0x55c8 }, { 0x03, 0 }, { 0x04, 0 }, { 0x10, 0 }, { 0x20, 0 }, { 0x21, 0 },
+			{ 0x22, 0 }, { 0x23, 0 }, { 0x24, 0 }, { 0x50, 0 }, { 0x52, 0xb617 }, { 0x57, 0x0366 }, { 0x71, 0 },
+		};
+
+		for (unsigned i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+			uint16_t v = 0;
+			bool ok = tfa_read(&bus, regs[i].reg, &v);
+
+			printf("adsp845: %u:   reg %#04x = %s%#06x%s\n", step, regs[i].reg, ok ? "" : "(NO ACK) ", v,
+			    regs[i].por == 0 ? "" : v == regs[i].por ? " (its value after a reset)" : " (NOT its value after a reset)");
+		}
+	}
+give_back:
+	printf("adsp845: %u: about to give gpio89, 90 and 69 back as they were found (control %#x %#x %#x)\n", step, ctl89, ctl90, ctl69);
+	wr(p89->page.base + 4, io89 & 2);
+	wr(p89->page.base, ctl89);
+	wr(p90->page.base + 4, io90 & 2);
+	wr(p90->page.base, ctl90);
+	wr(reset->page.base + 4, io69 & 2);
+	wr(reset->page.base, ctl69);
+	printf("adsp845: %u: bus given back\n", step);
+	return answered;
 }
 
 /* ---- the steps, and their end ----------------------------------------------------------------------- */
 
 static bool (*const steps[STEPS])(void) = {
 	step_survey, step_firmware, step_mailbox, step_header, step_image, step_our_item, step_start, step_queues, step_link, step_qrtr,
-	step_apr, step_tfa, step_playback,
+	step_apr, step_tfa, step_amplifier,
 };
 
 static bool keep;                       /* the DSP and the link stay up while the system runs (adsp8_keep) */

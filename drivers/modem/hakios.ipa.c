@@ -269,6 +269,7 @@ hakios_ipa_set_version(unsigned version)
 		command.id = 4;
 		command.endpoint = 5;
 		command.tlv = 20;
+		command.slots = 64;             /* (the lane's review: a TLV of 20 wants a ring of at least 39) */
 		lan_rx.id = 5;
 		lan_rx.endpoint = 9;
 		lan_rx.tlv = 8;
@@ -428,6 +429,15 @@ channel_setup(struct channel *ch)
 	}
 	gsi_wr(CH_QOS(c), value);
 	/* the GPI scratch: the most outstanding TREs (in bytes), the threshold 2 TREs */
+	if (ipa_ver == 351) {
+		/* Linux's struct gsi_channel_scratch_gpi: a u64 and a u16 reserved, then max_outstanding_tre (word 2, high half),
+		 * a u16 reserved, then outstanding_threshold (word 3, high half; the low half kept) -- the lane's review */
+		gsi_wr(CH_SCRATCH(c, 0), 0);
+		gsi_wr(CH_SCRATCH(c, 1), 0);
+		gsi_wr(CH_SCRATCH(c, 2), (ch->tlv * ELEMENT_SIZE) << 16);
+		gsi_wr(CH_SCRATCH(c, 3), (gsi_rd(CH_SCRATCH(c, 3)) & 0xffff) | (2 * ELEMENT_SIZE) << 16);
+		return true;
+	}
 	gsi_wr(CH_SCRATCH(c, 0), (ch->tlv * ELEMENT_SIZE) << 16);
 	gsi_wr(CH_SCRATCH(c, 1), (2 * ELEMENT_SIZE) << 16);
 	gsi_wr(CH_SCRATCH(c, 2), 0);
@@ -441,6 +451,9 @@ endpoint_program(const struct channel *ch)
 {
 	uint32_t ep = ch->endpoint, value;
 
+	if (ipa_ver == 351) {
+		ipa_wr(0x800 + 0x70 * ep, 0);           /* ENDP_INIT_CTRL: not suspended, not delayed (Linux, IPA below 4.0) */
+	}
 	ipa_wr(ENDP_INIT_CFG(ep), 0);                   /* no fragment or checksum offload */
 	ipa_wr(ENDP_INIT_NAT(ep), 0);                   /* NAT bypassed */
 	value = 0;
@@ -646,6 +659,9 @@ tables_setup(void)
 
 	t[0] = 0;                                       /* the zero rule */
 	t[1] = FILTERED_ENDPOINTS << 1;                 /* the filter bitmap */
+	if (ipa_ver == 351) {
+		t[1] = ((1ull << 2) | (1ull << 3) | (1ull << 6)) << 1;     /* 3.5.1's filtering endpoints: 2, 3, 6 (0x98) */
+	}
 	for (unsigned n = 0; n < ROUTE_ENTRIES; n++) {
 		t[2 + n] = table.phys;
 	}

@@ -6523,6 +6523,10 @@ static bool keep;                       /* (defined below: the DSP and the link 
 #define WDS_GET_CURRENT_SETTINGS 0x002d
 #define WDS_BIND_MUX_DATA_PORT  0x00a2
 #define WDS_SET_IP_FAMILY       0x004d
+#define WDS_BIND_SUBSCRIPTION   0x00af          /* (libqmi: Subscription Id, TLV 1, u32: 1 primary, 2 secondary; 0 the modem's default) */
+#define WDS_GET_BIND_SUBSCRIPTION 0x00b0
+#define QMI_DSD                 0x2a            /* Data System Determination: which system data goes over */
+#define DSD_GET_SYSTEM_STATUS   0x0024
 #define QMI_WDA                 0x1a
 #define WDA_SET_DATA_FORMAT     0x0020
 #define QMI_DPM                 0x2f            /* Data Port Mapper */
@@ -6530,7 +6534,9 @@ static bool keep;                       /* (defined below: the DSP and the link 
 #define DATA_ENDPOINT_EMBEDDED  4               /* the IPA, "interface" 1: where the packets of this session go (as ModemManager binds it) */
 #define DATA_ENDPOINT_INTERFACE 1
 #define DATA_MUX                1               /* the QMAP mux id (hakios.cell.c carries mux 1) */
-static struct hakios_qrtr_port *wds_port, *wda_port, *dpm_port;
+static struct hakios_qrtr_port *wds_port, *wda_port, *dpm_port, *dsd_port;
+static uint32_t dsd_node, dsd_port_number;
+static unsigned dsd_asked;
 static uint32_t wds_node, wds_port_number, wda_node, wda_port_number, dpm_node, dpm_port_number;
 static volatile bool wds_started, wds_up, wds_bound, wda_set;
 static volatile bool dpm_done, dpm_open, wda_sent, wda_done;  /* the port mapped, the data format asked and answered */
@@ -6558,6 +6564,95 @@ static void wds_send_start(void);
  * Each step goes on when the one before has been answered, or after 20 s without an answer.
  * modem_dpm_off=1 / modem_wda_off=1: those steps left out.
  */
+/*
+ * Run 68: registered on LTE (CS+PS, full service), the session refused every time with "no service" (call end
+ * reason 3; verbose: Call Manager, 2001 no service), and NAS's LTE "is the preferred data path" 0. A dual-SIM modem
+ * puts data on its default data subscription; the card, made logical slot 1 here, is the primary subscription, and
+ * Android may have left the default on the other. So the WDS client's subscription is asked, and it is bound to
+ * the primary (modem_wds_sub=N: that one; 0 leaves the client as it is), and DSD is asked what systems it has.
+ */
+static void
+wds_send_subscription(bool get)
+{
+	uint32_t sub = 1;
+	uint8_t request[7 + 7] = { 0, 0x47, 0, 0, 0, 7, 0, 0x01, 4, 0, 0, 0, 0, 0 };
+
+	if (wds_port == NULL || wds_port_number == 0) {
+		return;
+	}
+	if (get) {
+		request[1] = 0x48;
+		request[3] = WDS_GET_BIND_SUBSCRIPTION & 0xff;
+		request[4] = WDS_GET_BIND_SUBSCRIPTION >> 8;
+		request[5] = 0;
+		qrtr_send(wds_port, wds_node, wds_port_number, request, 7);
+		return;
+	}
+	PE_parse_boot_argn("modem_wds_sub", &sub, sizeof(sub));
+	if (sub == 0) {
+		return;
+	}
+	request[3] = WDS_BIND_SUBSCRIPTION & 0xff;
+	request[4] = WDS_BIND_SUBSCRIPTION >> 8;
+	request[10] = (uint8_t)sub;
+	tell("mpss: wds: about to bind the client to subscription %u (1: primary, the card's)\n", sub);
+	qrtr_send(wds_port, wds_node, wds_port_number, request, sizeof(request));
+}
+
+static void
+dsd_ask(void)
+{
+	uint8_t request[7] = { 0, 0x49, 0, DSD_GET_SYSTEM_STATUS & 0xff, DSD_GET_SYSTEM_STATUS >> 8, 0, 0 };
+
+	if (dsd_port == NULL || dsd_port_number == 0 || dsd_asked >= 6) {
+		return;
+	}
+	dsd_asked++;
+	qrtr_send(dsd_port, dsd_node, dsd_port_number, request, sizeof(request));
+}
+
+static void
+dsd_receive(__unused void *context, __unused uint32_t node, __unused uint32_t port, const void *data, size_t length)
+{
+	const uint8_t *m = data, *v;
+	uint16_t size = 0;
+	char line[200];
+	unsigned at = 0;
+
+	if (length < 7 || m[0] == 0) {
+		return;
+	}
+	probe_dump("dsd", m, length);
+	/* Available Systems (0x10): a count, then technology u32 (1 3GPP, 2 3GPP2, 3 WLAN), RAT u32 (3GPP: 1 WCDMA, 2 GERAN,
+	 * 3 LTE, 4 TD-SCDMA, 6 5G; 0x8005 a null bearer), service options u64 -- the first the preferred */
+	line[0] = 0;
+	if ((v = qmi_tlv(m, length, 0x10, &size)) != NULL && size >= 1) {
+		for (unsigned i = 0; i < v[0] && 1 + 16 * (i + 1) <= size && at < sizeof(line) - 40; i++) {
+			const uint8_t *e = v + 1 + 16 * i;
+
+			at += (unsigned)snprintf(line + at, sizeof(line) - at, "%s%u/%#x", i ? ", " : "", (unsigned)(e[0] | e[1] << 8),
+			    (unsigned)(e[4] | e[5] << 8 | e[6] << 16 | e[7] << 24));
+		}
+	}
+	tell("mpss: dsd: THE DATA SYSTEMS: %s (technology/RAT, the preferred first; 1/0x3: LTE)\n", line[0] ? line : "NONE");
+}
+
+static void
+dsd_server(__unused void *context, bool arrived, uint32_t service, __unused uint32_t version, __unused uint32_t instance, uint32_t node,
+    uint32_t port)
+{
+	if (service != QMI_DSD) {
+		return;
+	}
+	if (arrived) {
+		dsd_node = node;
+		dsd_port_number = port;
+		dsd_ask();
+	} else if (node == dsd_node && port == dsd_port_number) {
+		dsd_node = dsd_port_number = 0;
+	}
+}
+
 static void
 wda_send_format(void)
 {
@@ -6694,6 +6789,26 @@ wds_receive(__unused void *context, __unused uint32_t node, __unused uint32_t po
 	}
 	probe_dump("wds", m, length);
 	message = (uint16_t)(m[3] | m[4] << 8);
+	if (m[0] == 2 && (message == WDS_BIND_SUBSCRIPTION || message == WDS_GET_BIND_SUBSCRIPTION)) {
+		uint32_t result = ~0u, error = ~0u, sub = ~0u;
+
+		if ((v = qmi_tlv(m, length, 2, &size)) != NULL && size >= 4) {
+			result = (uint32_t)(v[0] | v[1] << 8);
+			error = (uint32_t)(v[2] | v[3] << 8);
+		}
+		if ((v = qmi_tlv(m, length, 0x10, &size)) != NULL && size >= 4) {
+			sub = (uint32_t)(v[0] | v[1] << 8 | v[2] << 16 | v[3] << 24);
+		}
+		if (message == WDS_GET_BIND_SUBSCRIPTION) {
+			tell("mpss: wds: THE CLIENT'S SUBSCRIPTION IS %u (0 the default, 1 primary, 2 secondary; result %u, error %u)\n", sub,
+			    result, error);
+		} else {
+			tell("mpss: wds: THE CLIENT %s TO THE SUBSCRIPTION (result %u, error %u)\n", result == 0 ? "IS BOUND" : "IS NOT BOUND",
+			    result, error);
+			wds_send_subscription(true);
+		}
+		return;
+	}
 	if (m[0] == 2 && message == WDS_START_NETWORK_INTERFACE) {
 		uint32_t result = ~0u, error = ~0u, reason = ~0u;
 
@@ -6718,6 +6833,7 @@ wds_receive(__unused void *context, __unused uint32_t node, __unused uint32_t po
 			if (error != 70) {
 				wds_refusals++;
 			}
+			dsd_ask();
 			wds_last_try = now_us();
 		}
 	} else if (m[0] == 2 && message == WDS_BIND_MUX_DATA_PORT) {
@@ -6786,6 +6902,8 @@ wds_server(__unused void *context, bool arrived, uint32_t service, __unused uint
 	if (arrived) {
 		wds_node = node;
 		wds_port_number = port;
+		wds_send_subscription(true);
+		wds_send_subscription(false);
 	} else if (node == wds_node && port == wds_port_number) {
 		wds_node = wds_port_number = 0;
 	}
@@ -6800,6 +6918,12 @@ wds_open(void)
 		wds_port = qrtr_open(wds_receive, wds_server, NULL);
 		if (wds_port != NULL) {
 			qrtr_lookup(wds_port, QMI_WDS, 0, 0);
+		}
+	}
+	if (dsd_port == NULL && wds_port != NULL) {
+		dsd_port = qrtr_open(dsd_receive, dsd_server, NULL);
+		if (dsd_port != NULL) {
+			qrtr_lookup(dsd_port, QMI_DSD, 0, 0);
 		}
 	}
 	if (dpm_port == NULL && !option("modem_dpm_off") && !option("modem_data_off")) {
@@ -6876,9 +7000,9 @@ wds_send_start(void)
 	request[0] = 0; request[1] = 0x41; request[2] = 0;
 	request[3] = WDS_START_NETWORK_INTERFACE & 0xff; request[4] = WDS_START_NETWORK_INTERFACE >> 8;
 	request[at++] = 0x19; request[at++] = 1; request[at++] = 0; request[at++] = 4;      /* IPv4 */
-	/* (no modem_apn: the default profile, and after a refusal every other try the APN most Taiwanese carriers use,
-	 * FarEasTone's among them: "internet") */
-	if (!PE_parse_boot_argn("modem_apn", apn, sizeof(apn)) && (wds_refusals & 1)) {
+	/* (no modem_apn: first the APN most Taiwanese carriers use, FarEasTone's among them, "internet", with no
+	 * authentication, as ModemManager asks; after a refusal every other try the SIM's default profile) */
+	if (!PE_parse_boot_argn("modem_apn", apn, sizeof(apn)) && !(wds_refusals & 1)) {
 		strlcpy(apn, "internet", sizeof(apn));
 	}
 	if (apn[0] != 0) {
@@ -6887,6 +7011,7 @@ wds_send_start(void)
 		request[at++] = 0x14; request[at++] = (uint8_t)n; request[at++] = 0;
 		memcpy(request + at, apn, n);
 		at += n;
+		request[at++] = 0x16; request[at++] = 1; request[at++] = 0; request[at++] = 0;  /* authentication: none */
 	}
 	request[5] = (uint8_t)(at - 7); request[6] = (uint8_t)((at - 7) >> 8);
 	tell("mpss: wds: about to start the data session (IPv4, %s%s)\n", apn[0] ? "APN " : "the default profile", apn);
@@ -6896,6 +7021,11 @@ wds_send_start(void)
 static void
 wds_close(void)
 {
+	if (dsd_port != NULL) {
+		qrtr_close(dsd_port);
+		dsd_port = NULL;
+		dsd_node = dsd_port_number = 0;
+	}
 	if (wds_port != NULL) {
 		qrtr_close(wds_port);
 		wds_port = NULL;

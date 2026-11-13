@@ -7111,6 +7111,49 @@ step_nas(void)
 	return nas.connected;
 }
 
+/*
+ * The link's health, said (run 52: once the modem registered, ath10k's WMI timed out and then every QMI message to
+ * WLFW failed with ENOBUFS -- no receive intent of the modem's free for 5 s: has the modem stopped altogether, or only
+ * stopped reading?): the modem's SMP2P word (its fatal bit, and then its last words), NAS's questions and answers,
+ * our queue's room and theirs unread, and the modem's intents on QRTR's channel. Every 30 s, and when its word turns
+ * fatal.
+ */
+static void
+link_health(const char *why)
+{
+	struct glink_channel *channel = &glink.channel[CHANNEL_QRTR];
+	struct smp2p words;
+	uint32_t state = 0, head, tail, unread = 0, there = 0, in_use = 0;
+	bool have = dsp_words(&words);
+
+	if (have) {
+		state = dsp_state(&words);
+	}
+	head = smem_word(glink.descriptor + GLINK_THEIR_HEAD);
+	tail = smem_word(glink.descriptor + GLINK_THEIR_TAIL);
+	if (glink.theirs_size != 0 && head < glink.theirs_size && tail < glink.theirs_size) {
+		unread = head >= tail ? head - tail : glink.theirs_size - tail + head;
+	}
+	for (unsigned n = 0; n < sizeof(channel->their_intents) / sizeof(channel->their_intents[0]); n++) {
+		there += channel->their_intents[n].there;
+		in_use += channel->their_intents[n].there && channel->their_intents[n].in_use;
+	}
+	tell("mpss: link (%s): the modem's word %s%#x%s; NAS asked %u, answered %u; GLINK: our queue's room %u of %u, theirs unread %u "
+	    "of %u%s; QRTR: the modem's intents %u, %u of them in use\n", why, have ? "" : "(not read) ", state, (state & DSP_FATAL) ?
+	    " (FATAL: it has given up)" : "", nas_polls, nas.answers, glink_room(), glink.ours_size, unread, glink.theirs_size,
+	    glink.broken ? ", BROKEN" : "", there, in_use);
+	if (state & DSP_FATAL) {
+		char text[257];
+		uint32_t size = 0, at = smem_item(ITEM_CRASH_REASON, &size);
+
+		bzero(text, sizeof(text));
+		if (at != 0 && size != 0) {
+			smem_peek(at, text, size < sizeof(text) - 1 ? size : sizeof(text) - 1);
+		}
+		tell("mpss: THE MODEM'S LAST WORDS: \"%s\"\n", text[0] != 0 ? text : "(none)");
+	}
+}
+
 /* With modem=1: NAS asked every two seconds while the modem runs, on a thread of its own. */
 static volatile bool nas_wanted, nas_runs;
 
@@ -7125,6 +7168,16 @@ nas_thread(__unused void *parameter, __unused wait_result_t result)
 		}
 		if (++rounds % 60 == 1) {
 			wlfw_rails_line(nas.state.registered ? "registered, now" : "not registered, now");     /* (every two minutes) */
+		}
+		{
+			struct smp2p words;
+			static bool fatal_said;
+			bool fatal = dsp_words(&words) && (dsp_state(&words) & DSP_FATAL);
+
+			if (rounds % 15 == 1 || (fatal && !fatal_said)) {
+				fatal_said |= fatal;
+				link_health(fatal ? "THE MODEM'S WORD TURNED FATAL" : "every 30 s");
+			}
 		}
 		for (unsigned ms = 0; ms < 2000 && nas_wanted; ms += 100) {
 			sleep_ms(100);

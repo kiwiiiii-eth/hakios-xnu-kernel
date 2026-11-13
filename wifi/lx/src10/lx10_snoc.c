@@ -677,6 +677,14 @@ lx_qmi_send_request(struct qmi_handle *qmi, struct sockaddr_qrtr *sq, struct qmi
 	return (qmi_send_request(qmi, sq, txn, msg_id, largest, ei, structure));
 }
 
+/* A regulatory domain with room for n rules, as regulatory_hint() asks for one (ath10k's mac.c, for a board's domain that
+ * is not the world's): the radio keeps it as its wiphy's */
+struct linuxkpi_ieee80211_regdomain *
+lkpi_get_linuxkpi_ieee80211_regdomain(size_t n)
+{
+	return (kzalloc(sizeof(struct linuxkpi_ieee80211_regdomain) + n * sizeof(struct ieee80211_reg_rule), GFP_KERNEL));
+}
+
 /* ---- FreeBSD's, as LinuxKPI's headers reach them ------------------------------------------------------- */
 
 const uint8_t rfc1042_header[6] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 };

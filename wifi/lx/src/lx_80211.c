@@ -109,6 +109,9 @@ struct lx_radio {
 	volatile int handshake;			/* the last thing lx_wpa_message() said */
 	const char *handshake_why;
 	struct work_struct group_work;		/* a new group key, later on */
+	bool works_ready;			/* group_work and ba_work are initialized (a join has begun) */
+	struct work_struct restart_work;	/* the driver's recovery: ieee80211_restart_hw() */
+	unsigned restarts;
 	/* block ack: the access point's requests to send us frames in aggregates, by traffic class (TID) */
 	struct work_struct ba_work;
 	volatile uint8_t ba_asked;		/* TIDs with a request (ADDBA or DELBA) not yet dealt with */
@@ -181,6 +184,8 @@ linuxkpi_80211_wiphy_register(struct wiphy *wiphy)
 	return (0);
 }
 
+static void restart_run(struct work_struct *work);
+
 /* ieee80211_register_hw(): the driver has described its radio, and from here on may be asked for things. */
 int
 linuxkpi_ieee80211_ifattach(struct ieee80211_hw *hw)
@@ -198,6 +203,7 @@ linuxkpi_ieee80211_ifattach(struct ieee80211_hw *hw)
 	    "bytes of extras in a scan\n", bands, is_zero_ether_addr(hw->wiphy->perm_addr) ? "IT HAS NO ADDRESS" :
 	    "it has an address", hw->wiphy->max_scan_ssids, hw->wiphy->max_scan_ie_len);
 	radio->registered = true;
+	INIT_WORK(&radio->restart_work, restart_run);
 	the_radio = radio;
 	return (0);
 }
@@ -622,10 +628,94 @@ linuxkpi_ieee80211_connection_loss(struct ieee80211_vif *vif)
 	lx_os_station_lost(ECONNRESET);
 }
 
-/* (the driver's recovery after its firmware has died, which nothing here goes through) */
+/*
+ * The driver's recovery (ath10k_core_restart(): its firmware gone -- a WMI command unanswered, or WLFW's service gone and
+ * back): mac80211's ieee80211_restart_hw(), as far as this station goes (run 51: once the modem registered on LTE the
+ * radio's firmware stopped answering, and with this empty Wi-Fi stayed dead for the rest of the run). On the stack's
+ * work queue: the system told the link is down; what we kept of the network forgotten without asking the driver (its
+ * firmware has forgotten it too); then the radio started again and the interface added again, and the driver told the
+ * reconfiguration is over, as mac80211's reconfiguration does. If the radio does not start (its firmware not back yet)
+ * the interface is dropped altogether: the next scan wifid asks for starts it afresh (station_up()). wifid joins again.
+ */
 void
 linuxkpi_ieee80211_restart_hw(struct ieee80211_hw *hw)
 {
+	struct lx_radio *radio = radio_of(hw);
+
+	lx_tell("lx: THE DRIVER RESTARTS ITS FIRMWARE: the radio is to be brought up again\n");
+	queue_work(radio->work, &radio->restart_work);
+}
+
+static void
+restart_run(struct work_struct *work)
+{
+	struct lx_radio *radio = __containerof(work, struct lx_radio, restart_work);
+	struct ieee80211_hw *hw = &radio->hw;
+	struct ieee80211_vif *vif = radio->vif;
+	struct ieee80211_key_conf **keys[2] = { &radio->group_key, &radio->pairwise_key };
+	int ret = -1;
+
+	radio->restarts++;
+	if (radio->joined || radio->joining) {
+		radio->joined = radio->joining = false;
+		radio->last_error = ECONNRESET;
+		lx_os_net_link(0);
+		lx_os_station_lost(ECONNRESET);
+	}
+	if (radio->works_ready) {
+		cancel_work_sync(&radio->group_work);
+		cancel_work_sync(&radio->ba_work);
+	}
+	radio->ba_asked = 0;
+	bzero(radio->ba, sizeof(radio->ba));
+	for (unsigned i = 0; i < 2; i++) {
+		if (*keys[i] != NULL) {
+			explicit_bzero((*keys[i])->key, 16);
+			kfree(*keys[i]);
+			*keys[i] = NULL;
+		}
+	}
+	explicit_bzero(&radio->wpa, sizeof(radio->wpa));
+	kfree(radio->channel);
+	radio->channel = NULL;
+	kfree(radio->sta_memory);
+	radio->sta_memory = radio->sta = NULL;
+	radio->reached = IEEE80211_STA_NOTEXIST;
+	lx_os_lock();
+	radio->answer = ANSWER_GONE;
+	lx_os_wakeup(&radio->answer);
+	if (radio->scan == 1) {
+		radio->scan = 3;
+		lx_os_wakeup(&radio->scan);
+	}
+	lx_os_unlock();
+	if (vif != NULL) {
+		vif->cfg.assoc = false;
+		vif->cfg.aid = 0;
+		vif->bss_conf.bssid = no_network;
+		vif->bss_conf.chanctx_conf = NULL;
+	}
+	mutex_lock(&hw->wiphy->mtx);
+	if (radio->started) {
+		ret = radio->ops->start(hw);
+		if (ret == 0 && vif != NULL) {
+			ret = radio->ops->add_interface(hw, vif);
+		}
+		if (ret == 0 && radio->ops->reconfig_complete != NULL) {
+			radio->ops->reconfig_complete(hw, IEEE80211_RECONFIG_TYPE_RESTART);
+		}
+		if (ret != 0) {
+			/* (the driver has the radio down: it is started afresh by the next station_up(), once its firmware is back) */
+			radio->started = false;
+			radio->vif = NULL;
+		}
+	}
+	mutex_unlock(&hw->wiphy->mtx);
+	if (ret != 0 && radio->vif == NULL && vif != NULL) {
+		radio->vif_memory = NULL;       /* (left, not freed: the driver may still point at the old interface) */
+	}
+	lx_tell("lx: THE DRIVER'S RECOVERY %u: %s (%d); the system rejoins on its own\n", radio->restarts, ret == 0 ?
+	    "THE RADIO IS UP AGAIN, the interface added again" : "the radio does not start yet: the next scan starts it afresh", ret);
 }
 
 /* ---- elements --------------------------------------------------------------------------------------- */
@@ -1793,6 +1883,7 @@ station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
 	}
 	INIT_WORK(&radio->group_work, group_rekey);
 	INIT_WORK(&radio->ba_work, ba_handle);
+	radio->works_ready = true;
 	radio->ba_asked = 0;
 	bzero(radio->ba, sizeof(radio->ba));
 	memcpy(radio->want, name, name_length);

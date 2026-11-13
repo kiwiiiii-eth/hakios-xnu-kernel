@@ -29,6 +29,12 @@ adsp_pause	k
 adsp_return	k
 adsp_step	k
 adsp_wait	k
+aks_flags	k
+aks_keys	k
+aks_lockstate	k
+aks_log	k
+aks_probe	k
+aks_verbose	k
 apfs_cheap	k
 apfs_check	k
 apfs_chunk	k

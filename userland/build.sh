@@ -130,7 +130,7 @@ DARWIN_JOBS=${JOBS-"
 # Bluetooth (BT=1, the kernel's drivers/bluetooth/hakios.bt3990.c with bt=4): bluetoothd, BlueTool (which src/inject_bt.c
 # turns into an answer that the controller is up), and what bluetoothd asks for on its way (HakiOS's MediaTek branch:
 # tccd, securityd; and wifid, above, without which its antenna vendor command stalls)
-[ -n "$BT" ] && DARWIN_JOBS="$DARWIN_JOBS com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.securityd"
+[ -n "$BT" ] && DARWIN_JOBS="$DARWIN_JOBS com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.securityd com.apple.mobile.keybagd"
 # The programs (file names) started with a library of ours inside them: "LIBRARY NAME..." per line
 # (src/inject.c is libhakios.dylib, src/inject_sb.c is libhakios.sb.dylib, src/inject_media.c is
 # libhakios.media.dylib).
@@ -242,6 +242,11 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -framework CoreFoundation -framework Security -o obj/keychain_test src/keychain_test.c &&
 			{ ${LDID:-ldid} -Ssrc/keychain_test.entitlements obj/keychain_test 2>/dev/null ||
 			  echo "build.sh: no ldid: keychain_test is unsigned, and the keychain will refuse it (-34018)"; }
+		# (the system keybag made once, as a restore would, for the kernel's key store with aks_keys=1: src/aks_restore.c;
+		#  only a program with com.apple.keystore.device may make bags)
+		$DYN -framework CoreFoundation -framework IOKit -o obj/aks_restore src/aks_restore.c &&
+			{ ${LDID:-ldid} -Ssrc/aks_restore.entitlements obj/aks_restore 2>/dev/null ||
+			  echo "build.sh: no ldid: aks_restore is unsigned, and the key store will not let it make a bag"; }
 		# (and wifid's way of keeping a network's password, by wifid's name: src/wifipw_test.c)
 		$DYN -framework CoreFoundation -framework Security -o obj/wifipw_test src/wifipw_test.c &&
 			{ ${LDID:-ldid} -Ssrc/wifipw_test.entitlements obj/wifipw_test 2>/dev/null ||
@@ -371,6 +376,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/net_test ] && cp obj/net_test root/bin/
 	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
 	[ -f obj/keychain_test ] && cp obj/keychain_test root/bin/
+	[ -f obj/aks_restore ] && cp obj/aks_restore root/bin/
 	[ -f obj/wifipw_test ] && cp obj/wifipw_test root/bin/
 	[ -f obj/sound_test ] && cp obj/sound_test root/bin/
 	[ -f obj/torch_test ] && cp obj/torch_test root/bin/

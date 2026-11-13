@@ -28,6 +28,12 @@ ADSP_PAUSE	arg	adsp_pause	Audio and battery	k	hakios.adsp.c
 ADSP_RETURN	arg	adsp_return	Audio and battery	k	hakios.adsp.c	
 ADSP_STEP	arg	adsp_step	Audio and battery	k	hakios.adsp.c	
 ADSP_WAIT	arg	adsp_wait	Audio and battery	k	hakios.adsp.c	
+AKS_FLAGS	arg	aks_flags	User space	k	MiniAppleKeyStore.cpp	
+AKS_KEYS	arg	aks_keys	User space	k	MiniAppleKeyStore.cpp	
+AKS_LOCKSTATE	arg	aks_lockstate	User space	k	MiniAppleKeyStore.cpp	
+AKS_LOG	arg	aks_log	User space	k	MiniAppleKeyStore.cpp	every call said, its process, scalars, sizes and answer (the first 24 of each selector)
+AKS_PROBE	arg	aks_probe	User space	k	MiniAppleKeyStore.cpp	answer a selector not implemented with zeroes of the size asked for, to map a protocol (mobileactivationd's UIK calls); aks_verbose=1: say who reads
+AKS_VERBOSE	arg	aks_verbose	User space	k	MiniAppleKeyStore.cpp	
 APFS_CHEAP	arg	apfs_cheap	Storage and APFS	k	apfs_vfsops.c	
 APFS_CHECK	arg	apfs_check	Storage and APFS	k	hakios.apfs_check.c	walk the whole volume and print only the totals
 APFS_CHUNK	arg	apfs_chunk	Storage and APFS	k	hakios.apfs_check.c	

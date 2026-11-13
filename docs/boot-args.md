@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **416 arguments**: 344 read by the kernel, 14 by the loader, 69 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **422 arguments**: 350 read by the kernel, 14 by the loader, 69 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
@@ -415,11 +415,17 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (79)
+## User space (85)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
 | `adreno_keep_watch` | K | `hakios.a630.c` | `CONFIG_ADRENO_KEEP_WATCH` |  |
+| `aks_flags` | K | `MiniAppleKeyStore.cpp` | `CONFIG_AKS_FLAGS` |  |
+| `aks_keys` | K | `MiniAppleKeyStore.cpp` | `CONFIG_AKS_KEYS` |  |
+| `aks_lockstate` | K | `MiniAppleKeyStore.cpp` | `CONFIG_AKS_LOCKSTATE` |  |
+| `aks_log` | K | `MiniAppleKeyStore.cpp` | `CONFIG_AKS_LOG` |  |
+| `aks_probe` | K | `MiniAppleKeyStore.cpp` | `CONFIG_AKS_PROBE` |  |
+| `aks_verbose` | K | `MiniAppleKeyStore.cpp` | `CONFIG_AKS_VERBOSE` |  |
 | `autounlock` | U | `inject_sb.c` | `CONFIG_AUTOUNLOCK` |  |
 | `bt` | K | `hakios.bt.c`, `hakios.bt3990.c` | `CONFIG_BT` |  |
 | `bt_after` | K | `hakios.bt3990.c` | `CONFIG_BT_AFTER` |  |

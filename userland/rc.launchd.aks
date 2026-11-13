@@ -1,0 +1,8 @@
+# etc/rc with the kernel's key store holding keys (boot-arg aks_keys=1, iokit/Kernel/MiniAppleKeyStore.cpp; HakiOS's
+# MediaTek branch's rc.launchd.aks): before launchd what its boot task "keybag" (keybagd --init) does on a device and
+# skips when it boots from a RAM disk -- the system bag made once, as a restore would (src/aks_restore.c), then loaded.
+# Bluetooth wants it: bluetoothd keeps its identity root and each paired device's keys in the keychain (6T, run 91: a
+# paired keyboard gone when Settings looked again).
+/redwood/bin/aks_restore
+/usr/libexec/keybagd --init
+exec /sbin/launchd.darwin

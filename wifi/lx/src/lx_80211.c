@@ -2043,7 +2043,8 @@ boundary_power(bool on)
 static int
 boundary_scan(const struct hakios_sta_scan *what)
 {
-	static unsigned said;
+	static unsigned said, scans_kept;
+	static unsigned long long scanned_at;   /* when the last scan was made (one thread asks) */
 	struct lx_radio *radio = the_radio;
 	unsigned long long began;
 	int error;
@@ -2054,8 +2055,36 @@ boundary_scan(const struct hakios_sta_scan *what)
 	if ((error = station_up(radio)) != 0) {
 		return (error);
 	}
+	/*
+	 * Joined, a scan takes the radio off the network's channel for 0.7 to 3 s (14 to 41 channels), and wifid asks for
+	 * one every ten seconds or so (run 41: 45 in 10 minutes): what is sent and received meanwhile waits, and TCP slows
+	 * down (11-13: a dozen Mbit/s on the hotspot). Joined, a scan is made at most once in wifi_scan_gap seconds (60;
+	 * 0: every time); the others are answered at once with what the last one heard, the access point we are joined to
+	 * as heard now (its last beacon).
+	 */
+	if (radio->joined && radio->target.found) {
+		unsigned gap = lx_os_option("wifi_scan_gap") != 0 ? lx_os_option("wifi_scan_gap") : 60;
+		unsigned long long now = lx_os_nanoseconds();
+
+		if (lx_os_option("wifi_scan_always") == 0 && scanned_at != 0 && now - scanned_at < (unsigned long long)gap * 1000000000ull) {
+			lx_os_lock();
+			for (unsigned i = 0; i < radio->heard_count; i++) {
+				if (memcmp(radio->heard[i].sender, radio->target.address, ETH_ALEN) == 0) {
+					radio->heard[i].last = now;
+					radio->heard[i].signal = radio->signal != 0 ? radio->signal : radio->heard[i].signal;
+				}
+			}
+			lx_os_unlock();
+			if (++scans_kept <= 4 || scans_kept % 32 == 0) {
+				lx_tell("lx: joined: a scan asked %llu s after the last is answered with what that one heard (%u so far; "
+				    "wifi_scan_gap=%u)\n", (now - scanned_at) / 1000000000ull, scans_kept, gap);
+			}
+			return (0);
+		}
+	}
 	began = lx_os_nanoseconds();
 	error = station_scan(radio, what->ssid, what->ssid_length <= sizeof(what->ssid) ? what->ssid_length : 0, what->passive, what);
+	scanned_at = lx_os_nanoseconds();
 	if (said < 24) {			/* (the first few are told: whoever asks goes on asking as long as the system runs) */
 		said++;
 		lx_tell("lx: a scan for the kernel: %u channels named (0: all), %s, %u ms on each (0: the radio's own): %d; %u access "

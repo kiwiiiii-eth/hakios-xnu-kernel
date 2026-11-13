@@ -343,6 +343,8 @@ WIFI_RADIO_READ	arg	wifi_radio_read	Wi-Fi	k	hakios.wifi.c	step 16 does read (2: 
 WIFI_READY	arg	wifi_ready	Wi-Fi	k	hakios.wlfw.c	
 WIFI_RETURN	arg	wifi_return	Wi-Fi	k	hakios.wifi.c	when all is over, go back to the loader instead of starting the system
 WIFI_SCAN	arg	wifi_scan	Wi-Fi	k	lx_bus.c	
+WIFI_SCAN_ALWAYS	arg	wifi_scan_always	Wi-Fi	k	lx_80211.c	
+WIFI_SCAN_GAP	arg	wifi_scan_gap	Wi-Fi	k	lx_80211.c	
 WIFI_SMMU	arg	wifi_smmu	Wi-Fi	k	hakios.wifi.c	before any step: read what the boot chain has set up in the SMMU for the radio's stream (smmu_look() below; nothing is written)
 WIFI_STATION	arg	wifi_station	Wi-Fi	k	lx_bus.c	
 WIFI_STEP	arg	wifi_step	Wi-Fi	k	hakios.wifi.c	

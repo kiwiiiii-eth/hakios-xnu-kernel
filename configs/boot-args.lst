@@ -377,6 +377,8 @@ wifi_radio_read	k
 wifi_ready	k
 wifi_return	k
 wifi_scan	k
+wifi_scan_always	k
+wifi_scan_gap	k
 wifi_smmu	k
 wifi_station	k
 wifi_step	k

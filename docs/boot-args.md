@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **404 arguments**: 333 read by the kernel, 14 by the loader, 68 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **405 arguments**: 334 read by the kernel, 14 by the loader, 68 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
@@ -149,7 +149,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `modem_data_wait` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_DATA_WAIT` |  |
 | `modem_dpm_off` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_DPM_OFF` |  |
 | `modem_ipa` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA` |  |
-| `modem_ipa_bus_off` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA_BUS_OFF` |  |
+| `modem_ipa_bus_off` | K | `hakios.mpss.c` | `CONFIG_MODEM_IPA_BUS_OFF` |  |
 | `modem_ipa_data_off` | K | `hakios.ipa.c` | `CONFIG_MODEM_IPA_DATA_OFF` |  |
 | `modem_ipa_data_trace` | K | `hakios.cell.c`, `hakios.ipa.c` | `CONFIG_MODEM_IPA_DATA_TRACE` |  |
 | `modem_ipa_fw` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_IPA_FW` |  |
@@ -414,7 +414,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (68)
+## User space (69)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -458,6 +458,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `metal_trace` | U | `HakiosMetalCA.m` | `CONFIG_METAL_TRACE` |  |
 | `metal_watch` | U | `inject.c` | `CONFIG_METAL_WATCH` |  |
 | `modem_data` | K | `hakios.mpss845.c` | `CONFIG_MODEM_DATA` |  |
+| `modem_ipa_bus` | K | `hakios.mpss845.c` | `CONFIG_MODEM_IPA_BUS` |  |
 | `modem_ipa_qmi` | K | `hakios.mpss845.c` | `CONFIG_MODEM_IPA_QMI` |  |
 | `modem_mba` | K | `hakios.mpss845.c` | `CONFIG_MODEM_MBA` |  |
 | `modem_mba_only` | K | `hakios.mpss845.c` | `CONFIG_MODEM_MBA_ONLY` |  |

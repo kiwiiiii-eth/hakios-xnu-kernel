@@ -210,6 +210,7 @@ modem_data_off	k
 modem_data_wait	k
 modem_dpm_off	k
 modem_ipa	k
+modem_ipa_bus	k
 modem_ipa_bus_off	k
 modem_ipa_data_off	k
 modem_ipa_data_trace	k

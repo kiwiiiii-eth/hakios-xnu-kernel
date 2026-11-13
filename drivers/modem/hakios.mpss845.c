@@ -1993,6 +1993,7 @@ static uint32_t pas_ipa = PAS_IPA_DEFAULT;
  * which starts it, never answered INIT_DRIVER. Should the microcontroller fetch its code from DDR at
  * the address Android uses, this is why. modem_ipa_fw_at=ADDRESS chooses (0x8b700000 allows 0x1a000).
  */
+static uint32_t ipa_stage;              /* ipa845=N: 2 the clock and the SMMU, 3 and the image put in place, else all */
 static uint32_t ipa_fw_memory = 0x8c400000u, ipa_fw_size = 0x10000u;      /* the 6T: dt ipa_fw_mem, ipa-fw@8c400000 (64 KB) */
 
 
@@ -2265,6 +2266,16 @@ ipa_space_on(void)
 			ipa_space.old_s2cr_uc = s2cr;
 		}
 	}
+	/* (a valid match register that already takes one of the IPA's streams: two that match one stream is a conflict) */
+	for (uint32_t n = 0; n < matches && SMMU_SMR(n) < 0xc00; n++) {
+		uint32_t smr = rd(apps_smmu.base + SMMU_SMR(n)), id = smr & 0xffff, mask = (smr >> 16) & 0x7fff;
+
+		if ((smr >> 31) && (((ipa_stream ^ id) & ~mask & 0x7fff) == 0 || ((ipa_stream_uc ^ id) & ~mask & 0x7fff) == 0)) {
+			tell("mpss: ipa: match register %u (smr %#x, s2cr %#x) ALREADY TAKES stream %#x or %#x\n", n, smr,
+			    rd(apps_smmu.base + SMMU_S2CR(n)), ipa_stream, ipa_stream_uc);
+			bb_say("ipa: smr %u %#x already takes the IPA's streams\n", n, smr);
+		}
+	}
 	for (ipa_space.context = 0; ipa_space.context < contexts && used[ipa_space.context]; ipa_space.context++) {
 	}
 	if (ipa_space.match == ~0u || ipa_space.match_uc == ~0u || ipa_space.context >= contexts) {
@@ -2310,6 +2321,8 @@ ipa_space_on(void)
 	    "smr %#x s2cr %#x, sctlr %#x)\n", ipa_space.context, ttbr & 0x0000fffffffff000ull, IPA_SPACE_BASE, ipa_imem, ipa_space.match,
 	    ipa_space.match_uc, ipa_stream, ipa_stream_uc, ipa_space.old_smr, ipa_space.old_s2cr, ipa_space.old_smr_uc, ipa_space.old_s2cr_uc,
 	    ipa_space.old_sctlr);
+	bb_say("ipa: smmu: context %u (sctlr %#x), match registers %u and %u (smr %#x, %#x), streams %#x %#x\n", ipa_space.context,
+	    ipa_space.old_sctlr, ipa_space.match, ipa_space.match_uc, ipa_space.old_smr, ipa_space.old_smr_uc, ipa_stream, ipa_stream_uc);
 	wr(apps_smmu_context.base + SMMU_CB_SCTLR, 0);
 	wr(apps_smmu_second.base + SMMU_CBA2R(ipa_space.context), SMMU_CBA2R_64_BIT);
 	wr(apps_smmu_second.base + SMMU_CBAR(ipa_space.context), SMMU_CBAR_STAGE_1);
@@ -2334,6 +2347,7 @@ ipa_space_on(void)
 	}
 	wr(apps_smmu_context.base + SMMU_CB_SCTLR, SMMU_SCTLR_ON);
 	ipa_space.on = true;
+	bb_say("ipa: smmu: the context is on; next the match registers\n");
 	wr(apps_smmu.base + SMMU_S2CR(ipa_space.match), ipa_space.context);
 	wr(apps_smmu.base + SMMU_SMR(ipa_space.match), sees);
 	wr(apps_smmu.base + SMMU_S2CR(ipa_space.match_uc), ipa_space.context);
@@ -2571,12 +2585,20 @@ ipa_firmware_load(void)
 	announce("turn the IPA's clock on (RPMh), load the IPA's firmware (image 15) into its memory and have TrustZone start it, as "
 	    "Android does before the modem");
 	printf("mpss: %u: the IPA's image goes at %#x (%#x bytes allowed)\n", step, ipa_fw_memory, ipa_fw_size);
+	PE_parse_boot_argn("ipa845", &ipa_stage, sizeof(ipa_stage));
+	bb_say("ipa: the clock (IP0)\n");
 	if (!ipa_clock(true)) {
 		printf("mpss: %u: the IPA's clock is not on: its firmware is not loaded (a start without the clock ends the kernel)\n", step);
 		return false;
 	}
+	bb_say("ipa: the clock is on; next the SMMU\n");
 	if (!option("modem_ipa_smmu_off")) {
 		ipa_space_on();
+	}
+	bb_say("ipa: the SMMU done\n");
+	if (ipa_stage == 2) {
+		tell("mpss: %u: ipa845=2: the IPA's clock and SMMU, and no more\n", step);
+		return false;
 	}
 	{
 		/* the IPA's firmware file is SoC-specific (dt: qcom,firmware-name of qcom,ipa_fws; "yupik_ipa_fws"
@@ -2651,12 +2673,15 @@ ipa_firmware_load(void)
 		__asm__ volatile ("dc civac, %0" : : "r" (line));
 	}
 	settle();
+	bb_say("ipa: TrustZone's PAS_INIT_IMAGE(15)\n");
 	result = scm("to take the IPA's header", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, pas_ipa, kvtophys(page), 0, 0, &answer);
+	bb_say("ipa: PAS_INIT_IMAGE: %d %#llx\n", result, answer);
 	if (result != 0 || answer != 0) {
 		printf("mpss: %u: TRUSTZONE DOES NOT TAKE THE IPA'S HEADER (%d, %#llx)\n", step, result, answer);
 		goto out;
 	}
 	result = scm("where the IPA's image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, pas_ipa, ipa_fw_memory, size, 0, &answer);
+	bb_say("ipa: PAS_MEM_SETUP: %d %#llx\n", result, answer);
 	if (result != 0 || answer != 0) {
 		printf("mpss: %u: TRUSTZONE DOES NOT TAKE THE IPA'S PLACE (%d, %#llx)\n", step, result, answer);
 		goto out;
@@ -2677,7 +2702,13 @@ ipa_firmware_load(void)
 	}
 	settle();
 	ml_io_unmap((vm_offset_t)memory, size);
+	if (ipa_stage == 3) {
+		tell("mpss: %u: ipa845=3: the IPA's image taken and put in place, not started\n", step);
+		goto out;
+	}
+	bb_say("ipa: TrustZone's PAS_AUTH_AND_RESET(15)\n");
 	result = scm("to authenticate the IPA's image and start it", SCM_PAS_AUTH_AND_RESET, SCM_ONE_VALUE, pas_ipa, 0, 0, 0, &answer);
+	bb_say("ipa: PAS_AUTH_AND_RESET: %d %#llx\n", result, answer);
 	if (result != 0 || answer != 0) {
 		printf("mpss: %u: TRUSTZONE DOES NOT START THE IPA'S FIRMWARE (%d, %#llx)\n", step, result, answer);
 		goto out;

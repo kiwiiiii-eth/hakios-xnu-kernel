@@ -6623,6 +6623,15 @@ dsd_receive(__unused void *context, __unused uint32_t node, __unused uint32_t po
 		return;
 	}
 	probe_dump("dsd", m, length);
+	for (size_t from = 64; from < length; from += 64) {     /* (the rest: its APNs and which systems each may use) */
+		char hex[3 * 64 + 1];
+		size_t n = 0;
+
+		for (size_t i = from; i < length && i < from + 64; i++) {
+			n += (size_t)snprintf(hex + n, sizeof(hex) - n, " %02x", m[i]);
+		}
+		printf("mpss: dsd:   bytes %zu..:%s\n", from, hex);
+	}
 	/* Available Systems (0x10): a count, then technology u32 (1 3GPP, 2 3GPP2, 3 WLAN), RAT u32 (3GPP: 1 WCDMA, 2 GERAN,
 	 * 3 LTE, 4 TD-SCDMA, 6 5G; 0x8005 a null bearer), service options u64 -- the first the preferred */
 	line[0] = 0;
@@ -7256,7 +7265,7 @@ nas2_receive(__unused void *context, __unused uint32_t node, __unused uint32_t p
 		if ((v = qmi_tlv(m, length, 0x27, &size)) != NULL && size >= 4) {
 			reject = (uint32_t)(v[0] | v[1] << 8 | v[2] << 16 | v[3] << 24);
 		}
-		tell("mpss: nas: SYSTEM INFO: %sSIM reject %u (0 available, 1 not available, 2 CS invalid, 3 CS and PS invalid, 4 PS invalid)\n",
+		tell("mpss: nas: SYSTEM INFO: %sSIM reject %u (libqmi: 0 SIM unavailable, 1 available, 2 CS invalid, 3 PS invalid, 4 CS and PS invalid)\n",
 		    line, reject);
 	}
 }

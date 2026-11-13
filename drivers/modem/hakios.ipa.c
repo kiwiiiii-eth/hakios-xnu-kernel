@@ -44,6 +44,25 @@
 #include <vm/vm_kern.h>
 #include <sys/hakios.ipa.h>
 
+/* What this file says goes to the loader's record of the run as well (the run's log; printf alone never reached it). */
+extern void loader_log_putc(char c);
+
+static int __printflike(1, 2)
+ipa_say(const char *format, ...)
+{
+	char line[300];
+	va_list list;
+
+	va_start(list, format);
+	vsnprintf(line, sizeof(line), format, list);
+	va_end(list);
+	for (const char *c = line; *c != 0; c++) {
+		loader_log_putc(*c);
+	}
+	return printf("%s", line);
+}
+#define printf ipa_say
+
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);
 extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);

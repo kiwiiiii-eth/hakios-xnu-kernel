@@ -514,6 +514,7 @@ loader_stop_poll(__unused thread_call_param_t p0, __unused thread_call_param_t p
 		hakios_adreno_stop();
 		hakios_wifi_stop();
 		hakios_adsp_stop();
+		hakios_mpss_stop();             /* the modem stopped in order here too, not left to the quiesce (run 83) */
 		loader_return();
 	}
 	clock_interval_to_deadline(1, NSEC_PER_SEC, &deadline);

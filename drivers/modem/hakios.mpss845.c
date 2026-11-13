@@ -8574,6 +8574,10 @@ run_steps(void)
 {
 	uint32_t done = 0;
 
+	/* the halt registers mapped now, not when the modem is stopped: that can be a panic's way back, with the interrupts off,
+	 * where a mapping is itself a panic (run 83: io_map from halt_port, "{k,z}alloc from interrupt disabled context") */
+	need(&halt);
+
 	for (step = 1; step <= last_step; step++) {
 		if (!steps[step - 1]()) {
 			printf("mpss: step %u: FAILED; the steps after it are not attempted\n", step);

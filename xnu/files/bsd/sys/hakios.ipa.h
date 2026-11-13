@@ -39,6 +39,8 @@ unsigned hakios_ipa_poll(void (*receive)(uint8_t mux, const uint8_t *packet, siz
 void hakios_ipa_status(char *to, size_t size);
 /* The IPA endpoints of this processor's data path to and from the modem (for QMI DPM Open Port). */
 void hakios_ipa_modem_endpoints(uint32_t *to_modem, uint32_t *from_modem);
+/* The IPA's version: 411 (the default, IPA 4.11) or 351 (IPA 3.5.1, the OnePlus 6T); before hakios_ipa_data_setup(). */
+void hakios_ipa_set_version(unsigned version);
 
 /* ---- hakios.cell.c: the interface ---- */
 

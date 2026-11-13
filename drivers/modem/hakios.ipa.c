@@ -82,16 +82,30 @@ ipa_wr(uint32_t offset, uint32_t value)
 	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
+/*
+ * The IPA's version (hakios_ipa_set_version()): 411 (the reference phone, IPA 4.11 with GSI 2.11) or 351 (the OnePlus
+ * 6T, IPA 3.5.1 with GSI 1.3, Linux's ipa_data-v3.5.1.c, reg/gsi_reg-v3.5.1.c and reg/ipa_reg-v3.5.1.c). GSI 1.3 has
+ * every register of an execution environment (channels, event rings, doorbells, its own) 0xd000 further than GSI 2.11,
+ * the inter-EE masks where they are; the IPA's differ in a few registers and fields, said where they are used.
+ */
+static unsigned ipa_ver = 411;
+
+static inline uint32_t
+gsi_at(uint32_t offset)
+{
+	return offset - GSI_FROM + (ipa_ver == 351 && offset >= 0xf000 ? 0xd000 : 0);
+}
+
 static inline uint32_t
 gsi_rd(uint32_t offset)
 {
-	return *(volatile uint32_t *)(gsi_regs + (offset - GSI_FROM));
+	return *(volatile uint32_t *)(gsi_regs + gsi_at(offset));
 }
 
 static inline void
 gsi_wr(uint32_t offset, uint32_t value)
 {
-	*(volatile uint32_t *)(gsi_regs + (offset - GSI_FROM)) = value;
+	*(volatile uint32_t *)(gsi_regs + gsi_at(offset)) = value;
 	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
@@ -245,6 +259,27 @@ static struct channel lan_rx = { "lan-rx", 14, 1, 9, false, false, false, true, 
 static struct channel modem_tx = { "modem-tx", 2, 2, 2, true, false, true, false, false, 64, 16, 2048 };
 static struct channel modem_rx = { "modem-rx", 7, 3, 16, false, false, true, true, true, 64, 9, RECEIVE_BUFFER };
 static struct channel *channels[] = { &command, &lan_rx, &modem_tx, &modem_rx };
+
+/* IPA 3.5.1's channels and endpoints (Linux's ipa_data-v3.5.1.c): command 4/5, LAN receive 5/9, to the modem 3/2, from it 6/10 */
+void
+hakios_ipa_set_version(unsigned version)
+{
+	ipa_ver = version;
+	if (version == 351) {
+		command.id = 4;
+		command.endpoint = 5;
+		command.tlv = 20;
+		lan_rx.id = 5;
+		lan_rx.endpoint = 9;
+		lan_rx.tlv = 8;
+		modem_tx.id = 3;
+		modem_tx.endpoint = 2;
+		modem_tx.tlv = 16;
+		modem_rx.id = 6;
+		modem_rx.endpoint = 10;
+		modem_rx.tlv = 8;
+	}
+}
 #define AGGR_LIMIT_KB           12              /* the IPA closes a receive buffer once this much is in it (a page holds another 4 KB packet) */
 #define AGGR_TIME_TICKS         5               /* ... or after 5 ticks of the first pulse generator: 500 us (TIMERS_PULSE_GRAN_CFG gran 0 = 100 us) */
 
@@ -387,6 +422,10 @@ channel_setup(struct channel *ch)
 	gsi_wr(CH_CNTXT(c, 3), (uint32_t)(ch->tre_ring.phys >> 32));
 	/* QOS: the command channel gets the lowest round-robin weight and no escape buffer; the doorbell counts bytes */
 	value = (ch->command ? 0xf : 0) | (ch->command ? 0 : 1u << 10 /* PREFETCH_MODE: escape buffer only */) | 1u << 24;
+	if (ipa_ver == 351) {
+		/* GSI 1.3 (Linux, below IPA 4.0): the weight and the doorbell engine; no escape buffer, no doorbell in bytes */
+		value = (ch->command ? 0xf : 0) | 1u << 9 /* USE_DB_ENG */;
+	}
 	gsi_wr(CH_QOS(c), value);
 	/* the GPI scratch: the most outstanding TREs (in bytes), the threshold 2 TREs */
 	gsi_wr(CH_SCRATCH(c, 0), (ch->tlv * ELEMENT_SIZE) << 16);
@@ -430,6 +469,10 @@ endpoint_program(const struct channel *ch)
 	if (!ch->to_ipa && ch->aggregate) {
 		value = 1 /* AGGR_EN: aggregate */ | 4u << 2 /* AGGR_TYPE: generic */ | AGGR_LIMIT_KB << 5 | AGGR_TIME_TICKS << 12 |
 		    (ch->close_eof ? 1u << 23 /* SW_EOF_ACTIVE */ : 0);
+		if (ipa_ver == 351) {
+			/* IPA 3.5.1: BYTE_LIMIT [9:5], TIME_LIMIT [14:10] in COUNTER_CFG's granularity (500 us: 1), SW_EOF_ACTIVE 21 */
+			value = 1 | 4u << 2 | AGGR_LIMIT_KB << 5 | 1u << 10 | (ch->close_eof ? 1u << 21 : 0);
+		}
 	} else if (ch->to_ipa && ch->qmap) {
 		value = 2 /* AGGR_EN: deaggregate */ | 6u << 2 /* AGGR_TYPE: QCMAP */;
 	} else {
@@ -441,9 +484,10 @@ endpoint_program(const struct channel *ch)
 	} else {
 		ipa_wr(ENDP_INIT_DEAGGR(ep), 0);
 	}
-	ipa_wr(ENDP_INIT_RSRC_GRP(ep), 0);              /* resource group 0: UL/DL (the only one with limits) */
+	ipa_wr(ENDP_INIT_RSRC_GRP(ep), ipa_ver == 351 ? 1 : 0);        /* UL/DL: group 0 on IPA 4.11, 1 on 3.5.1 (UL_DL, UL_DL_DPL) */
 	if (ch->to_ipa) {
-		ipa_wr(ENDP_INIT_SEQ(ep), ch->command ? 0 /* DMA */ : 4 /* 2_PASS_SKIP_LAST_UC */);
+		ipa_wr(ENDP_INIT_SEQ(ep), ch->command ? 0 /* DMA */ : 4 /* 2_PASS_SKIP_LAST_UC */ |
+		    (ipa_ver == 351 ? 8u << 8 /* SEQ_REP_TYPE: DMA_PARSER, below IPA 4.5 */ : 0));
 	}
 	ipa_wr(ENDP_STATUS(ep), 0);                     /* no status packets */
 }
@@ -613,12 +657,12 @@ tables_setup(void)
 		return false;
 	}
 	headers.hdr_table_addr = zero.phys;
-	headers.flags = 0x440 | (mem_offset + 0x688) << 12;
+	headers.flags = (ipa_ver == 351 ? 0x140 : 0x440) | (mem_offset + 0x688) << 12;      /* 3.5.1: the modem's headers alone */
 	headers.reserved = 0;
 	if (!ipa_command("header table init", IPA_CMD_HDR_INIT_LOCAL, &headers, sizeof(headers))) {
 		return false;
 	}
-	ipa_wr(IPA_FILT_ROUT_HASH_FLUSH, 0x1111);      /* the hashed tables' caches, flushed */
+	ipa_wr(ipa_ver == 351 ? 0x90 : IPA_FILT_ROUT_HASH_FLUSH, 0x1111);      /* the hashed tables' caches, flushed (3.5.1: 0x90) */
 	return true;
 }
 
@@ -810,7 +854,7 @@ hakios_ipa_data_setup(void)
 		PE_parse_boot_argn("soc_ipa_base", &ipa_regs_phys, sizeof(ipa_regs_phys));
 		PE_parse_boot_argn("soc_gsi_base", &gsi_phys, sizeof(gsi_phys));
 		ipa_regs = ml_io_map(ipa_regs_phys, IPA_REGS_SIZE);
-		gsi_regs = ml_io_map(gsi_phys + GSI_FROM, GSI_SIZE);
+		gsi_regs = ml_io_map(gsi_phys + GSI_FROM, ipa_ver == 351 ? GSI_SIZE + 0xd000 : GSI_SIZE);
 	}
 	if (ipa_regs == 0 || gsi_regs == 0) {
 		printf("ipa: the registers cannot be mapped: no data path\n");

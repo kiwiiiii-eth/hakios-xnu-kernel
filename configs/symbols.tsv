@@ -11,6 +11,14 @@ ADRENO_SKIP	arg	adreno_skip	GPU and display	k	hakios.a630.c,hakios.adreno.c	leav
 ADRENO_SPEED	arg	adreno_speed	GPU and display	k	hakios.a630.c,hakios.adreno.c	step 17 asks the GMU for the 3D core's Nth speed: 1 315 MHz, 2 450 MHz, 3 550 MHz (the default: the most this phone's GPU is rated for)
 ADRENO_STREAM1	arg	adreno_stream1	GPU and display	k	hakios.a630.c,hakios.adreno.c	step 18 leaves the core's second stream out (0) or gives it an empty context of its own (2): what the SMMU then records shows what the core
 ADRENO_WATCH	arg	adreno_watch	GPU and display	k	hakios.a630.c,hakios.adreno.c	after the last step, say once a second for S seconds (default 20) that the machine is still alive, and what was written last
+ADSP8	arg	adsp8	Audio and battery	k	hakios.adsp845.c	the OnePlus 6T's audio DSP, steps 1 to N, once the root is there (the image is on it), while the system goes on starting
+ADSP8_AGAIN	arg	adsp8_again	Audio and battery	k	hakios.adsp845.c	
+ADSP8_BB	arg	adsp8_bb	Audio and battery	k	hakios.adsp845.c	
+ADSP8_CX	arg	adsp8_cx	Audio and battery	k	hakios.adsp845.c	
+ADSP8_KEEP	arg	adsp8_keep	Audio and battery	k	hakios.adsp845.c	
+ADSP8_LISTEN	arg	adsp8_listen	Audio and battery	k	hakios.adsp845.c	
+ADSP8_PAUSE	arg	adsp8_pause	Audio and battery	k	hakios.adsp845.c	
+ADSP8_WAIT	arg	adsp8_wait	Audio and battery	k	hakios.adsp845.c	
 ADSP_AGAIN	arg	adsp_again	Audio and battery	k	hakios.adsp.c	
 ADSP_APR_WAIT	arg	adsp_apr_wait	Audio and battery	k	hakios.adsp.c	
 ADSP_KEEP	arg	adsp_keep	Audio and battery	k	hakios.adsp.c	

@@ -37,6 +37,7 @@ haptic   bsd/dev/hakios.haptic.c
 haptic   bsd/dev/hakios.haptic8998.c
 
 audio    bsd/dev/hakios.adsp.c
+audio    bsd/dev/hakios.adsp845.c
 audio    bsd/dev/hakios.audio.c
 audio    bsd/dev/hakios.sound.c
 audio    bsd/dev/hakios.speaker.c

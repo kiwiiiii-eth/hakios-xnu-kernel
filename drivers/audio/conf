@@ -11,6 +11,12 @@ driver ADSP
 	help    the audio DSP started and linked (adsp=1, adsp_step=N); the battery's state comes through it too.
 	help    Needs the DSP's firmware from the phone (fw-audio/)
 
+driver ADSP845
+	file    bsd/dev/hakios.adsp845.c
+	default n
+	help    the OnePlus 6T's audio DSP (SDM845 ADSP) started and linked, up to QRTR's list of its services (adsp8=N); the
+	help    ADSP's copy for the 6T, not to be built with ADSP. Needs adsp.mdt/adsp.b* from the phone (fw-modem/image/)
+
 driver SPEAKER
 	file    bsd/dev/hakios.speaker.c
 	help    the two speaker amplifiers on I2C, and their watch of temperature and battery

@@ -25,6 +25,9 @@ CONFIG_FIRMWARE="device"
 # the audio DSP started and linked (adsp=1, adsp_step=N); the battery's state comes through it too. Needs the DSP's ... [hakios.adsp.c]
 CONFIG_HAKIOS_ADSP=y
 
+# the OnePlus 6T's audio DSP (SDM845 ADSP) started and linked, up to QRTR's list of its services (adsp8=N); the ADSP's ... [hakios.adsp845.c]
+# CONFIG_HAKIOS_ADSP845 is not set
+
 # the two speaker amplifiers on I2C, and their watch of temperature and battery [hakios.speaker.c]
 CONFIG_HAKIOS_SPEAKER=y
 
@@ -596,6 +599,30 @@ CONFIG_SOUND=4
 
 # how often the battery guard looks, in seconds (5 to 600; 20) [requires CONFIG_BATTERY_STOP]
 # CONFIG_BATTERY_STOP_POLL is not set
+
+# the OnePlus 6T's audio DSP, steps 1 to N, once the root is there (the image is on it), while the system goes on starting
+# CONFIG_ADSP8 is not set
+
+# read by hakios.adsp845.c (kernel)
+# CONFIG_ADSP8_AGAIN is not set
+
+# read by hakios.adsp845.c (kernel)
+# CONFIG_ADSP8_BB is not set
+
+# read by hakios.adsp845.c (kernel)
+# CONFIG_ADSP8_CX is not set
+
+# read by hakios.adsp845.c (kernel)
+# CONFIG_ADSP8_KEEP is not set
+
+# read by hakios.adsp845.c (kernel)
+# CONFIG_ADSP8_LISTEN is not set
+
+# read by hakios.adsp845.c (kernel)
+# CONFIG_ADSP8_PAUSE is not set
+
+# read by hakios.adsp845.c (kernel)
+# CONFIG_ADSP8_WAIT is not set
 
 # read by hakios.adsp.c (kernel)
 # CONFIG_ADSP_AGAIN is not set

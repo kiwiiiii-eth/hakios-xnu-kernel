@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **396 arguments**: 325 read by the kernel, 14 by the loader, 68 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **404 arguments**: 333 read by the kernel, 14 by the loader, 68 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
@@ -194,11 +194,19 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `soc_pas_mpss` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_SOC_PAS_MPSS` |  |
 | `soc_smem` | K | `hakios.mpss.c`, `hakios.mpss845.c`, `hakios.socinfo.c` | `CONFIG_SOC_SMEM` |  |
 
-## Audio and battery (33)
+## Audio and battery (42)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
 | `adsp` | K | `hakios.adsp.c` | `CONFIG_ADSP` |  |
+| `adsp8` | K | `hakios.adsp845.c` | `CONFIG_ADSP8` |  |
+| `adsp8_again` | K | `hakios.adsp845.c` | `CONFIG_ADSP8_AGAIN` |  |
+| `adsp8_bb` | K | `hakios.adsp845.c` | `CONFIG_ADSP8_BB` |  |
+| `adsp8_cx` | K | `hakios.adsp845.c` | `CONFIG_ADSP8_CX` |  |
+| `adsp8_keep` | K | `hakios.adsp845.c` | `CONFIG_ADSP8_KEEP` |  |
+| `adsp8_listen` | K | `hakios.adsp845.c` | `CONFIG_ADSP8_LISTEN` |  |
+| `adsp8_pause` | K | `hakios.adsp845.c` | `CONFIG_ADSP8_PAUSE` |  |
+| `adsp8_wait` | K | `hakios.adsp845.c` | `CONFIG_ADSP8_WAIT` |  |
 | `adsp_again` | K | `hakios.adsp.c` | `CONFIG_ADSP_AGAIN` |  |
 | `adsp_apr_wait` | K | `hakios.adsp.c` | `CONFIG_ADSP_APR_WAIT` |  |
 | `adsp_keep` | K | `hakios.adsp.c` | `CONFIG_ADSP_KEEP` |  |
@@ -213,6 +221,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `battery_stop` | K | `hakios.battguard.c` | `CONFIG_BATTERY_STOP` |  |
 | `battery_stop_poll` | K | `hakios.battguard.c` | `CONFIG_BATTERY_STOP_POLL` |  |
 | `battmgr` | K | `hakios.adsp.c` | `CONFIG_BATTMGR` |  |
+| `epoch` | K | `GenericARMPE.cpp`, `hakios.adsp845.c`, `hakios.mpss845.c` |  | xl (the host's clock) |
 | `mic` | K | `hakios.mic.c` | `CONFIG_MIC` |  |
 | `mic_adc` | K | `hakios.mic.c` | `CONFIG_MIC_ADC` |  |
 | `mic_input` | K | `hakios.mic.c` | `CONFIG_MIC_INPUT` |  |
@@ -350,7 +359,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `thermal_tm0` | K | `hakios.thermal.c` | `CONFIG_THERMAL_TM0` |  |
 | `thermal_tm1` | K | `hakios.thermal.c` | `CONFIG_THERMAL_TM1` |  |
 
-## CPU, memory and boot (29)
+## CPU, memory and boot (28)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -363,7 +372,6 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ddr` | K | `hakios.cpufreq.c` | `CONFIG_DDR` |  |
 | `ddr_rest` | K | `hakios.cpufreq.c` | `CONFIG_DDR_REST` |  |
 | `ddr_vote` | K | `hakios.cpufreq.c` | `CONFIG_DDR_VOTE` |  |
-| `epoch` | K | `GenericARMPE.cpp`, `hakios.mpss845.c` |  | xl (the host's clock) |
 | `hv_wdt_pet` | K | `loader_return.c` |  | the loader, when it has armed the watchdog (the runner also passes it) |
 | `loader_return_after` | KL | `loader.c`, `loader_return.c` |  | xl (XL_SECS) |
 | `machine_name` | K | `GenericARMPE.cpp` | `CONFIG_MACHINE_NAME` |  |

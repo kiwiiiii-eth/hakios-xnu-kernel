@@ -12,6 +12,14 @@ adreno_speed	k
 adreno_stream1	k
 adreno_watch	k
 adsp	k
+adsp8	k
+adsp8_again	k
+adsp8_bb	k
+adsp8_cx	k
+adsp8_keep	k
+adsp8_listen	k
+adsp8_pause	k
+adsp8_wait	k
 adsp_again	k
 adsp_apr_wait	k
 adsp_keep	k

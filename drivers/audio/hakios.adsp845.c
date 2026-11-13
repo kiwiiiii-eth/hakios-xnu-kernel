@@ -143,7 +143,7 @@ static LCK_GRP_DECLARE(adsp_lock_group, "hakios-adsp845");
 
 static void bb_say(const char *format, ...) __printflike(1, 2);
 
-#define STEPS                   21
+#define STEPS                   22
 #define FIRST_INDEPENDENT_STEP  12      /* the steps from here on do not need the DSP (800 of adsp8=N leaves it alone) */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
@@ -2499,6 +2499,11 @@ static struct {
 	bool there;
 } qrtr_servers[64];
 static uint32_t qrtr_peer, qrtr_in, qrtr_out, qrtr_hellos, qrtr_lookups;
+/* QMI over QRTR (the microphone's SLIMbus service, 0x301): one question at a time, its answer kept here by qrtr_input() */
+#define QMI_OUR_PORT            0x5301u
+static uint8_t qmi_reply[256];
+static volatile uint32_t qmi_reply_length;
+static volatile bool qmi_replied;
 static uint32_t qrtr_looked_for[8];     /* the services (ids) the DSP looked for, each once: the diagnosis of step 11 says them */
 
 static int
@@ -2641,6 +2646,15 @@ qrtr_input(const uint8_t *data, uint32_t length)
 
 		memcpy(&control, data + at, header.size < sizeof(control) ? header.size : sizeof(control));
 		qrtr_control(&header, &control);
+		return;
+	}
+	if (header.to_port == QMI_OUR_PORT) {
+		uint32_t n = header.size < sizeof(qmi_reply) ? header.size : (uint32_t)sizeof(qmi_reply);
+
+		memcpy(qmi_reply, data + at, n);
+		qmi_reply_length = n;
+		OSMemoryBarrier();
+		qmi_replied = true;
 		return;
 	}
 	printf("adsp845: qrtr: a datagram of %u bytes from node %u port %u to our port %u: nobody here listens there\n", header.size,
@@ -4968,6 +4982,43 @@ cmd_db_address(const char *name)
 	return 0;
 }
 
+/* every resource of cmd-db whose name has "clk" or "bb" in it (the codec's MCLK is one: lnbclka2 is not there on the 6T, r111) */
+static void
+cmd_db_clocks(void)
+{
+	char line[200];
+	int at = 0;
+
+	if (cmd_db == NULL) {
+		cmd_db = (const struct cmd_db_header *)ml_io_map_unmappable(CMD_DB_PHYS, CMD_DB_SIZE, VM_WIMG_WCOMB);
+	}
+	for (unsigned s = 0; s < 8; s++) {
+		const struct cmd_db_slave *slave = &cmd_db->slave[s];
+		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(cmd_db->data + slave->header_offset);
+
+		if (slave->id == 0 || slave->count > 512) {
+			continue;
+		}
+		for (unsigned i = 0; i < slave->count; i++) {
+			char id[9] = { 0 };
+
+			memcpy(id, entry[i].id, 8);
+			if (strnstr(id, "clk", sizeof(id)) == NULL && strnstr(id, "bb", sizeof(id)) == NULL) {
+				continue;
+			}
+			at += snprintf(line + at, sizeof(line) - (size_t)at, " %s@%#x", id, entry[i].address);
+			if (at > 150) {
+				printf("adsp845: %u: cmd-db clocks (slave %u):%s\n", step, slave->id, line);
+				at = 0;
+			}
+		}
+		if (at > 0) {
+			printf("adsp845: %u: cmd-db clocks (slave %u):%s\n", step, slave->id, line);
+			at = 0;
+		}
+	}
+}
+
 /* what the SMMU does with a stream now: read only */
 static void
 smmu_stream_look(uint32_t stream)
@@ -5019,9 +5070,141 @@ step_mic_survey(void)
 			    qrtr_servers[i].instance, qrtr_servers[i].node, qrtr_servers[i].port);
 		}
 	}
+	cmd_db_clocks();
 	smmu_stream_look(MIC_STREAM_6T);
 	smmu_stream_look(AUDIO_STREAM_6T);
 	printf("adsp845: %u: over; nothing was written\n", step);
+	return true;
+}
+
+/*
+ * QMI: a request (header: type 0, transaction, message id, length; then TLVs: type, u16 length, value) to the service's node and
+ * port; the answer's TLV 2 is {u16 result, u16 error}, result 0 when done. Returns the result, or -1 without an answer.
+ */
+static uint16_t qmi_txn = 1;
+
+static int
+qmi_ask(uint32_t node, uint32_t port, uint16_t message, const uint8_t *tlvs, uint16_t tlv_length, const char *what)
+{
+	uint8_t request[64];
+	uint16_t txn = qmi_txn++;
+
+	if (7u + tlv_length > sizeof(request)) {
+		return -1;
+	}
+	request[0] = 0;
+	request[1] = (uint8_t)txn;
+	request[2] = (uint8_t)(txn >> 8);
+	request[3] = (uint8_t)message;
+	request[4] = (uint8_t)(message >> 8);
+	request[5] = (uint8_t)tlv_length;
+	request[6] = (uint8_t)(tlv_length >> 8);
+	memcpy(request + 7, tlvs, tlv_length);
+	qmi_replied = false;
+	qmi_reply_length = 0;
+	if (qrtr_out_packet(QRTR_DATA, QMI_OUR_PORT, node, port, request, 7u + tlv_length) != 0) {
+		printf("adsp845: %u: QMI %s: could not be sent\n", step, what);
+		return -1;
+	}
+	for (unsigned ms = 0; ms < 2000 && !qmi_replied; ms++) {
+		sleep_ms(1);
+	}
+	if (!qmi_replied) {
+		printf("adsp845: %u: QMI %s: NO ANSWER in 2 s\n", step, what);
+		return -1;
+	}
+	OSMemoryBarrier();
+	{
+		uint32_t n = qmi_reply_length;
+		char text[3 * 24 + 1] = "";
+
+		for (uint32_t i = 0; i < n && i < 24; i++) {
+			snprintf(text + 3 * i, 4, "%02x ", qmi_reply[i]);
+		}
+		printf("adsp845: %u: QMI %s: the answer (%u bytes): %s\n", step, what, n, text);
+		/* the TLVs after the 7 bytes of header: TLV 2 is the result */
+		for (uint32_t at = 7; at + 3 <= n;) {
+			uint32_t type = qmi_reply[at], length = (uint32_t)(qmi_reply[at + 1] | qmi_reply[at + 2] << 8);
+
+			if (type == 2 && length >= 4 && at + 3 + 4 <= n) {
+				uint32_t result = (uint32_t)(qmi_reply[at + 3] | qmi_reply[at + 4] << 8);
+				uint32_t error = (uint32_t)(qmi_reply[at + 5] | qmi_reply[at + 6] << 8);
+
+				printf("adsp845: %u: QMI %s: result %u, error %u%s\n", step, what, result, error, result == 0 ? " (DONE)" : " (REFUSED)");
+				return (int)result;
+			}
+			at += 3 + length;
+		}
+		printf("adsp845: %u: QMI %s: an answer without a result\n", step, what);
+		return -1;
+	}
+}
+
+static bool
+mic_slimbus_service(uint32_t *node, uint32_t *port)
+{
+	for (unsigned ms = 0; ms < 5000; ms += 100) {
+		for (unsigned i = 0; i < sizeof(qrtr_servers) / sizeof(qrtr_servers[0]); i++) {
+			if (qrtr_servers[i].there && qrtr_servers[i].service == 0x301) {
+				*node = qrtr_servers[i].node;
+				*port = qrtr_servers[i].port;
+				return true;
+			}
+		}
+		sleep_ms(100);
+	}
+	return false;
+}
+
+/* QMI 0x301: select instance 0 as MASTER-run (the DSP is the bus's master), then power ACTIVE (2) or INACTIVE (1) */
+static bool
+mic_slimbus_power(bool on)
+{
+	static const uint8_t select[] = { 0x01, 4, 0, 0, 0, 0, 0, 0x10, 4, 0, 2, 0, 0, 0 };
+	uint8_t power[] = { 0x01, 4, 0, on ? 2 : 1, 0, 0, 0 };
+	uint32_t node = 0, port = 0;
+
+	if (!mic_slimbus_service(&node, &port)) {
+		printf("adsp845: %u: the DSP has not told of its SLIMbus service (0x301) in 5 s\n", step);
+		return false;
+	}
+	if (on) {
+		printf("adsp845: %u: about to ask the DSP's SLIMbus service (node %u port %u): instance 0, it the master\n", step, node, port);
+		if (qmi_ask(node, port, 0x20, select, sizeof(select), "select instance 0, MASTER") != 0) {
+			return false;
+		}
+	}
+	printf("adsp845: %u: about to ask the DSP's SLIMbus service: power %s\n", step, on ? "ACTIVE" : "INACTIVE");
+	return qmi_ask(node, port, 0x21, power, sizeof(power), on ? "power ACTIVE" : "power INACTIVE") == 0;
+}
+
+static struct block mic_ngd = { "slim ngd", 0x171c0000u, 0x2000, 0 };
+static struct block mic_bam_top = { "slim bam", 0x17184000u, 0x5000, 0 };        /* (to 0x17189000: BAM_REVISION, the EE masks) */
+static struct block mic_bam_pipes = { "slim bam pipes 3, 4", 0x1719a000u, 0x2000, 0 };  /* P_CTRL of pipe n: 0x17184000 + 0x13000 + n * 0x1000 */
+
+/* M2: QMI, and then -- only then -- the NGD's and the BAM's identities read */
+static bool
+step_mic_qmi(void)
+{
+	bool ok;
+
+	announce("ASK the DSP's SLIMbus service over QMI (select instance 0 MASTER, power ACTIVE); only if it agrees, READ the NGD's version "
+	    "and status and the BAM's revision and pipes; then power INACTIVE. Nothing else is written");
+	ok = mic_slimbus_power(true);
+	if (!ok) {
+		printf("adsp845: %u: the SLIMbus is not powered: the NGD and the BAM are not touched\n", step);
+		return false;
+	}
+	sleep_ms(10);
+	printf("adsp845: %u: NGD: version %#x (%u.%u), NGD 1 config %#x, status %#x (logical address %s)\n", step,
+	    get(&mic_ngd, "version", 0), get(&mic_ngd, "version", 0) >> 28, get(&mic_ngd, "version", 0) >> 16 & 0xfff,
+	    get(&mic_ngd, "ngd 1 config", 0x1000), get(&mic_ngd, "ngd 1 status", 0x1004),
+	    (get(&mic_ngd, "ngd 1 status", 0x1004) & 2) ? "SET" : "not set");
+	printf("adsp845: %u: BAM: revision %#x, %u pipes, EE 1's interrupt mask %#x; pipe 3 control %#x, pipe 4 control %#x\n", step,
+	    get(&mic_bam_top, "revision", 0x1000), get(&mic_bam_top, "pipes", 0x1008) & 0xff, get(&mic_bam_top, "ee 1 mask", 0x4004),
+	    get(&mic_bam_pipes, "pipe 3 control", 0), get(&mic_bam_pipes, "pipe 4 control", 0x1000));
+	ok = mic_slimbus_power(false);
+	printf("adsp845: %u: over: %s\n", step, ok ? "the SLIMbus powered down again" : "the power down NOT confirmed");
 	return true;
 }
 
@@ -5037,7 +5220,7 @@ step_none(void)
 static bool (*const steps[STEPS])(void) = {
 	step_survey, step_firmware, step_mailbox, step_header, step_image, step_our_item, step_start, step_queues, step_link, step_qrtr,
 	step_apr, step_tfa, step_amplifier, step_afe, step_stream, step_speaker, step_darwin, step_none, step_none, step_none,
-	step_mic_survey,
+	step_mic_survey, step_mic_qmi,
 };
 
 static bool keep;                       /* the DSP and the link stay up while the system runs (adsp8_keep) */

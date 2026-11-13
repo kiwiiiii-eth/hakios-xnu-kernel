@@ -108,10 +108,19 @@ ln -s /var/jb/usr/lib/TweakInject "$OUT/root/var/jb/Library/MobileSubstrate/Dyna
 # port can be worked on. Nothing starts it -- a scenario does (userland/rc.jobs.ssh) -- and the
 # key that lets anyone in is not in the repository. dropbear would have been smaller, but its
 # package here depends on libtomcrypt1 and libtommath1, which are in no suite of this repository.
-PREINSTALL=${PREINSTALL-"debianutils launchctl preferenceloader openssh-server openssh-client openssh-sftp-server libssl3 libmd0"}
+# neofetch (a bash script) for a first look at the system over SSH; it needs an awk, and mawk is the one whose
+# dependencies the bootstrap already has (gawk wants libmpfr6, which it does not).
+PREINSTALL=${PREINSTALL-"debianutils launchctl preferenceloader openssh-server openssh-client openssh-sftp-server libssl3 libmd0 mawk neofetch"}
 if [ -n "$PREINSTALL" ]; then
 	get "$MIRROR/dists/iphoneos-arm64-rootless/$SUITE/main/binary-iphoneos-arm64/Packages" Packages
 	MIRROR="$MIRROR" python3 "$ROOT/tools/jb-preinstall.py" "$OUT/root" "$OUT/debs/Packages" "$OUT/debs" $PREINSTALL
+	# mawk's postinst makes awk and nawk with update-alternatives; jb-preinstall.py runs no package's scripts,
+	# so the links are made here, absolute into the prefix like the bootstrap's own links
+	if [ -x "$OUT/root/var/jb/usr/bin/mawk" ]; then
+		for name in awk nawk; do
+			[ -e "$OUT/root/var/jb/usr/bin/$name" ] || ln -s /var/jb/usr/bin/mawk "$OUT/root/var/jb/usr/bin/$name"
+		done
+	fi
 fi
 
 # the repositories Sileo starts with: Procursus itself, where everything here came from

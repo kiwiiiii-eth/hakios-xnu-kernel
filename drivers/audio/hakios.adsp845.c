@@ -2028,7 +2028,7 @@ static struct {
 	.channel = {
 		[CHANNEL_QRTR] = { .name = "IPCRTR", .wanted = true, .ours = 1, .intents = { { 0x800, 5 }, { 0x2000, 3 }, { 0x4400, 2 } } },
 		/*
-		 * Step 11 (adsp8=11 and more): APR, the audio services' protocol. dt: ref-linux/sdm845.dtsi:931-935, apr-v2 with
+		 * Step 11 (adsp8=11 and more): APR, the audio services' protocol. dt: ref-linux/sdm845.dtsi:930-936, apr-v2 with
 		 * qcom,glink-channels = "apr_audio_svc" and qcom,intents = <512 20>, 20 buffers of 512 bytes (Linux's
 		 * qcom_glink_native.c gives them to the channel when it is open, as glink_pump() does for the others). Not
 		 * answered unless step 11 is to be performed (hakios_adsp_init() sets "wanted"): the steps up to 10 stay as in B1.
@@ -2882,9 +2882,9 @@ step_qrtr(void)
 #define APR_DOMAIN_ADSP                 4       /* qcom,apr.h */
 #define APR_DOMAIN_APPS                 5
 #define APR_DOMAIN_MAX                  6
-#define APR_SVC_ADSP_CORE               3       /* sdm845.dtsi:937 service@3 "qcom,q6core" */
-#define APR_SVC_AFE                     4       /* :946 q6afe */
-#define APR_SVC_ASM                     7       /* :957 q6asm */
+#define APR_SVC_ADSP_CORE               3       /* sdm845.dtsi:938 service@3 "qcom,q6core" */
+#define APR_SVC_AFE                     4       /* :944 q6afe */
+#define APR_SVC_ASM                     7       /* :956 q6asm (iommus 0x1821 at :965) */
 #define APR_SVC_ADM                     8       /* :969 q6adm */
 #define APR_SVC_MAX                     0x17
 #define APR_MSG_TYPE_SEQ_CMD            2       /* apr.h */

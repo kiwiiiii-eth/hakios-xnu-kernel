@@ -6058,8 +6058,13 @@ mic_codec_capture_on(void)
 	(void)mic_codec_read(0x0a34, &v);
 	(void)mic_codec_write(0x0a34, v, "TX0_TX_VOL_CTL (again, to take)");
 	/* E: the interface device's TX port 0: channel mask 1, 12 bytes of watermark, on */
-	if (!mic_ve_write(mic_la_ifd, 0x100, 0x01) || !mic_ve_write(mic_la_ifd, 0x101, 0x00) || !mic_ve_write(mic_la_ifd, 0x050, 0x05) ||
-	    !mic_ve_write(mic_la_ifd, 0x032, 0x01)) {
+	/*
+	 * (the interface device's registers are paged as well -- page r / 0x400 in element 0x800, then element 0x800 + r % 0x400, Linux's
+	 * wcd934x_ifc_ranges: r118 wrote 0x100 and 0x50 themselves and read zeros back, the port never set, the channel all zeros)
+	 */
+	if (!mic_ve_write(mic_la_ifd, 0x800, 0) || !mic_ve_write(mic_la_ifd, 0x800 + 0x100, 0x01) ||
+	    !mic_ve_write(mic_la_ifd, 0x800 + 0x101, 0x00) || !mic_ve_write(mic_la_ifd, 0x800 + 0x050, 0x05) ||
+	    !mic_ve_write(mic_la_ifd, 0x800 + 0x032, 0x01)) {
 		return false;
 	}
 	mic_ifd_show("set");
@@ -6072,12 +6077,12 @@ mic_ifd_show(const char *when)
 {
 	uint8_t v[6] = { 0 };
 
-	(void)mic_ve_read(mic_la_ifd, 0x100, &v[0], 1);
-	(void)mic_ve_read(mic_la_ifd, 0x050, &v[1], 1);
-	(void)mic_ve_read(mic_la_ifd, 0x032, &v[2], 1);
-	(void)mic_ve_read(mic_la_ifd, 0x036, &v[3], 1);
-	(void)mic_ve_read(mic_la_ifd, 0x070, &v[4], 1);
-	(void)mic_ve_read(mic_la_ifd, 0x080, &v[5], 1);
+	(void)mic_ve_read(mic_la_ifd, 0x800 + 0x100, &v[0], 1);
+	(void)mic_ve_read(mic_la_ifd, 0x800 + 0x050, &v[1], 1);
+	(void)mic_ve_read(mic_la_ifd, 0x800 + 0x032, &v[2], 1);
+	(void)mic_ve_read(mic_la_ifd, 0x800 + 0x036, &v[3], 1);
+	(void)mic_ve_read(mic_la_ifd, 0x800 + 0x070, &v[4], 1);
+	(void)mic_ve_read(mic_la_ifd, 0x800 + 0x080, &v[5], 1);
 	printf("adsp845: %u: the interface's TX port 0 (%s): channel mask %#x, configuration %#x, interrupts on %#x, status %#x, source %#x, "
 	    "port status %#x\n", step, when, v[0], v[1], v[2], v[3], v[4], v[5]);
 }

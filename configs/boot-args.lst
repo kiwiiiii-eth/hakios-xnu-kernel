@@ -165,6 +165,7 @@ hakios_kver	k
 haptic	k
 haptic_effect	k
 haptic_ms	k
+haptic_strength	k
 hv_wdt_pet	k
 loader_return_after	kl
 m2v_utrace	u

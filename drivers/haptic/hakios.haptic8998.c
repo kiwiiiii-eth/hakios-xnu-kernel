@@ -507,7 +507,7 @@ stop(void)
 #define ACTIVE_US               30000           /* a write that was not silence counts for this long */
 #define SILENT_BELOW            256             /* of 32768: samples no larger are silence */
 #define SETTLE_US               8000            /* how long Darwin's waveform is listened to before a buzz: its loudness */
-#define TAP_US                  25000           /* the least a buzz lasts */
+#define TAP_US                  12000           /* the least a buzz lasts (a tap of an iPhone is about as long) */
 #define FOLLOW_US               20000           /* how often a vibration's strength follows Darwin's */
 #define TOLD_EVENTS             24
 
@@ -592,13 +592,21 @@ static const struct cdevsw haptic_cdevsw = {
 	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_type = 0
 };
 
-/* VMAX for Darwin's loudness: OnePlus's from a third of full scale up, down to five eighths of it for the softest */
+/*
+ * VMAX for Darwin's loudness. Run 50 (the user): "too strong; an iPhone only taps lightly". Driven directly at OnePlus's
+ * VMAX the LRA hits hard: the top is haptic_strength percent of it (55 by default, at most 100), reached from a third of
+ * full scale up, and the softest get three eighths of that top. (Code 1, 116 mV, at the least.)
+ */
+static uint32_t strength = 55;
+
 static uint8_t
 vmax_for(uint32_t peak)
 {
-	uint32_t top = VMAX_CODE, low = top * 5 / 8, third = 32767 / 3;
+	uint32_t top = VMAX_CODE * strength / 100, low = top * 3 / 8, third = 32767 / 3, v;
 
-	return (uint8_t)(peak >= third ? top : low + (top - low) * peak / third);
+	top = top < 1 ? 1 : top;
+	v = peak >= third ? top : low + (top - low) * peak / third;
+	return (uint8_t)(v < 1 ? 1 : v);
 }
 
 static void
@@ -613,7 +621,10 @@ serve(void)
 		say("haptic: /dev/hakios-haptic cannot be made\n");
 		return;
 	}
-	say("haptic: THE MOTOR PLAYS WHAT DARWIN PLAYS ON ITS ACTUATOR (/dev/hakios-haptic) from here on, until the run ends\n");
+	PE_parse_boot_argn("haptic_strength", &strength, sizeof(strength));
+	strength = strength < 10 ? 10 : strength > 100 ? 100 : strength;
+	say("haptic: THE MOTOR PLAYS WHAT DARWIN PLAYS ON ITS ACTUATOR (/dev/hakios-haptic) from here on, until the run ends; at most "
+	    "%u%% of OnePlus's VMAX (haptic_strength)\n", strength);
 	while (!broken) {
 		uint64_t now = now_us();
 		bool active = heard_us != 0 && now - heard_us < ACTIVE_US;

@@ -2240,7 +2240,7 @@ ipa_space_on(void)
 	contexts = idr1 & 0xff;
 	ipa_space.page = idr1 >> 31 ? 0x10000 : 0x1000;
 	ipa_space.pages = 2u << (idr1 >> 28 & 7);
-	if ((scr0 & 1u << 3) || 2 * ipa_space.pages * ipa_space.page < 0x100000) {      /* (the 6T's: 64 pages of 4K a side, as for Wi-Fi) */
+	if ((scr0 & 1u << 3) || 2 * ipa_space.pages * ipa_space.page < 0x80000) {       /* (the 6T's: 64 pages of 4K a side, 512K, as for Wi-Fi) */
 		lck_mtx_unlock(&hakios_smmu_lock);
 		printf("mpss: ipa: the SMMU is not of the shape this knows (scr0 %#x, idr1 %#x)\n", scr0, idr1);
 		return false;

@@ -66,7 +66,7 @@
  *              from here a thread of ours listens to the modem
  *  10  talks   QRTR on that channel: hello both ways, and the services the modem tells of
  *  11  talks   WLFW, the Wi-Fi firmware's service on the modem: ath10k's qmi.c exchange by hand (MSA, board data)
- *  12  talks   QMI: DMS "operating mode online" (modem_online=0: not), then NAS "serving system"
+ *  12  talks   QMI: DMS "operating mode online" (the 6T: only with modem_online=1), then NAS "serving system"
  *              and "signal info" every second for modem_nas_wait seconds (default 30), or until
  *              the modem says it is registered and how strong the signal is
  *
@@ -7005,7 +7005,12 @@ sim_probe_close(void)
 static bool
 step_nas(void)
 {
-	uint32_t wait_seconds = 90, online = 1;
+	/*
+	 * Not online by default on the 6T (run 53): registered on LTE without the IPA set up, the modem asserts in its LTE
+	 * downlink ("ipa_dl_opt_lte.c:432: IPA Assert: new_free_space > 0 failed") within two minutes, and Wi-Fi, whose
+	 * firmware runs on it, dies with it. modem_online=1 puts it online all the same; once the IPA is made the 6T's, on.
+	 */
+	uint32_t wait_seconds = 90, online = 0;
 	uint64_t began, asked_online = 0;
 	bool registered = false, is_online = false, probed = option("modem_sim_probe_off"), probed_again = false;
 	uint64_t probed_at = 0, watched_at = 0, data_deadline = 0;
@@ -7018,7 +7023,7 @@ step_nas(void)
 	PE_parse_boot_argn("modem_online", &online, sizeof(online));
 	PE_parse_boot_argn("modem_data_wait", &data_wait, sizeof(data_wait));
 	announce("look the modem's services up as they come (they take some 30 s): DMS asked to put the modem online as soon as it is "
-	    "there (modem_online=0: not), NAS asked for the serving system and the signal every second, until the modem is registered "
+	    "there (the 6T: only with modem_online=1), NAS asked for the serving system and the signal every second, until the modem is registered "
 	    "with a signal read or modem_nas_wait seconds (default 90) are over");
 	dms_port = qrtr_open(dms_receive, dms_server, NULL);
 	if (dms_port == NULL || qrtr_lookup(dms_port, QMI_DMS, 0, 0) != 0) {

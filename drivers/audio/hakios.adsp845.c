@@ -81,8 +81,9 @@
  * processor hears "adsp845: off". A DSP that was shut down without having said it stopped is not started again
  * unless adsp8_again=1.
  *
- * More boot-args, for a config fragment rather than the command line (that is 607 characters and nearly full):
- * adsp8_pause=MS (default 2200, what the loader needs to note the end of the log, after each announcement of the
+ * The boot line is nearly full (607 characters), so the one argument carries more: the hundreds of adsp8=N are switches,
+ * 100 = adsp8_cx=1, 200 = adsp8_keep=1, 400 = adsp8_again=1 (added: adsp8=307 is step 7 with cx.lvl and kept up). Named
+ * arguments for what a config fragment can carry: adsp8_pause=MS (default 2200, what the loader needs to note the end of the log, after each announcement of the
  * last step), adsp8_wait=S (how long step 7 watches for "up", default 10), adsp8_listen=S, adsp8_keep=1,
  * adsp8_again=1, adsp8_cx=1, adsp8_bb=0 (the black box, below, off).
  */
@@ -134,6 +135,7 @@ static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
 static uint32_t step;                   /* the one being performed */
 static uint32_t new_from;               /* the first of the steps that have not been seen to work: they wait */
 static char last_write[96] = "nothing written";
+static bool flag_cx, flag_keep, flag_again;      /* the hundreds of adsp8=N: 100 asks RPMh for cx.lvl, 200 keeps the DSP up, 400 starts it again */
 static bool leaving;                    /* on the way back to the loader after a panic: no lock is taken, nothing sleeps */
 
 /*
@@ -1537,7 +1539,7 @@ step_header(void)
 		if (!dsp_shutdown("it may be running")) {
 			return false;
 		}
-		if (!stopped_by_its_word && !option("adsp8_again")) {
+		if (!stopped_by_its_word && !(flag_again || option("adsp8_again"))) {
 			printf("adsp845: %u: THE AUDIO DSP IS NOT STARTED AGAIN: it was shut down without having acknowledged a stop, and "
 			    "with the Wi-Fi's DSP of the reference phone a start after that reset the phone (adsp8_again=1 to try all the same)\n", step);
 			return false;
@@ -1820,7 +1822,7 @@ step_start(void)
 	    "authenticate the image and let the DSP out of reset");
 	bzero(&doorbell, sizeof(doorbell));
 	lck_mtx_lock(&dsp_lock);
-	if (option("adsp8_cx")) {
+	if (flag_cx || option("adsp8_cx")) {
 		if (!rails(384)) {
 			lck_mtx_unlock(&dsp_lock);
 			return false;
@@ -2921,14 +2923,23 @@ hakios_adsp_init(void)
 	if (last_step == 0) {
 		return;
 	}
+	/* (the boot line is nearly full: what would be three more arguments is the hundreds of this one: adsp8=107 is step 7 with cx.lvl) */
+	flag_cx = (last_step / 100) & 1;
+	flag_keep = (last_step / 100) & 2;
+	flag_again = (last_step / 100) & 4;
+	last_step %= 100;
+	if (last_step == 0) {
+		return;
+	}
 	if (last_step > STEPS) {
 		last_step = STEPS;
 	}
-	keep = option("adsp8_keep");
+	keep = flag_keep || option("adsp8_keep");
 	new_from = last_step;
 	PE_parse_boot_argn("adsp8_pause", &pause_ms, sizeof(pause_ms));
-	tell("adsp845: steps up to %u; the last waits %u ms after each announcement; the steps wait for the root file system, and the "
-	    "system goes on starting\n", last_step, pause_ms);
+	tell("adsp845: steps up to %u (cx.lvl %s, kept %s, again %s); the last waits %u ms after each announcement; the steps wait for the "
+	    "root file system, and the system goes on starting\n", last_step, (flag_cx || option("adsp8_cx")) ? "asked for" : "not asked",
+	    keep ? "yes" : "no", (flag_again || option("adsp8_again")) ? "yes" : "no", pause_ms);
 	if (kernel_thread_start(steps_thread, NULL, &thread) != KERN_SUCCESS) {
 		tell("adsp845: no thread: the steps are not performed\n");
 		return;

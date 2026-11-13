@@ -4239,17 +4239,19 @@ static const int16_t s5_tone[48] = {
 };
 /*
  * S8: what Darwin plays (/dev/hakios-audio, from the audio server's plug-in) to the speaker. The sink puts it in a ring; the
- * periods take it from there, the two channels made one (the speaker is one), 20 dB under what Darwin wrote and Darwin's own
- * volume under that, the peaks never over -20 dBFS (S5_PEAK_MOST): the left slot, the right one silent, as the tone of step 16.
+ * periods take it from there, the two channels made one (the speaker is one), S8_BELOW_DB under what Darwin wrote and Darwin's own
+ * volume under that, a limiter keeping the peaks at -20 dBFS (S5_PEAK_MOST): the left slot, the right one silent, as step 16.
  */
 #define S8_RING_FRAMES          16384u          /* 0.34 s */
-#define S8_BELOW_DB             20u             /* under what Darwin writes, always */
+#define S8_BELOW_DB             0u              /* under what Darwin writes, always (r100: 20 dB made a ringtone -41 dBFS, unheard) */
 #define S8_SILENCE              8               /* a sample's size under which it is taken for silence */
 #define S8_QUIET_US             3000000ull      /* this long without sound: the amplifier off */
 static int16_t s8_ring[2 * S8_RING_FRAMES];
 static volatile uint32_t s8_head, s8_tail, s8_peak_in, s8_peak_out, s8_gain_q15;
 static volatile uint64_t s8_last_sound_us, s8_frames_in, s8_frames_fed, s8_frames_silent;
 static volatile bool s8_mode, s8_stopping, s8_running;
+static uint32_t s8_limit_q15 = 32768;           /* the limiter's gain: down at once to keep a period's peak at -20 dBFS, back up slowly */
+static volatile uint32_t s8_limited_periods;
 
 /* 10^(-dB/20) in Q15, 0..96 dB */
 static const uint16_t s8_db_q15[97] = {
@@ -4308,9 +4310,22 @@ s5_period_fill(unsigned period)
 
 	if (s8_mode) {
 		uint32_t tail = s8_tail, available = s8_head - tail, n = available < S5_PERIOD_FRAMES ? available : S5_PERIOD_FRAMES;
-		int32_t q15 = (int32_t)s8_gain_q15, peak = (int32_t)s8_peak_out;
+		int32_t q15 = (int32_t)s8_gain_q15, peak = (int32_t)s8_peak_out, most = 0;
 
 		OSMemoryBarrier();
+		/* the limiter: the period's peak after the gain, and the gain that keeps it at S5_PEAK_MOST (the clamp below only catches rounding) */
+		for (uint32_t i = 0; i < n; i++) {
+			int32_t one = ((int32_t)s8_ring[2 * ((tail + i) % S8_RING_FRAMES)] + s8_ring[2 * ((tail + i) % S8_RING_FRAMES) + 1]) / 2;
+			int32_t v = one * q15 >> 15;
+
+			most = v > most ? v : -v > most ? -v : most;
+		}
+		s8_limit_q15 += (32768 - s8_limit_q15) / 16;    /* back up: about 0.3 s */
+		if ((int64_t)most * s8_limit_q15 >> 15 > S5_PEAK_MOST) {
+			s8_limit_q15 = (uint32_t)((int64_t)S5_PEAK_MOST * 32768 / most);
+			s8_limited_periods++;
+		}
+		q15 = (int32_t)((int64_t)q15 * s8_limit_q15 >> 15);
 		for (uint32_t i = 0; i < n; i++) {
 			int32_t one = ((int32_t)s8_ring[2 * ((tail + i) % S8_RING_FRAMES)] + s8_ring[2 * ((tail + i) % S8_RING_FRAMES) + 1]) / 2;
 			int32_t v = one * q15 >> 15;
@@ -4526,8 +4541,10 @@ s8_loop(uint32_t handle, uint32_t *sent_out)
 	}
 	s5_take_bus();
 	hakios_audio_set_sink("the 6T's speaker (adsp845, step 17)", s8_sink);
+	s8_limit_q15 = 32768;
+	s8_limited_periods = 0;
 	tell("adsp845: %u: DARWIN'S SOUND GOES TO THE SPEAKER now, until the run ends: %u dB under what it writes and its volume under that, "
-	    "never over -20 dBFS; the amplifier on while there is sound\n", step, S8_BELOW_DB);
+	    "a limiter keeping it under -20 dBFS; the amplifier on while there is sound\n", step, S8_BELOW_DB);
 	while (!failed && !s8_stopping) {
 		uint64_t now = now_us();
 		bool sound = s8_last_sound_us != 0 && now - s8_last_sound_us < S8_QUIET_US;
@@ -4595,9 +4612,10 @@ s8_loop(uint32_t handle, uint32_t *sent_out)
 		if (now - last_say >= 10000000ull && s8_frames_in != frames_said) {
 			last_say = now;
 			frames_said = s8_frames_in;
-			tell("adsp845: %u: from Darwin %llu frames (its peak %u), to the speaker %llu (their peak %u of 3277), %llu of silence filled "
-			    "in; %u underflows; the amplifier %s, on %u times, looked at %u times\n", step, s8_frames_in, s8_peak_in, s8_frames_fed,
-			    s8_peak_out, s8_frames_silent, s5_underflows, s5_amp_on ? "ON" : "off", ups, looks);
+			tell("adsp845: %u: from Darwin %llu frames (its peak %u), to the speaker %llu (their peak %u of 3277; %u periods held down "
+			    "by the limiter), %llu of silence filled in; %u underflows; the amplifier %s, on %u times, looked at %u times\n", step,
+			    s8_frames_in, s8_peak_in, s8_frames_fed, s8_peak_out, s8_limited_periods, s8_frames_silent, s5_underflows,
+			    s5_amp_on ? "ON" : "off", ups, looks);
 			s8_peak_in = s8_peak_out = 0;
 		}
 		sleep_ms(2);
@@ -4639,7 +4657,7 @@ stream_play(unsigned mode)
 
 	if (mode == 2) {
 		announce("as step 16, and then DARWIN'S SOUND (/dev/hakios-audio) to the speaker until the run ends: one channel of the two "
-		    "channels' mean, 20 dB under it and Darwin's volume under that, never over -20 dBFS; the amplifier on while there is sound "
+		    "channels' mean at Darwin's volume, a limiter keeping it under -20 dBFS; the amplifier on while there is sound "
 		    "(off after 3 s of silence, and for good after a fault), its status read every 200 ms. AUDIBLE");
 	} else if (amp) {
 		announce("as step 15, and then the AMPLIFIER: bypass, out of power-down, on (every write read back); a 1 kHz tone on the left "

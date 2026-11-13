@@ -36,6 +36,33 @@
 
 extern void HakiosWLANStart(const char *interface, const uint8_t *address);  /* drivers/wifi/hakios.wlan.cpp */
 
+/*
+ * Its lines into the loader's record of the run too (where a phone's run log comes from: printf alone does not get
+ * there, see drivers/wifi/hakios.wifi10.c), where the kernel has that record.
+ */
+extern void loader_log_putc(char c) __attribute__((weak));
+
+static int
+net_say(const char *format, ...) __printflike(1, 2);
+
+static int
+net_say(const char *format, ...)
+{
+	char line[300];
+	va_list list;
+
+	va_start(list, format);
+	vsnprintf(line, sizeof(line), format, list);
+	va_end(list);
+	if (loader_log_putc != NULL) {
+		for (const char *c = line; *c != 0; c++) {
+			loader_log_putc(*c);
+		}
+	}
+	return printf("%s", line);
+}
+#define printf net_say
+
 static LCK_GRP_DECLARE(net_lck_grp, "hakios-net");
 
 /* One interface: enN on its link. */

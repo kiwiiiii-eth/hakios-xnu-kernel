@@ -143,7 +143,7 @@ static LCK_GRP_DECLARE(adsp_lock_group, "hakios-adsp845");
 
 static void bb_say(const char *format, ...) __printflike(1, 2);
 
-#define STEPS                   22
+#define STEPS                   23
 #define FIRST_INDEPENDENT_STEP  12      /* the steps from here on do not need the DSP (800 of adsp8=N leaves it alone) */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
@@ -4958,14 +4958,15 @@ static uint32_t
 cmd_db_address(const char *name)
 {
 	char id[8] = { 0 };
+	size_t n = strlen(name);
 
+	memcpy(id, name, n < sizeof(id) ? n : sizeof(id));     /* (eight letters fill the id: no room for a NUL; r111 missed lnbclka2) */
 	if (cmd_db == NULL) {
 		cmd_db = (const struct cmd_db_header *)ml_io_map_unmappable(CMD_DB_PHYS, CMD_DB_SIZE, VM_WIMG_WCOMB);
 	}
 	if (!(cmd_db->magic[0] == 0xdb && cmd_db->magic[1] == 0x30 && cmd_db->magic[2] == 0x03 && cmd_db->magic[3] == 0x0c)) {
 		return 0;
 	}
-	strlcpy(id, name, sizeof(id));
 	for (unsigned s = 0; s < 8; s++) {
 		const struct cmd_db_slave *slave = &cmd_db->slave[s];
 		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(cmd_db->data + slave->header_offset);
@@ -5208,6 +5209,402 @@ step_mic_qmi(void)
 	return true;
 }
 
+
+/* ---- M3: the NGD's messages through the BAM (pipe 3 in, pipe 4 out), and the satellite's handshake with the master ---- */
+/* the NGD's stream through a context of ours whose one table maps DDR as it is in 1 GB blocks, uncached (as the Wi-Fi's) */
+#define MIC_BLOCK               (1ull | 0ull << 2 | 1ull << 6 | 2ull << 8 | 1ull << 10 | 1ull << 11)
+static struct block mic_smmu_second = { "apps smmu", 0, 0x1000, 0 };
+static struct block mic_smmu_context = { "apps smmu, the microphone's context", 0, 0x1000, 0 };
+static struct {
+	bool on;
+	uint32_t match, context, old_smr, old_s2cr, old_sctlr;
+	vm_offset_t root;
+} mic_space;
+
+static bool
+mic_space_on(void)
+{
+	bool used[256] = { false };
+	uint32_t scr0 = get(&s5_smmu, "scr0", SMMU_SCR0), idr0 = get(&s5_smmu, "idr0", SMMU_IDR0);
+	uint32_t idr1 = get(&s5_smmu, "idr1", SMMU_IDR1), matches = idr0 & 0xff, contexts = idr1 & 0xff, page, pages;
+	uint64_t ttbr, *root;
+
+	if (scr0 & 1u << 3) {
+		return false;
+	}
+	page = idr1 >> 31 ? 0x10000 : 0x1000;
+	pages = 2u << (idr1 >> 28 & 7);
+	mic_space.match = ~0u;
+	for (uint32_t n = 0; n < matches && SMMU_SMR(n) < 0xc00; n++) {
+		uint32_t smr = rd(s5_smmu.base + SMMU_SMR(n)), s2cr = rd(s5_smmu.base + SMMU_S2CR(n));
+
+		if (smr >> 31) {
+			used[s2cr & 0xff] = true;
+			if ((((smr & 0x7fff) ^ MIC_STREAM_6T) & ~(smr >> 16 & 0x7fff)) == 0) {
+				printf("adsp845: %u: match register %u covers stream 0x1806 already (smr %#x, s2cr %#x): left alone\n", step, n, smr, s2cr);
+				return false;
+			}
+		} else if (mic_space.match == ~0u) {
+			mic_space.match = n;
+			mic_space.old_smr = smr;
+			mic_space.old_s2cr = s2cr;
+		}
+	}
+	if (s5_space.on) {
+		used[s5_space.context] = true;
+	}
+	for (mic_space.context = 0; mic_space.context < contexts && used[mic_space.context]; mic_space.context++) {
+	}
+	if (mic_space.match == ~0u || mic_space.context >= contexts) {
+		printf("adsp845: %u: the SMMU has no match register or no context left for stream 0x1806\n", step);
+		return false;
+	}
+	mic_smmu_second.phys = s5_smmu.phys + page;
+	mic_smmu_context.phys = s5_smmu.phys + (pages + mic_space.context) * page;
+	mic_space.old_sctlr = get(&mic_smmu_context, "sctlr", SMMU_CB_SCTLR);
+	if (mic_space.old_sctlr & 1) {
+		printf("adsp845: %u: context %u is on with no stream through it: somebody's, left alone\n", step, mic_space.context);
+		return false;
+	}
+	if (mic_space.root == 0 &&
+	    kmem_alloc(kernel_map, &mic_space.root, 4096, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		mic_space.root = 0;
+		return false;
+	}
+	root = (uint64_t *)mic_space.root;
+	bzero(root, 4096);
+	for (unsigned g = 2; g < 16; g++) {
+		root[g] = ((uint64_t)g << 30) | MIC_BLOCK;
+	}
+	for (vm_offset_t line = mic_space.root; line < mic_space.root + 4096; line += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (line));
+	}
+	__asm__ volatile ("dsb sy");
+	ttbr = kvtophys(mic_space.root) | (uint64_t)mic_space.context << 48;
+	printf("adsp845: %u: THE SMMU IS ABOUT TO BE WRITTEN: context %u gets our table (DDR from 0x80000000 to 0x400000000 as it is, in 1 GB "
+	    "blocks), match register %u sends stream 0x1806 (mask 0) through it\n", step, mic_space.context, mic_space.match);
+	put(&mic_smmu_context, "sctlr", SMMU_CB_SCTLR, 0);
+	put(&mic_smmu_second, "cba2r", SMMU_CBA2R(mic_space.context), 1);
+	put(&mic_smmu_second, "cbar", SMMU_CBAR(mic_space.context), SMMU_CBAR_STAGE_1);
+	put(&mic_smmu_context, "tcr2", SMMU_CB_TCR2, SMMU_TCR2);
+	put(&mic_smmu_context, "tcr", SMMU_CB_TCR, SMMU_TCR_39_BITS);
+	put(&mic_smmu_context, "ttbr0, low", SMMU_CB_TTBR0, (uint32_t)ttbr);
+	put(&mic_smmu_context, "ttbr0, high", SMMU_CB_TTBR0 + 4, (uint32_t)(ttbr >> 32));
+	put(&mic_smmu_context, "ttbr1, low", SMMU_CB_TTBR1, 0);
+	put(&mic_smmu_context, "ttbr1, high", SMMU_CB_TTBR1 + 4, 0);
+	put(&mic_smmu_context, "mair0", SMMU_CB_MAIR0, SMMU_MAIR0);
+	put(&mic_smmu_context, "mair1", SMMU_CB_MAIR1, 0);
+	put(&mic_smmu_context, "fsr", SMMU_CB_FSR, SMMU_FSR_ALL);
+	put(&mic_smmu_context, "tlbiasid", SMMU_CB_TLBIASID, mic_space.context);
+	put(&mic_smmu_context, "tlbsync", SMMU_CB_TLBSYNC, 1);
+	for (unsigned ms = 0; rd(mic_smmu_context.base + SMMU_CB_TLBSTATUS) & 1; ms++) {
+		if (ms == 100) {
+			return false;
+		}
+		sleep_ms(1);
+	}
+	put(&mic_smmu_context, "sctlr", SMMU_CB_SCTLR, SMMU_SCTLR_ON);
+	mic_space.on = true;
+	put(&s5_smmu, "s2cr", SMMU_S2CR(mic_space.match), mic_space.context);
+	put(&s5_smmu, "smr", SMMU_SMR(mic_space.match), 1u << 31 | MIC_STREAM_6T);
+	if (get(&s5_smmu, "smr", SMMU_SMR(mic_space.match)) != (1u << 31 | MIC_STREAM_6T)) {
+		printf("adsp845: %u: THE SMMU DID NOT TAKE THE MATCH REGISTER for stream 0x1806\n", step);
+		return false;
+	}
+	printf("adsp845: %u: STREAM 0x1806 GOES THROUGH CONTEXT %u of the SMMU, DDR as it is\n", step, mic_space.context);
+	return true;
+}
+
+static void
+mic_space_off(void)
+{
+	uint32_t status;
+
+	if (!mic_space.on) {
+		return;
+	}
+	status = rd(mic_smmu_context.base + SMMU_CB_FSR);
+	printf("adsp845: %u: the SMMU %s the NGD's stream (context %u: status %#x, address %#x)\n", step,
+	    (status & SMMU_FSR_ALL) ? "REFUSED SOMETHING TO" : "refused nothing to", mic_space.context, status,
+	    rd(mic_smmu_context.base + SMMU_CB_FAR));
+	put(&s5_smmu, "smr (given back)", SMMU_SMR(mic_space.match), mic_space.old_smr);
+	put(&s5_smmu, "s2cr (given back)", SMMU_S2CR(mic_space.match), mic_space.old_s2cr);
+	put(&mic_smmu_context, "sctlr (given back)", SMMU_CB_SCTLR, mic_space.old_sctlr);
+	mic_space.on = false;
+}
+
+/* the BAM's pipes: their registers (Linux's bam_dma.c, v1.7: pipe n's at 0x13000 + n * 0x1000 of the BAM) */
+#define BAM_P_CTRL              0x000
+#define BAM_P_RST               0x004
+#define BAM_P_IRQ_STTS          0x010
+#define BAM_P_IRQ_CLR           0x014
+#define BAM_P_IRQ_EN            0x018
+#define BAM_P_SW_OFSTS          0x800
+#define BAM_P_EVNT_REG          0x818
+#define BAM_P_DESC_FIFO_ADDR    0x81c
+#define BAM_P_FIFO_SIZES        0x820
+#define BAM_P_EN                (1u << 1)
+#define BAM_P_DIRECTION         (1u << 3)       /* into memory (the device's to us): the RX pipe */
+#define BAM_P_SYS_MODE          (1u << 5)
+#define BAM_DESC_INT            0x8000u
+#define BAM_DESC_EOT            0x4000u
+#define MIC_FIFO_DESCS          64u             /* a pipe's descriptor FIFO: 512 bytes */
+#define MIC_MSG_LEN             40u             /* a message buffer (SLIM_MSGQ_BUF_LEN) */
+#define MIC_RX_BUFS             32u
+#define MIC_TX_BUFS             32u
+struct bam_desc {
+	uint32_t address;
+	uint16_t size, flags;
+};
+/* one page for it all, contiguous: the two FIFOs, then the RX buffers, then the TX buffers */
+static vm_offset_t mic_dma;
+static uint64_t mic_dma_phys;
+#define MIC_RX_FIFO             0u
+#define MIC_TX_FIFO             (MIC_FIFO_DESCS * 8u)
+#define MIC_RX_BUF(i)           (2u * MIC_FIFO_DESCS * 8u + MIC_MSG_LEN * (i))
+#define MIC_TX_BUF(i)           (MIC_RX_BUF(MIC_RX_BUFS) + MIC_MSG_LEN * (i))
+static uint32_t mic_rx_tail, mic_tx_tail, mic_rx_seen, mic_tx_next;
+static bool mic_pipes_on;
+
+static vm_offset_t
+mic_pipe(unsigned pipe)
+{
+	return mic_bam_pipes.base + (pipe - 3u) * 0x1000u;
+}
+
+static void
+mic_dma_flush(void)
+{
+	for (vm_offset_t line = mic_dma; line < mic_dma + 4096; line += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (line));
+	}
+	__asm__ volatile ("dsb sy");
+}
+
+static void
+mic_pipe_on(unsigned pipe, uint32_t fifo, bool rx)
+{
+	vm_offset_t p = mic_pipe(pipe);
+	uint32_t mask = get(&mic_bam_top, "ee 1 mask", 0x4004);
+
+	wr(p + BAM_P_RST, 1);
+	__asm__ volatile ("dsb sy");
+	wr(p + BAM_P_RST, 0);
+	wr(p + BAM_P_DESC_FIFO_ADDR, (uint32_t)(mic_dma_phys + fifo));
+	wr(p + BAM_P_FIFO_SIZES, MIC_FIFO_DESCS * 8u);
+	wr(p + BAM_P_IRQ_EN, 0x31);
+	put(&mic_bam_top, "ee 1 mask", 0x4004, mask | 1u << pipe);
+	wr(p + BAM_P_CTRL, BAM_P_EN | BAM_P_SYS_MODE | (rx ? BAM_P_DIRECTION : 0));
+	__asm__ volatile ("dsb sy");
+	printf("adsp845: %u: BAM pipe %u (%s) on: FIFO at %#llx, control %#x, offsets %#x\n", step, pipe, rx ? "in, the NGD's to us" :
+	    "out, ours to the NGD", mic_dma_phys + fifo, rd(p + BAM_P_CTRL), rd(p + BAM_P_SW_OFSTS));
+}
+
+static void
+mic_pipe_off(unsigned pipe)
+{
+	vm_offset_t p = mic_pipe(pipe);
+
+	wr(p + BAM_P_CTRL, 0);
+	wr(p + BAM_P_RST, 1);
+	__asm__ volatile ("dsb sy");
+	wr(p + BAM_P_RST, 0);
+	put(&mic_bam_top, "ee 1 mask", 0x4004, get(&mic_bam_top, "ee 1 mask", 0x4004) & ~(1u << pipe));
+}
+
+/* a descriptor into a pipe's FIFO, and the pipe told */
+static void
+mic_pipe_post(unsigned pipe, uint32_t fifo, uint32_t *tail, uint32_t address, uint16_t size)
+{
+	struct bam_desc *d = (struct bam_desc *)(mic_dma + fifo) + *tail;
+
+	d->address = address;
+	d->size = size;
+	d->flags = BAM_DESC_INT | BAM_DESC_EOT;
+	*tail = (*tail + 1) % MIC_FIFO_DESCS;
+	mic_dma_flush();
+	wr(mic_pipe(pipe) + BAM_P_EVNT_REG, *tail * 8u);
+	__asm__ volatile ("dsb sy");
+}
+
+/* a message out (its bytes as the NGD wants them, padded to words); true when the BAM has taken it and no NACK came */
+static bool
+mic_ngd_send(const uint8_t *message, uint32_t length, const char *what)
+{
+	uint32_t at = MIC_TX_BUF(mic_tx_next % MIC_TX_BUFS), padded = (length + 3) & ~3u, stat;
+	uint64_t began = now_us();
+
+	mic_tx_next++;
+	bzero((void *)(mic_dma + at), MIC_MSG_LEN);
+	memcpy((void *)(mic_dma + at), message, length);
+	mic_pipe_post(4, MIC_TX_FIFO, &mic_tx_tail, (uint32_t)(mic_dma_phys + at), (uint16_t)padded);
+	while ((rd(mic_pipe(4) + BAM_P_SW_OFSTS) & 0xffff) != mic_tx_tail * 8u) {
+		if (now_us() - began > 200000) {
+			printf("adsp845: %u: SLIMbus %s: THE BAM HAS NOT TAKEN IT in 200 ms (offsets %#x, tail %u)\n", step, what,
+			    rd(mic_pipe(4) + BAM_P_SW_OFSTS), mic_tx_tail);
+			return false;
+		}
+		sleep_ms(1);
+	}
+	sleep_ms(2);
+	stat = get(&mic_ngd, "ngd 1 interrupts", 0x1014);
+	wr(mic_ngd.base + 0x1018, stat);
+	printf("adsp845: %u: SLIMbus %s: sent (%u bytes; the NGD's interrupts %#x%s)\n", step, what, length, stat,
+	    (stat & 1u << 25) ? ": NACKED" : (stat & (1u << 26 | 1u << 27 | 1u << 29)) ? ": AN ERROR" : "");
+	return (stat & (1u << 25 | 1u << 26 | 1u << 27 | 1u << 29)) == 0;
+}
+
+/* the next message in, if any within ms: its bytes copied out, its length returned (0: none). The RX buffer goes back to the pipe. */
+static uint32_t
+mic_ngd_receive(uint8_t *out, uint32_t room, unsigned ms)
+{
+	uint64_t began = now_us();
+
+	for (;;) {
+		uint32_t done = (rd(mic_pipe(3) + BAM_P_SW_OFSTS) & 0xffff) / 8u;
+
+		if (done != mic_rx_seen) {
+			uint32_t index = mic_rx_seen % MIC_RX_BUFS, at = MIC_RX_BUF(index), length;
+
+			mic_dma_flush();
+			length = ((const uint8_t *)(mic_dma + at))[0] & 0x1f;
+			length = length < 4 ? 4 : length > MIC_MSG_LEN ? MIC_MSG_LEN : length;
+			memcpy(out, (const void *)(mic_dma + at), length < room ? length : room);
+			mic_rx_seen = (mic_rx_seen + 1) % MIC_FIFO_DESCS;
+			mic_pipe_post(3, MIC_RX_FIFO, &mic_rx_tail, (uint32_t)(mic_dma_phys + at), MIC_MSG_LEN);
+			wr(mic_ngd.base + 0x1018, get(&mic_ngd, "ngd 1 interrupts", 0x1014));
+			return length;
+		}
+		if (now_us() - began > (uint64_t)ms * 1000) {
+			return 0;
+		}
+		sleep_ms(1);
+	}
+}
+
+static void
+mic_say_message(const char *what, const uint8_t *m, uint32_t length)
+{
+	char text[3 * 16 + 1] = "";
+
+	for (uint32_t i = 0; i < length && i < 16; i++) {
+		snprintf(text + 3 * i, 4, "%02x ", m[i]);
+	}
+	printf("adsp845: %u: SLIMbus %s: %u bytes (mt %u, mc %#x): %s\n", step, what, length, m[0] >> 5, m[1], text);
+}
+
+static uint32_t mic_ngd_old_cfg, mic_pins_old[3];
+static bool mic_ngd_on;
+
+/* the bus up to the satellite's handshake: SLIMbus pins, SMMU, pipes, NGD; true once the master's capability is answered */
+static bool
+mic_bus_up(void)
+{
+	uint8_t m[MIC_MSG_LEN];
+	uint32_t length;
+	bool told = false;
+
+	if (!mic_slimbus_power(true)) {
+		return false;
+	}
+	for (unsigned i = 0; i < 3; i++) {
+		mic_pins_old[i] = get(&mic_pins[2 + i].page, "control", 0);
+		if (((mic_pins_old[i] >> 2) & 0xf) != 1) {
+			put(&mic_pins[2 + i].page, "control (lpass_slimbus)", 0, (mic_pins_old[i] & ~0x3fcu) | 1u << 2 | 1u << 6);
+		}
+	}
+	lck_mtx_lock(&hakios_smmu_lock);
+	if (!mic_space_on()) {
+		lck_mtx_unlock(&hakios_smmu_lock);
+		return false;
+	}
+	lck_mtx_unlock(&hakios_smmu_lock);
+	if (mic_dma == 0 && kmem_alloc(kernel_map, &mic_dma, 4096, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		mic_dma = 0;
+		return false;
+	}
+	bzero((void *)mic_dma, 4096);
+	mic_dma_phys = kvtophys(mic_dma);
+	mic_rx_tail = mic_tx_tail = mic_rx_seen = mic_tx_next = 0;
+	printf("adsp845: %u: the NGD's message buffers at %#llx (its FIFOs, %u in, %u out)\n", step, mic_dma_phys, MIC_RX_BUFS, MIC_TX_BUFS);
+	mic_ngd_old_cfg = get(&mic_ngd, "ngd 1 config", 0x1000);
+	if (get(&mic_ngd, "ngd 1 status", 0x1004) & 2) {
+		printf("adsp845: %u: the NGD has a logical address already\n", step);
+	}
+	mic_pipe_on(3, MIC_RX_FIFO, true);
+	mic_pipe_on(4, MIC_TX_FIFO, false);
+	mic_pipes_on = true;
+	for (unsigned i = 0; i < MIC_RX_BUFS; i++) {
+		mic_pipe_post(3, MIC_RX_FIFO, &mic_rx_tail, (uint32_t)(mic_dma_phys + MIC_RX_BUF(i)), MIC_MSG_LEN);
+	}
+	put(&mic_ngd, "ngd 1 interrupt enables", 0x1010, 0xfe000000u);
+	put(&mic_ngd, "ngd 1 rx message queue", 0x1008, get(&mic_ngd, "ngd 1 rx message queue", 0x1008) | 0x10000u);
+	put(&mic_ngd, "ngd 1 config (enabled, both queues)", 0x1000, mic_ngd_old_cfg | 7u);
+	mic_ngd_on = true;
+	for (unsigned tries = 0; tries < 20 && !told; tries++) {
+		length = mic_ngd_receive(m, sizeof(m), 100);
+		if (length == 0) {
+			continue;
+		}
+		mic_say_message("in", m, length);
+		if ((m[0] >> 5) == 6 && m[1] == 0x00) {
+			/* the master's capability: our report back (mt 6, mc 1, to the manager 0xff; magic, version, protocol) */
+			static const uint8_t report[] = { 7 | 6 << 5, 0x01, 0xff, 0xd9, 0xc5, 0x01, 0x01 };
+
+			printf("adsp845: %u: SLIM SAT: THE MASTER'S CAPABILITY RECEIVED\n", step);
+			for (unsigned r = 0; r < 10 && !told; r++) {
+				told = mic_ngd_send(report, sizeof(report), "REPORT_SATELLITE");
+				if (!told) {
+					sleep_ms(10);
+				}
+			}
+		}
+	}
+	printf("adsp845: %u: %s; the NGD's status %#x (logical address %s)\n", step, told ? "THE SATELLITE IS KNOWN TO THE MASTER" :
+	    "NO HANDSHAKE WITH THE MASTER", get(&mic_ngd, "ngd 1 status", 0x1004),
+	    (get(&mic_ngd, "ngd 1 status", 0x1004) & 2) ? "SET" : "not set");
+	return told;
+}
+
+static void
+mic_bus_down(void)
+{
+	if (mic_ngd_on) {
+		put(&mic_ngd, "ngd 1 interrupt enables (off)", 0x1010, 0);
+		put(&mic_ngd, "ngd 1 config (given back)", 0x1000, mic_ngd_old_cfg);
+		mic_ngd_on = false;
+	}
+	if (mic_pipes_on) {
+		mic_pipe_off(3);
+		mic_pipe_off(4);
+		mic_pipes_on = false;
+	}
+	lck_mtx_lock(&hakios_smmu_lock);
+	mic_space_off();
+	lck_mtx_unlock(&hakios_smmu_lock);
+	for (unsigned i = 0; i < 3; i++) {
+		if (mic_pins_old[i] != 0) {
+			put(&mic_pins[2 + i].page, "control (given back)", 0, mic_pins_old[i]);
+		}
+	}
+	mic_slimbus_power(false);
+}
+
+/* M3: the bus up to the handshake, and down again */
+static bool
+step_mic_bus(void)
+{
+	bool ok;
+
+	announce("ASK the DSP to power the SLIMbus; WRITE gpio70-72 to lpass_slimbus, SMMU stream 0x1806 through a context of ours, the "
+	    "BAM's pipes 3 and 4 (EE 1), the NGD (interrupts, its message queues, enabled); wait for the master's capability and answer it; "
+	    "then everything off and given back");
+	ok = mic_bus_up();
+	mic_bus_down();
+	printf("adsp845: %u: over: %s\n", step, ok ? "THE HANDSHAKE WAS MADE" : "no handshake");
+	return ok;
+}
+
 /* steps 18 to 20: none (the numbers are kept for the speaker's later steps) */
 static bool
 step_none(void)
@@ -5220,7 +5617,7 @@ step_none(void)
 static bool (*const steps[STEPS])(void) = {
 	step_survey, step_firmware, step_mailbox, step_header, step_image, step_our_item, step_start, step_queues, step_link, step_qrtr,
 	step_apr, step_tfa, step_amplifier, step_afe, step_stream, step_speaker, step_darwin, step_none, step_none, step_none,
-	step_mic_survey, step_mic_qmi,
+	step_mic_survey, step_mic_qmi, step_mic_bus,
 };
 
 static bool keep;                       /* the DSP and the link stay up while the system runs (adsp8_keep) */

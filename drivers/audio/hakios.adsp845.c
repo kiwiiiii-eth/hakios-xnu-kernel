@@ -5689,7 +5689,8 @@ mic_laddr(const uint8_t ea[6], const char *what)
 {
 	/* (r114: five tries in the first ~0.3 s after the reset all had an empty answer: the device needs its time to report present) */
 	for (unsigned tries = 0; tries < 30; tries++) {
-		uint8_t q[10] = { 9 | 2 << 5, 0x0d, 0xff, mic_tid, ea[0], ea[1], ea[2], ea[3], ea[4], ea[5] }, r[16] = { 0 };
+		/* (the first byte's length is the whole message's, 10: r114/r115's 9 cut the enumeration address short, an empty answer) */
+		uint8_t q[10] = { 10 | 2 << 5, 0x0d, 0xff, mic_tid, ea[0], ea[1], ea[2], ea[3], ea[4], ea[5] }, r[16] = { 0 };
 		uint8_t tid = mic_tid++;
 		uint32_t n;
 
@@ -5718,7 +5719,7 @@ mic_ve_read(uint8_t la, uint16_t element, uint8_t *value, uint32_t n)
 {
 	uint8_t slice = n == 1 ? 0 : 1, tid = mic_tid++;
 	uint16_t ec = (uint16_t)(slice | 1u << 3 | (element & 0xfffu) << 4);
-	uint8_t q[6] = { 5 | 0 << 5, 0x60, la, tid, (uint8_t)ec, (uint8_t)(ec >> 8) }, r[16] = { 0 };
+	uint8_t q[6] = { 6 | 0 << 5, 0x60, la, tid, (uint8_t)ec, (uint8_t)(ec >> 8) }, r[16] = { 0 };
 
 	if (!mic_ngd_send(q, sizeof(q), "REQUEST_VALUE")) {
 		return false;
@@ -5736,7 +5737,7 @@ static bool
 mic_ve_write(uint8_t la, uint16_t element, uint8_t value)
 {
 	uint16_t ec = (uint16_t)(0 | 1u << 3 | (element & 0xfffu) << 4);
-	uint8_t q[6] = { 5 | 0 << 5, 0x68, la, (uint8_t)ec, (uint8_t)(ec >> 8), value };
+	uint8_t q[6] = { 6 | 0 << 5, 0x68, la, (uint8_t)ec, (uint8_t)(ec >> 8), value };
 
 	return mic_ngd_send(q, sizeof(q), "CHANGE_VALUE");
 }
@@ -5978,7 +5979,7 @@ mic_codec_update(uint16_t r, uint8_t mask, uint8_t value, const char *what)
 static bool
 mic_ngd_user(uint8_t mc, const uint8_t *payload, uint32_t n, uint8_t tid, const char *what)
 {
-	uint8_t q[MIC_MSG_LEN] = { (uint8_t)((n + 2) | 2 << 5), mc, 0xff }, r[16];
+	uint8_t q[MIC_MSG_LEN] = { (uint8_t)((n + 3) | 2 << 5), mc, 0xff }, r[16];
 
 	memcpy(q + 3, payload, n);
 	if (!mic_ngd_send(q, 3 + n, what)) {

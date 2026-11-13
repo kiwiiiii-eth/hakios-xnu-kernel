@@ -429,6 +429,44 @@ wifi(void)
 	dhcp("en0");
 }
 
+/*
+ * en1, the modem's data session (drivers/modem/hakios.cell.c), has no IOKit object either, and configd makes no service
+ * of it: nothing asks for DHCP on it and the system never uses it (run 73: the session up, the network answering the
+ * kernel's own DNS question through the IPA, en1 never sent a frame). So, beside the radio's, once the kernel says
+ * the session is up (kern.hakios.cellular_data), DHCP is asked for on en1 -- which the kernel answers with the
+ * session's settings -- and asked again if the session comes back after going down. Waits up to 15 minutes.
+ */
+static void
+cell(void)
+{
+	double start = seconds();
+	int was = 0;
+
+	if (if_nametoindex("en1") == 0) {
+		while (if_nametoindex("en1") == 0 && seconds() - start < 120) {
+			usleep(500000);
+		}
+		if (if_nametoindex("en1") == 0) {
+			return;                 /* no data path on this kernel */
+		}
+	}
+	printf("net_test: cell: en1 is there after %.1f s; waiting for the data session\n", seconds() - start);
+	while (seconds() - start < 900) {
+		int up = 0;
+		size_t size = sizeof(up);
+
+		if (sysctlbyname("kern.hakios.cellular_data", &up, &size, NULL, 0) != 0) {
+			up = 0;
+		}
+		if (up && !was) {
+			printf("net_test: cell: the data session is up after %.1f s: DHCP asked for on en1\n", seconds() - start);
+			dhcp("en1");
+		}
+		was = up;
+		usleep(1000000);
+	}
+}
+
 /* ---- watch ------------------------------------------------------------------------------------------ */
 
 static double watch_start;
@@ -582,6 +620,7 @@ main(int argc, char **argv)
 				usleep((useconds_t)(atof(argv[++i]) * 1e6));
 			} else if (strcmp(step, "wifi") == 0) {
 				wifi();
+				cell();
 			} else if (strcmp(step, "watch") == 0 && i + 1 < argc) {
 				watch(atof(argv[++i]));
 			} else if (strcmp(step, "wrongjoin") == 0) {

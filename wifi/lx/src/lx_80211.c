@@ -732,19 +732,45 @@ management(struct lx_radio *radio, uint8_t *frame, unsigned kind)
 	return (frame + 24);
 }
 
-/* An Ethernet frame, through the driver's data path: the firmware makes 802.11 of it, and ciphers it once there is a key. */
+/*
+ * An Ethernet frame, through the driver's data path. A driver that takes Ethernet frames (ath11k's frame mode): the
+ * firmware makes 802.11 of it, and ciphers it once there is a key. One that does not (ath10k on the 6T's WCN3990, whose
+ * firmware the frames in Ethernet reached before there was a key and not after: run 39, no DHCP answer): the 802.11
+ * data frame mac80211 would make -- to the access point, from us, to the frame's destination; QoS data where the
+ * network has WMM; marked protected once there is a key, which the driver is given with it and whose header its
+ * hardware makes (ath10k's keys say "generate the IV": no room for it here); LLC and SNAP, then the frame's payload.
+ */
 static bool
 ethernet_send(struct lx_radio *radio, const uint8_t *frame, unsigned length)
 {
 	struct sk_buff *skb;
 	uint8_t *bytes;
+	bool native = radio->vif != NULL && !(radio->vif->offload_flags & IEEE80211_OFFLOAD_ENCAP_ENABLED);
+	bool qos = native && radio->sta != NULL && radio->sta->wme;
+	unsigned header = 24 + (qos ? 2 : 0) + 8;
 
-	if (radio->vif == NULL || radio->sta == NULL || (skb = frame_new(radio, length, &bytes)) == NULL) {
+	if (radio->vif == NULL || radio->sta == NULL || length < 14 ||
+	    (skb = frame_new(radio, native ? length - 14 + header : length, &bytes)) == NULL) {
 		radio->sent_lost++;
 		return (false);
 	}
-	memcpy(bytes, frame, length);
-	IEEE80211_SKB_CB(skb)->flags |= IEEE80211_TX_CTL_HW_80211_ENCAP;
+	if (native) {
+		bzero(bytes, header);
+		bytes[0] = qos ? 0x88 : 0x08;		/* data, or QoS data */
+		bytes[1] = 0x01 | (radio->pairwise_key != NULL ? 0x40 : 0);	/* to the distribution system; protected */
+		memcpy(bytes + 4, radio->target.address, ETH_ALEN);	/* the access point */
+		memcpy(bytes + 10, frame + 6, ETH_ALEN);		/* us */
+		memcpy(bytes + 16, frame, ETH_ALEN);			/* where the frame is for */
+		bytes[header - 8] = 0xaa;
+		bytes[header - 7] = 0xaa;
+		bytes[header - 6] = 0x03;
+		bytes[header - 2] = frame[12];
+		bytes[header - 1] = frame[13];
+		memcpy(bytes + header, frame + 14, length - 14);
+	} else {
+		memcpy(bytes, frame, length);
+		IEEE80211_SKB_CB(skb)->flags |= IEEE80211_TX_CTL_HW_80211_ENCAP;
+	}
 	IEEE80211_SKB_CB(skb)->control.hw_key = radio->pairwise_key;
 	radio->sent++;
 	frame_send(radio, skb);

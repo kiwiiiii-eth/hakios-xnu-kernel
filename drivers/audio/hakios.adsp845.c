@@ -4415,10 +4415,13 @@ tfa_up(void)
 	uint16_t s10 = 0, s11 = 0, s14 = 0, v = 0;
 	const char *fault;
 
-	/* as step 13 found it (its values after a reset), or as a run before this one left it (powered down, 0x8201 0x11cc) */
-	if (!tfa_read(&s5_bus, 0x03, &v) || v != 0x1a94 || !tfa_read(&s5_bus, 0x00, &v) || (v != 0x8245 && v != 0x8201) ||
-	    !tfa_read(&s5_bus, 0x01, &v) || (v != 0x11ca && v != 0x11cc)) {
-		printf("adsp845: %u: the amplifier is not as found in step 13 nor as a run leaves it (reg %#06x): nothing written\n", step, v);
+	/*
+	 * A TFA9894, powered down: as step 13 found it (0x8245, its value after a reset) or as tfa_down() leaves it (0x8201). (Reg 0x01
+	 * is not looked at: its bit 3 is the chip's own -- 0x11cc written reads 0x11c4 once it has been on and off, r99 -- and it is
+	 * written again below.)
+	 */
+	if (!tfa_read(&s5_bus, 0x03, &v) || v != 0x1a94 || !tfa_read(&s5_bus, 0x00, &v) || (v != 0x8245 && v != 0x8201)) {
+		printf("adsp845: %u: the amplifier is not a TFA9894 powered down (reg %#06x): nothing written\n", step, v);
 		return false;
 	}
 	s5_amp_on = true;               /* (from here on, tfa_down() puts it back to power-down) */

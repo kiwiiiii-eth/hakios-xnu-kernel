@@ -233,6 +233,15 @@ vendor_answer(const uint8_t *command, unsigned length, uint8_t *answer)
 	return 7 + extra;
 }
 
+static bool
+bt_extadv_kept(void)
+{
+	uint32_t keep = 0;
+
+	PE_parse_boot_argn("bt_extadv", &keep, sizeof(keep));
+	return keep != 0;
+}
+
 /* the controller's answer, changed where Apple's stack wants it; its new length, 0 to give bluetoothd nothing */
 static unsigned
 quirks(uint8_t *p, unsigned length)
@@ -245,6 +254,10 @@ quirks(uint8_t *p, unsigned length)
 			    length > 3 ? p[3] : 0, length > 4 ? p[4] : 0);
 		}
 		return 0;
+	}
+	/* LE Read Local Supported Features (0x2003): extended (bit 12) and periodic (bit 13) advertising taken out, as above */
+	if (length >= 15 && p[0] == 0x04 && p[1] == 0x0e && p[4] == 0x03 && p[5] == 0x20 && p[6] == 0x00 && !bt_extadv_kept()) {
+		p[7 + 1] &= (uint8_t)~0x30;
 	}
 	/* Write_Default_Erroneous_Data_Reporting: "Unknown HCI Command", as Command Status or as Command Complete */
 	if (length == 7 && memcmp(p, "\x04\x0f\x04\x01\x01\x5b\x0c", 7) == 0) {
@@ -260,6 +273,21 @@ quirks(uint8_t *p, unsigned length)
 			p[7 + 25 + i] |= le_commands[i];
 		}
 		p[7 + 24] |= 0x60;
+		/*
+		 * The WCN3990 (HCI 5.0), runs 86 and 87: bluetoothd's next command after 0x0c31 is 0x0c5b, whose bits (octet 18,
+		 * 2 and 3) this controller leaves clear: "HCI initialization failed". They are set (0x0c5b is answered as done
+		 * below if the controller does not know it). And with LE extended advertising and scanning in the mask bluetoothd
+		 * uses them and then the legacy ones too, which this controller refuses once the extended ones are used (0x2007,
+		 * 0x200b: "Command Disallowed"; "Read LE Advertising TX power failed", exit(1)): the extended and periodic
+		 * advertising and the extended scanning and connecting are taken out (octet 36 bits 2-7, 37, 38), as from a
+		 * controller of 4.2's kind. bt_extadv=1 leaves them.
+		 */
+		p[7 + 18] |= 0x0c;
+		if (!bt_extadv_kept()) {
+			p[7 + 36] &= 0x03;
+			p[7 + 37] = 0;
+			p[7 + 38] = 0;
+		}
 		/* bt_allcmds=1 (a look): every command said supported, so that bluetoothd sends the one it wanted next and the log
 		 * names it (run 86: "HCI initialization failed" right after 0x0c31, nothing sent -- it looks in the mask first) */
 		{

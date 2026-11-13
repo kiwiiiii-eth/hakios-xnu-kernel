@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **415 arguments**: 343 read by the kernel, 14 by the loader, 69 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **416 arguments**: 344 read by the kernel, 14 by the loader, 69 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
@@ -415,7 +415,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (78)
+## User space (79)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -425,6 +425,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `bt_after` | K | `hakios.bt3990.c` | `CONFIG_BT_AFTER` |  |
 | `bt_again` | K | `hakios.bt.c` | `CONFIG_BT_AGAIN` |  |
 | `bt_allcmds` | K | `hakios.bthci.c` | `CONFIG_BT_ALLCMDS` |  |
+| `bt_extadv` | K | `hakios.bthci.c` | `CONFIG_BT_EXTADV` |  |
 | `bt_lines` | U | `inject_bt.c` | `CONFIG_BT_LINES` |  |
 | `bt_mac` | K | `hakios.bt3990.c` | `CONFIG_BT_MAC` |  |
 | `bt_said` | K | `hakios.bthci.c` | `CONFIG_BT_SAID` |  |

@@ -66,6 +66,7 @@ BT	arg	bt	User space	k	hakios.bt.c,hakios.bt3990.c
 BT_AFTER	arg	bt_after	User space	k	hakios.bt3990.c	
 BT_AGAIN	arg	bt_again	User space	k	hakios.bt.c	the second look this many seconds later (0: no second look; 30)
 BT_ALLCMDS	arg	bt_allcmds	User space	k	hakios.bthci.c	
+BT_EXTADV	arg	bt_extadv	User space	k	hakios.bthci.c	
 BT_LINES	arg	bt_lines	User space	u	inject_bt.c	
 BT_MAC	arg	bt_mac	User space	k	hakios.bt3990.c	
 BT_SAID	arg	bt_said	User space	k	hakios.bthci.c	packets of each direction said in the log (96)

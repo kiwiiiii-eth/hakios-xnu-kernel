@@ -29,6 +29,27 @@
 #include <sys/hakios.input.h>
 #include <sys/systm.h>
 
+extern void loader_log_putc(char c);
+
+/* every line to the loader's log as well (where a run's live log reads it; printf alone reaches only the final one) */
+static void fg_say(const char *format, ...) __printflike(1, 2);
+
+static void
+fg_say(const char *format, ...)
+{
+	char line[1100];
+	va_list list;
+
+	va_start(list, format);
+	vsnprintf(line, sizeof(line), format, list);
+	va_end(list);
+	for (const char *c = line; *c != 0; c++) {
+		loader_log_putc(*c);
+	}
+	printf("%s", line);
+}
+#define printf fg_say
+
 #define FG_SOC                  0x240           /* slave 2, peripheral 0x40: the gauge's state-of-charge block */
 #define FG_INFO                 0x241           /* ... 0x41: its battery measurements */
 #define CHG_CHARGER             0x210           /* ... 0x10: the charger */

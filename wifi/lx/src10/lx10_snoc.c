@@ -53,6 +53,8 @@ extern unsigned int ath10k_debug_mask;
 #define LX10_MSA                0x8df00000ull   /* dt: memory-region = <&wlan_msa_mem> */
 #define LX10_MSA_SIZE           0x100000ull
 
+static unsigned long lx10_napi_polls, lx10_napi_schedules, lx10_irq_handled;      /* (said while the radio comes up) */
+
 /* ---- the node: sdm845.dtsi's wifi@18800000 with sdm845-oneplus-common.dtsi's &wifi --------------------- */
 
 static const char compatible[] = "qcom,wcn3990-wifi";
@@ -392,6 +394,7 @@ lx10_irq_arrived(void *argument)
 	if (vector >= LX10_IRQS || lx10_irq[vector].handler == NULL) {
 		return;
 	}
+	lx10_irq_handled++;
 	if (lx10_irq[vector].handler((int)vector, lx10_irq[vector].argument) == IRQ_WAKE_THREAD && lx10_irq[vector].thread != NULL) {
 		lx10_irq[vector].thread((int)vector, lx10_irq[vector].argument);
 	}
@@ -880,6 +883,7 @@ netif_threaded_enable(struct net_device *dev)
 #define NAPI_POLLING            (1ul << 2)
 static struct napi_struct *lx10_napi[LX10_NAPI_MAX];
 static bool lx10_napi_thread;
+
 static int lx10_napi_work;              /* (what the thread sleeps on) */
 
 static void
@@ -898,6 +902,7 @@ lx10_napi_runs(void *argument)
 				continue;
 			}
 			n->state |= NAPI_POLLING;
+			lx10_napi_polls++;
 			lx_os_unlock();
 			done = n->poll(n, n->budget);
 			lx_os_lock();
@@ -953,6 +958,7 @@ linuxkpi_napi_schedule(struct napi_struct *napi)
 	now = (napi->state & (NAPI_SCHEDULED | NAPI_DISABLED)) == 0;
 	if (now) {
 		napi->state |= NAPI_SCHEDULED;
+		lx10_napi_schedules++;
 		lx_os_wakeup(&lx10_napi_work);
 	}
 	lx_os_unlock();
@@ -1039,8 +1045,22 @@ lx_start(void)
 	{
 		unsigned long long began = lx_os_nanoseconds();
 
+		unsigned long long said = began;
+
 		while (!lx_station_registered() && lx_os_nanoseconds() - began < 60000000000ull) {
 			lx_pause_ms(10);
+			if (lx_os_nanoseconds() - said >= 2000000000ull) {
+				char counts[160] = "";
+
+				said = lx_os_nanoseconds();
+				for (unsigned v = 0; v < LX10_IRQS; v++) {
+					snprintf(counts + strlen(counts), sizeof(counts) - strlen(counts), " %llu%s", lx_os_irq_count(v),
+					    lx10_irq[v].attached ? (lx10_irq[v].disabled ? "d" : "") : "-");
+				}
+				lx_tell("lx10: +%llu s: interrupts per copy engine:%s; handled %lu; NAPI scheduled %lu, polled %lu, state %#lx\n",
+				    (said - began) / 1000000000ull, counts, lx10_irq_handled, lx10_napi_schedules, lx10_napi_polls,
+				    lx10_napi[0] != NULL ? lx10_napi[0]->state : 0ul);
+			}
 		}
 		lx_tell("lx10: %llu ms after the probe the driver %s\n", (lx_os_nanoseconds() - began) / 1000000ull,
 		    lx_station_registered() ? "HAS REGISTERED ITS RADIO: the firmware is up, its messages pass" :

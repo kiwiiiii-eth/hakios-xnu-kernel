@@ -3517,9 +3517,10 @@ step_tfa(void)
 	cmd = get(&gcc_block, "engine 4 root command", GCC_QUP0_S4_CMD);
 	cfg = get(&gcc_block, "engine 4 root config", GCC_QUP0_S4_CFG);
 	clocks_on = !(m_ahb >> 31) && !(s_ahb >> 31) && !(s4 >> 31);
-	printf("adsp845: %u: the clocks of engine 4: M_AHB %s, S_AHB %s, the engine's own %s (the vote word %#x: bits 6, 7 and 14 are %u %u %u)\n",
+	printf("adsp845: %u: the clocks of engine 4: M_AHB %s, S_AHB %s, the engine's own %s (the vote word %#x: bits 6, 7 and 14 are %u %u %u; bits 8 and 9, the wrapper's core clocks, "
+	    "by the gap in gcc-sdm845.c's list that is wrapper 1's 18 and 19 of hakios.rmi4.c: %u %u)\n",
 	    step, (m_ahb >> 31) ? "OFF" : "on", (s_ahb >> 31) ? "OFF" : "on", (s4 >> 31) ? "OFF" : "on", vote, (vote >> 6) & 1,
-	    (vote >> 7) & 1, (vote >> 14) & 1);
+	    (vote >> 7) & 1, (vote >> 14) & 1, (vote >> 8) & 1, (vote >> 9) & 1);
 	for (unsigned i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
 		pin_show(&pins[i]);
 	}
@@ -3579,7 +3580,8 @@ step_tfa(void)
 		return true;
 	}
 	printf("adsp845: %u: THE AMPLIFIER ANSWERS: register 0x%02x = %#06x; %s\n", step, TFA_REVISION, (unsigned)(value[0] << 8 | value[1]),
-	    value[1] == TFA_REVISION_9894 ? "a TFA9894 (revision byte 0x94), as the device tree says" : "NOT a TFA9894 (it would end in 0x94)");
+	    value[1] == TFA_REVISION_9894 ? "a TFA9894 (the revision ends in 0x94: the NXP driver knows 0x0a94, 0x1a94, 0x2a94, 0x3a94), as the device tree says" :
+	    "NOT a TFA9894 (it would end in 0x94)");
 	return value[1] == TFA_REVISION_9894;
 }
 

@@ -25,6 +25,26 @@
 #include <sys/systm.h>
 #include <sys/hakios.net.h>
 #include <sys/hakios.ipa.h>
+#include <kern/clock.h>
+
+/* What this file says goes to the loader's record of the run as well (printf alone never reached it). */
+extern void loader_log_putc(char c);
+
+static int __printflike(1, 2)
+cell_say(const char *format, ...)
+{
+	char line[400];
+	va_list list;
+
+	va_start(list, format);
+	vsnprintf(line, sizeof(line), format, list);
+	va_end(list);
+	for (const char *c = line; *c != 0; c++) {
+		loader_log_putc(*c);
+	}
+	return printf("%s", line);
+}
+#define printf cell_say
 
 #define CELL_UNIT               1
 #define CELL_MUX                1               /* the QMAP mux id the session is bound to (WDS Bind Mux Data Port) */
@@ -43,6 +63,7 @@ static struct {
 	uint64_t        arp, dhcp, to_modem, from_modem, dropped_out, dropped_in, not_ip4;
 } cell_count;
 static bool cell_attached, cell_trace;
+
 
 static inline uint32_t
 get32(const uint8_t *p)
@@ -77,6 +98,57 @@ checksum(const uint8_t *data, size_t length)
 		sum = (sum & 0xffff) + (sum >> 16);
 	}
 	return (uint16_t)~sum;
+}
+
+/*
+ * The data path's own test, below the network stack and whatever route it takes (Wi-Fi may be the system's): once
+ * the session is up, a DNS question for example.com is sent from the session's address straight to the modem (mux 1),
+ * to the first DNS server the network gave, every 5 s until answered (at most 6 times), and the answer is looked for
+ * in what comes back -- the network itself answering through the IPA both ways. modem_cell_probe=0: not.
+ */
+#define PROBE_PORT              53535
+static unsigned probes_sent, probes_answered;
+static uint64_t probe_last;
+
+static void
+cell_probe(void)
+{
+	static const uint8_t question[] = { 0x6b, 0x69, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0,
+		7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1 };
+	uint8_t packet[20 + 8 + sizeof(question)];
+	uint32_t off = 1;
+	uint64_t now;
+
+	if (!session.up || session.dns1 == 0 || probes_answered != 0 || probes_sent >= 6) {
+		return;
+	}
+	PE_parse_boot_argn("modem_cell_probe", &off, sizeof(off));
+	if (off == 0) {
+		return;
+	}
+	absolutetime_to_nanoseconds(mach_absolute_time(), &now);
+	if (probe_last != 0 && now - probe_last < 5000000000ull) {
+		return;
+	}
+	probe_last = now;
+	memset(packet, 0, sizeof(packet));
+	packet[0] = 0x45;
+	put16(packet + 2, sizeof(packet));
+	put16(packet + 4, 0x6b00 + probes_sent);
+	put16(packet + 6, 0x4000);              /* don't fragment */
+	packet[8] = 64;
+	packet[9] = 17;                         /* UDP */
+	put32(packet + 12, session.address);
+	put32(packet + 16, session.dns1);
+	put16(packet + 10, checksum(packet, 20));
+	put16(packet + 20, PROBE_PORT);
+	put16(packet + 22, 53);
+	put16(packet + 24, 8 + sizeof(question));
+	memcpy(packet + 28, question, sizeof(question));   /* (the UDP checksum 0: none, as IPv4 allows) */
+	probes_sent++;
+	printf("cell: probe %u: a DNS question for example.com to %u.%u.%u.%u, straight to the modem: %s\n", probes_sent,
+	    session.dns1 >> 24, (session.dns1 >> 16) & 0xff, (session.dns1 >> 8) & 0xff, session.dns1 & 0xff,
+	    hakios_ipa_transmit(CELL_MUX, packet, sizeof(packet)) ? "sent" : "NOT SENT");
 }
 
 /* ---- ARP: the router answers for everything ---------------------------------------------------- */
@@ -271,6 +343,22 @@ cell_receive(uint8_t mux, const uint8_t *packet, size_t length)
 	if (cell_trace) {
 		printf("cell: %zu bytes from the modem on mux %u (IPv%u)\n", length, mux, version);
 	}
+	if (version == 4 && length >= 28 + 12 && packet[9] == 17 && get32(packet + 12) == session.dns1 &&
+	    (packet[22] << 8 | packet[23]) == PROBE_PORT && probes_answered == 0) {
+		const uint8_t *dns = packet + (packet[0] & 0xf) * 4 + 8;
+		unsigned answers = (unsigned)(dns[6] << 8 | dns[7]);
+		char address[20] = "none";
+
+		/* the first A record's address: after the question (12 + 13 + 4 bytes), a name pointer of 2, type, class, TTL, length */
+		if (answers != 0 && dns + 12 + 13 + 4 + 12 + 4 <= packet + length) {
+			const uint8_t *a = dns + 12 + 13 + 4 + 12;
+
+			snprintf(address, sizeof(address), "%u.%u.%u.%u", a[0], a[1], a[2], a[3]);
+		}
+		probes_answered++;
+		printf("cell: THE NETWORK ANSWERS THROUGH THE MODEM: the DNS answer to probe %u (%zu bytes, rcode %u, %u answers; "
+		    "example.com is %s)\n", probes_sent, length, dns[3] & 0xf, answers, address);
+	}
 	memcpy(frame, cell_mac, 6);
 	memcpy(frame + 6, router_mac, 6);
 	put16(frame + 12, version == 4 ? 0x0800 : 0x86dd);
@@ -284,6 +372,8 @@ cell_poll(void)
 {
 	static unsigned ticks;
 	unsigned got = hakios_ipa_poll(cell_receive);
+
+	cell_probe();
 
 	if (++ticks % 30000 == 0 && (cell_count.to_modem != 0 || cell_count.from_modem != 0 || cell_count.dropped_out != 0)) {
 		char line[256];

@@ -2742,7 +2742,12 @@ ipa_firmware_load(void)
 	 * register space) is checked by reading them back: the GSI's status bit alone does not prove its
 	 * firmware runs (24 October: the modem's IPA_CTL task never answers, as if GSI answered nothing).
 	 */
-	for (uint32_t i = 0; i < count; i++) {
+	/*
+	 * (Not on the 6T unless ipa_iram_look=1, run 60: TrustZone answered 0 to PAS_AUTH_AND_RESET, and the phone went to
+	 * CrashDump right after -- its secure watchdog, then NoC errors: the SDM845's GSI and microcontroller memory at
+	 * 0x1e08000 and 0x1e5e000 is not for this processor to read, and a read of it hangs the bus. Linux never reads it.)
+	 */
+	for (uint32_t i = 0; option("ipa_iram_look") && i < count; i++) {
 		if (segments[i].type == 1 && !MDT_HASH(segments[i].flags) && segment_file[i] != NULL && segments[i].file_size >= 16 &&
 		    segments[i].vaddr >= 0x01e00000u && segments[i].vaddr < 0x01f00000u) {
 			struct block iram = { "ipa iram", segments[i].vaddr & ~0xfffu, 0x8000 };
@@ -7709,7 +7714,9 @@ step_mba(void)
 			ipa_stage = stage == 7 ? 4 : 1;
 			ipa_loaded = ipa_firmware_load();
 			if (ipa_loaded) {
-				ipa_status("its firmware loaded before the modem (ipa845=6; the modem not told)");
+				bb_say("ipa: the status next\n");
+			ipa_status("its firmware loaded before the modem (ipa845=6; the modem not told)");
+			bb_say("ipa: the status read\n");
 				ipa_space_faults("its firmware loaded before the modem");
 			}
 		}

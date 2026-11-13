@@ -1154,7 +1154,11 @@ ipa_clock(bool on)
 	 * command database. Whether a NoC that nobody votes for stays clocked for the IPA's own traffic is
 	 * what this tells (modem_ipa_bus=0: not voted).
 	 */
-	if (!option("modem_ipa_bus_off")) {
+	/*
+	 * (Not on the 6T, run 55: these are the SC7280's BCMs on the IPA's way; the SDM845's command database has the same
+	 * names for other things, and its ACV voted at 0x3fff sent the phone to CrashDump. modem_ipa_bus=1: voted all the same.)
+	 */
+	if (option("modem_ipa_bus")) {
 		static const char *const buses[] = { "SN8", "SH0", "MC0", "ACV" };
 
 		for (unsigned b = 0; b < sizeof(buses) / sizeof(buses[0]); b++) {

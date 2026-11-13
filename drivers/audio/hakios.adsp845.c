@@ -143,7 +143,7 @@ static LCK_GRP_DECLARE(adsp_lock_group, "hakios-adsp845");
 
 static void bb_say(const char *format, ...) __printflike(1, 2);
 
-#define STEPS                   15
+#define STEPS                   16
 #define FIRST_INDEPENDENT_STEP  12      /* the steps from here on do not need the DSP (800 of adsp8=N leaves it alone) */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
@@ -4238,17 +4238,23 @@ static const int16_t s5_tone[48] = {
 	-85, -43,
 };
 static uint32_t s5_tone_at;
+static volatile uint32_t s5_gain;               /* the tone's: x1 -40 dBFS, x2 -34, x4 -28, x8 -22; 0 silence */
+static bool s5_left_only;
+#define S5_PEAK_MOST            3277            /* -20 dBFS: never more (the plan's section 4.2), whatever the gain asks */
+_Static_assert(328 * 8 <= S5_PEAK_MOST, "the loudest step of the tone is over -20 dBFS");
 
 static void
 s5_period_fill(unsigned period)
 {
 	int16_t *samples = (int16_t *)(s5_buffer + 4096 * period);
+	uint32_t gain = s5_gain > 8 ? 8 : s5_gain;
 
 	for (unsigned frame = 0; frame < S5_PERIOD_FRAMES; frame++) {
-		int16_t sample = s5_tone[s5_tone_at++ % 48];
+		int32_t sample = (int32_t)s5_tone[s5_tone_at++ % 48] * (int32_t)gain;
 
-		samples[2 * frame] = sample;
-		samples[2 * frame + 1] = sample;
+		sample = sample > S5_PEAK_MOST ? S5_PEAK_MOST : sample < -S5_PEAK_MOST ? -S5_PEAK_MOST : sample;
+		samples[2 * frame] = (int16_t)sample;
+		samples[2 * frame + 1] = s5_left_only ? 0 : (int16_t)sample;
 	}
 	for (vm_offset_t line = (vm_offset_t)samples; line < (vm_offset_t)samples + S5_PERIOD_BYTES; line += 64) {
 		__asm__ volatile ("dc cvac, %0" : : "r" (line));
@@ -4265,8 +4271,136 @@ s5_period_write(unsigned period, uint32_t handle)
 	return apr_exchange(S_ASM, S5_STREAM_PORT, S5_WRITE_TOKEN | period, false, ASM_DATA_CMD_WRITE_V2, write, sizeof(write), 0, NULL);
 }
 
+/*
+ * The amplifier (S6/S7, lane-b-notes/tfa9894-s6-config.md, from NXP's tfa98xx of OnePlus's kernel, N1 fields of rev 0x1a94): bypass, no
+ * CoolFlux. Every write read back. Its status, reg 0x10: VDDS b0, PLLS b1, OTDS b2, OVDS b3, UVDS b4 (these three: 1 = all is well),
+ * OCDS b5 (an over-current, sticky: read once), CLKS b6, NOCLK b8, WDS b10, AMPS b12, AREFS b13, BODNOK b15; reg 0x11: CLKOOR b8,
+ * MANALARM b9, TDMERR b10.
+ */
+static struct bitbang s5_bus;
+static bool s5_amp_on;
+static uint32_t s5_found_ctl[2], s5_found_io[2];
+static bool s5_took_bus;  /* gpio89 and 90 as found, given back at the end */
+
+static bool
+tfa_write(struct bitbang *b, uint8_t reg, uint16_t value)
+{
+	bool ok;
+	uint16_t back = 0;
+
+	bb_start(b);
+	ok = bb_write(b, TFA_ADDRESS << 1) && bb_write(b, reg) && bb_write(b, (uint8_t)(value >> 8)) && bb_write(b, (uint8_t)value);
+	bb_stop(b);
+	if (ok) {
+		ok = tfa_read(b, reg, &back) && back == value;
+	}
+	printf("adsp845: %u: amplifier reg %#04x <- %#06x: %s (read back %#06x)\n", step, reg, value, ok ? "done" : "NOT TAKEN", back);
+	return ok;
+}
+
+/* a fault in the status: what, or NULL */
+static const char *
+tfa_fault(uint16_t s10, uint16_t s11, bool amp)
+{
+	if (!(s10 & 0x0004)) return "over temperature (OTDS 0)";
+	if (!(s10 & 0x0008)) return "over voltage (OVDS 0)";
+	if (!(s10 & 0x0010)) return "under voltage (UVDS 0)";
+	if (s10 & 0x0020) return "over current (OCDS)";
+	if (s10 & 0x0100) return "the clock lost (NOCLK)";
+	if (s10 & 0x0400) return "the watchdog (WDS)";
+	if (s10 & 0x8000) return "brown-out (BODNOK)";
+	if (!(s10 & 0x0002) || !(s10 & 0x0040)) return "the PLL or the clock not stable (PLLS, CLKS)";
+	if (amp && (!(s10 & 0x1000) || !(s10 & 0x2000))) return "the amplifier or its reference not on (AMPS, AREFS)";
+	if (s11 & 0x0700) return "a clock out of range, the manager's alarm or a TDM error (0x11)";
+	return NULL;
+}
+
+static void
+tfa_down(void)
+{
+	uint16_t s10 = 0;
+
+	if (!s5_amp_on) {
+		return;
+	}
+	printf("adsp845: %u: the amplifier off: AMPE 0, 10 ms, power down\n", step);
+	tfa_write(&s5_bus, 0x00, 0x8220);
+	delay(10000);
+	tfa_write(&s5_bus, 0x00, 0x8201);
+	tfa_read(&s5_bus, 0x10, &s10);
+	printf("adsp845: %u: the amplifier's status after: %#06x\n", step, s10);
+	s5_amp_on = false;
+}
+
+static bool
+tfa_up(void)
+{
+	uint16_t s10 = 0, s11 = 0, s14 = 0, v = 0;
+	const char *fault;
+
+	/* as step 13 found it (its values after a reset), or as a run before this one left it (powered down, 0x8201 0x11cc) */
+	if (!tfa_read(&s5_bus, 0x03, &v) || v != 0x1a94 || !tfa_read(&s5_bus, 0x00, &v) || (v != 0x8245 && v != 0x8201) ||
+	    !tfa_read(&s5_bus, 0x01, &v) || (v != 0x11ca && v != 0x11cc)) {
+		printf("adsp845: %u: the amplifier is not as found in step 13 nor as a run leaves it (reg %#06x): nothing written\n", step, v);
+		return false;
+	}
+	s5_amp_on = true;               /* (from here on, tfa_down() puts it back to power-down) */
+	if (!tfa_write(&s5_bus, 0x00, 0x8201) || !tfa_write(&s5_bus, 0x01, 0x11cc) || !tfa_write(&s5_bus, 0x50, 0x1391) ||
+	    !tfa_write(&s5_bus, 0x00, 0x8200)) {
+		return false;
+	}
+	for (unsigned ms = 0; ms <= 100; ms += 5) {
+		delay(5000);
+		tfa_read(&s5_bus, 0x10, &s10);
+		if ((s10 & 0x0042) == 0x0042) {
+			break;
+		}
+	}
+	tfa_read(&s5_bus, 0x11, &s11);
+	tfa_read(&s5_bus, 0x14, &s14);
+	printf("adsp845: %u: the amplifier out of power-down: status %#06x %#06x, manager state %u\n", step, s10, s11, (s14 >> 3) & 0xf);
+	if ((fault = tfa_fault(s10, s11, false)) != NULL) {
+		printf("adsp845: %u: THE AMPLIFIER IS NOT WELL: %s: it stays off\n", step, fault);
+		return false;
+	}
+	if (!tfa_write(&s5_bus, 0x00, 0x8220)) {
+		return false;
+	}
+	delay(10000);
+	if (!tfa_write(&s5_bus, 0x00, 0x8228)) {
+		return false;
+	}
+	delay(10000);
+	tfa_read(&s5_bus, 0x10, &s10);
+	tfa_read(&s5_bus, 0x11, &s11);
+	tfa_read(&s5_bus, 0x14, &s14);
+	if ((fault = tfa_fault(s10, s11, true)) != NULL) {
+		printf("adsp845: %u: THE AMPLIFIER DID NOT COME ON WELL: %s (status %#06x %#06x, manager state %u)\n", step, fault, s10, s11,
+		    (s14 >> 3) & 0xf);
+		return false;
+	}
+	printf("adsp845: %u: THE AMPLIFIER IS ON (bypass, the DSP's samples straight in): status %#06x %#06x, manager state %u\n", step, s10,
+	    s11, (s14 >> 3) & 0xf);
+	return true;
+}
+
+static bool stream_play(bool amp);
+
 static bool
 step_stream(void)
+{
+	return stream_play(false);
+}
+
+/* S6 and S7: the amplifier on, and a tone it plays: the left channel, 1 kHz, -40, -34, -28, -22 dBFS, two seconds each */
+static bool
+step_speaker(void)
+{
+	return stream_play(true);
+}
+
+static bool
+stream_play(bool amp)
 {
 	struct afe_i2s_config i2s = { 1, MI2S_BITS, 2, 1, 1, MI2S_RATE, 0, 0 };
 	uint16_t port[2] = { QUAT_MI2S_RX, 0 };
@@ -4274,9 +4408,15 @@ step_stream(void)
 	bool clock = false, started = false, mapped = false, copp_open = false, stream_open = false, ok = false, smmu = false;
 	struct apr_reply reply;
 
-	announce("the port of step 14 started again; WRITE the SMMU (stream 0x1821 through a context of ours); ASK the DSP for our memory "
-	    "(ASM), a device path to port 0x1006 (ADM, 16 bits) and a stream routed to it; WRITE a 1 kHz tone at -40 dBFS into it for 2 s, the "
-	    "amplifier off; close, stop, give back");
+	if (amp) {
+		announce("as step 15, and then the AMPLIFIER: bypass, out of power-down, on (every write read back); a 1 kHz tone on the left "
+		    "channel at -40, -34, -28 and -22 dBFS, 2 s each, its status read every 200 ms (any fault: off at once); the amplifier off "
+		    "before anything else is stopped. AUDIBLE");
+	} else {
+		announce("the port of step 14 started again; WRITE the SMMU (stream 0x1821 through a context of ours); ASK the DSP for our memory "
+		    "(ASM), a device path to port 0x1006 (ADM, 16 bits) and a stream routed to it; WRITE a 1 kHz tone at -40 dBFS into it for 2 s, "
+		    "the amplifier off; close, stop, give back");
+	}
 	if (s5_buffer == 0 && kmem_alloc(kernel_map, &s5_buffer, S5_BYTES, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 		s5_buffer = 0;
 		printf("adsp845: %u: no memory for the periods\n", step);
@@ -4377,9 +4517,15 @@ step_stream(void)
 		uint32_t done_before, toggles_tone = 0, ones = 0;
 		bool tone_over = false, failed = false;
 
+		uint64_t last_look = 0;
+		unsigned looks = 0, rung_at = 0;
+		const char *amp_fault = NULL;
+
 		hakios_adsp_apr_events(s5_events);
 		s5_returned = 0;
 		s5_tone_at = 0;
+		s5_left_only = amp;
+		s5_gain = amp ? 0 : 1;          /* (with the amplifier: silence until it is on) */
 		done_before = s5_done;
 		for (unsigned n = 0; n < S5_PERIODS; n++) {
 			s5_period_fill(n);
@@ -4390,9 +4536,52 @@ step_stream(void)
 			}
 			sent++;
 		}
+		if (amp) {
+			s5_found_ctl[0] = get(&pins[5].page, "gpio89 control", 0);
+			s5_found_io[0] = get(&pins[5].page, "gpio89 I/O", 4);
+			s5_found_ctl[1] = get(&pins[6].page, "gpio90 control", 0);
+			s5_found_io[1] = get(&pins[6].page, "gpio90 I/O", 4);
+			s5_bus.sda = &pins[5];
+			s5_bus.scl = &pins[6];
+			s5_took_bus = true;
+			printf("adsp845: %u: about to make gpio89/90 the amplifier's I2C by hand (were %#x %#x)\n", step, s5_found_ctl[0],
+			    s5_found_ctl[1]);
+			bb_line(&pins[5], true);
+			bb_line(&pins[6], true);
+			if (!tfa_up()) {
+				tfa_down();
+				failed = true;
+			} else {
+				s5_gain = 1;
+				began = now_us();
+				printf("adsp845: %u: THE TONE: left channel, 1 kHz, -40 dBFS\n", step);
+			}
+		}
 		while (!failed) {
 			uint32_t back = s5_returned;
 			uint64_t now = now_us();
+
+			if (amp && s5_amp_on && now - last_look >= 200000) {
+				uint16_t s10 = 0, s11 = 0;
+
+				last_look = now;
+				looks++;
+				tfa_read(&s5_bus, 0x10, &s10);
+				tfa_read(&s5_bus, 0x11, &s11);
+				if ((amp_fault = tfa_fault(s10, s11, true)) != NULL) {
+					printf("adsp845: %u: THE AMPLIFIER REPORTS %s (status %#06x %#06x): OFF NOW\n", step, amp_fault, s10, s11);
+					s5_gain = 0;
+					tfa_down();
+					tone_over = true;
+				} else if (looks % 5 == 0) {
+					printf("adsp845: %u: the amplifier's status %#06x %#06x (look %u)\n", step, s10, s11, looks);
+				}
+			}
+			if (amp && !tone_over && now - began >= 2000000ull * (rung_at + 1) && rung_at < 3) {
+				rung_at++;
+				s5_gain = 1u << rung_at;
+				printf("adsp845: %u: THE TONE: %d dBFS\n", step, -40 + 6 * (int)rung_at);
+			}
 
 			if (back != 0) {
 				os_atomic_andnot(&s5_returned, back, relaxed);
@@ -4410,13 +4599,16 @@ step_stream(void)
 			if (toggles_tone == 0 && now - began > 500000) {
 				toggles_tone = pin_toggles(&pins[3], &ones);    /* gpio61, the data, while the tone plays */
 			}
-			if (!tone_over && now - began >= 2000000ull) {
+			if (!tone_over && now - began >= (amp ? 8000000ull : 2000000ull)) {
 				tone_over = true;
+				if (amp) {
+					s5_gain = 0;            /* silence while the last periods drain */
+				}
 			}
 			if (tone_over && s5_done - done_before >= sent) {
 				break;
 			}
-			if (now - began > 4000000ull || (s5_done == done_before && now - began > 1000000ull)) {
+			if (now - began > (amp ? 10000000ull : 4000000ull) || (s5_done == done_before && now - began > 1000000ull)) {
 				printf("adsp845: %u: THE DSP HAS NOT GIVEN THE PERIODS BACK (%u of %u)\n", step, s5_done - done_before, sent);
 				failed = true;
 				break;
@@ -4424,6 +4616,11 @@ step_stream(void)
 			sleep_ms(2);
 		}
 		hakios_adsp_apr_events(NULL);
+		if (amp) {
+			tfa_down();                     /* before the stream, the port and the clock are stopped */
+			printf("adsp845: %u: the amplifier's status looked at %u times while it played%s%s\n", step, looks,
+			    amp_fault ? "; it reported " : "", amp_fault ? amp_fault : "");
+		}
 		{
 			uint64_t us = now_us() - began, frames = (uint64_t)(s5_done - done_before) * S5_PERIOD_FRAMES;
 
@@ -4431,11 +4628,19 @@ step_stream(void)
 			    "frames a second; the data pin (gpio61) %u changes while the tone played (the amplifier off: nothing to hear)\n", step,
 			    sent, s5_done - done_before, s5_errors, s5_underflows, us / 1000, us ? frames * 1000000 / us : 0, toggles_tone);
 		}
-		ok = !failed && s5_errors == 0 && s5_done - done_before >= sent && sent > S5_PERIODS;
+		ok = !failed && s5_errors == 0 && s5_done - done_before >= sent && sent > S5_PERIODS && amp_fault == NULL;
 		printf("adsp845: %u: %s\n", step, ok ? "THE STREAM PLAYS: the DSP takes our samples through the SMMU at the port's pace" :
 		    "THE STREAM DID NOT PLAY CLEANLY");
 	}
 out:
+	if (amp && s5_took_bus) {
+		tfa_down();
+		put(&pins[5].page, "gpio89 I/O (given back)", 4, s5_found_io[0] & 2);
+		put(&pins[5].page, "gpio89 control (given back)", 0, s5_found_ctl[0]);
+		put(&pins[6].page, "gpio90 I/O (given back)", 4, s5_found_io[1] & 2);
+		put(&pins[6].page, "gpio90 control (given back)", 0, s5_found_ctl[1]);
+		s5_took_bus = false;
+	}
 	if (stream_open) {
 		s5_command("the stream, closed", S_ASM, S5_STREAM_PORT, ASM_STREAM_CMD_CLOSE, NULL, 0, 0, NULL);
 	}
@@ -4465,7 +4670,7 @@ out:
 
 static bool (*const steps[STEPS])(void) = {
 	step_survey, step_firmware, step_mailbox, step_header, step_image, step_our_item, step_start, step_queues, step_link, step_qrtr,
-	step_apr, step_tfa, step_amplifier, step_afe, step_stream,
+	step_apr, step_tfa, step_amplifier, step_afe, step_stream, step_speaker,
 };
 
 static bool keep;                       /* the DSP and the link stay up while the system runs (adsp8_keep) */

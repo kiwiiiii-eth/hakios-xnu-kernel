@@ -100,7 +100,7 @@ bt_say_line(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int 
 		length--;
 	}
 	line[length] = 0;
-	if (lines++ < 2000) {
+	if (lines++ < 60000) {          /* (run 89: 2000 were gone before the first pairing) */
 		hakios_bt_say("bt-user: %s\n", line);
 	}
 	return 0;
@@ -248,6 +248,15 @@ quirks(uint8_t *p, unsigned length)
 {
 	static const uint8_t le_commands[4] = { 0xf7, 0xff, 0xff, 0x7f };
 
+	/* Qualcomm's controller logs, as ACL data on handle 0x2edc (Linux's hci_qca: QCA_DEBUG_HANDLE): not bluetoothd's */
+	if (length >= 5 && p[0] == 0x02 && p[1] == 0xdc && (p[2] & 0x0f) == 0x0e) {
+		static unsigned diag_dropped;
+
+		if (diag_dropped++ < 4) {
+			say("the controller's own log (ACL on handle 0x2edc, %u bytes): not given to bluetoothd\n", length);
+		}
+		return 0;
+	}
 	if (length >= 3 && p[0] == 0x04 && p[1] == 0xff) {
 		if (vse_dropped++ < 8) {
 			say("the controller's own vendor event (%u bytes, %02x %02x ...): not given to bluetoothd\n", length,

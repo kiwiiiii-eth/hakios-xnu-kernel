@@ -685,6 +685,86 @@ lkpi_get_linuxkpi_ieee80211_regdomain(size_t n)
 	return (kzalloc(sizeof(struct linuxkpi_ieee80211_regdomain) + n * sizeof(struct ieee80211_reg_rule), GFP_KERNEL));
 }
 
+/*
+ * ath10k's own lines, as lx_bus.c says ath11k's: its debug.c passes them on with "%pV", which no printf of this
+ * kernel knows, so they came out empty (run 33); debug.c is not built, and these say them. What else of debug.c the
+ * driver calls (its version and board lines) becomes a stub.
+ */
+struct ath10k;
+
+static void
+ath10k_say(const char *kind, const char *format, va_list ap)
+{
+	char line[320];
+	size_t n;
+
+	n = (size_t)snprintf(line, sizeof(line), "ath10k%s: ", kind);
+	vsnprintf(line + n, sizeof(line) - n, format, ap);
+	n = strlen(line);
+	if (n == 0 || line[n - 1] != '\n') {
+		strlcat(line, "\n", sizeof(line));
+	}
+	lx_os_tell(line);
+}
+
+void
+ath10k_info(struct ath10k *ar, const char *fmt, ...)
+{
+	va_list ap;
+
+	(void)ar;
+	va_start(ap, fmt);
+	ath10k_say("", fmt, ap);
+	va_end(ap);
+}
+
+void
+ath10k_warn(struct ath10k *ar, const char *fmt, ...)
+{
+	va_list ap;
+
+	(void)ar;
+	va_start(ap, fmt);
+	ath10k_say(" WARNING", fmt, ap);
+	va_end(ap);
+}
+
+void
+ath10k_err(struct ath10k *ar, const char *fmt, ...)
+{
+	va_list ap;
+
+	(void)ar;
+	va_start(ap, fmt);
+	ath10k_say(" ERROR", fmt, ap);
+	va_end(ap);
+}
+
+void
+__ath10k_dbg(struct ath10k *ar, unsigned int mask, const char *fmt, ...)
+{
+	va_list ap;
+
+	(void)ar;
+	if (!(ath10k_debug_mask & mask)) {
+		return;
+	}
+	va_start(ap, fmt);
+	ath10k_say(" dbg", fmt, ap);
+	va_end(ap);
+}
+
+void
+ath10k_dbg_dump(struct ath10k *ar, unsigned int mask, const char *msg, const char *prefix, const void *buf, size_t len)
+{
+	(void)ar;
+	(void)mask;
+	(void)msg;
+	(void)prefix;
+	(void)buf;
+	(void)len;
+}
+
 /* ---- FreeBSD's, as LinuxKPI's headers reach them ------------------------------------------------------- */
 
 const uint8_t rfc1042_header[6] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 };
@@ -940,7 +1020,7 @@ lx_start(void)
 		lx_tell("lx10: no thread, or no memory the radio can be given\n");
 		return (ENOMEM);
 	}
-	ath10k_debug_mask = lx_os_option("wifi_quiet") ? 0 : 0x00000004 | 0x00000020 | 0x00000400 | 0x00100000 | 0x00200000;  /* HTC BOOT BMI SNOC QMI */
+	ath10k_debug_mask = lx_os_option("wifi_dbg") ? lx_os_option("wifi_dbg") : 0x00000010 | 0x00000020 | 0x00000800 | 0x00200000;  /* MAC BOOT REGULATORY QMI (wifi_dbg=: another) */
 	wifi_device.name = "wifi";
 	wifi_device.id = -1;
 	wifi_device.dev.of_node = &wifi_node;

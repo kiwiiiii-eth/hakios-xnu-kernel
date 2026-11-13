@@ -468,6 +468,9 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			cp ../ssh/$k root/var/root/.ssh/$k
 			printf 'f\t600\t0\t0\t/private/var/root/.ssh/%s\t/var/root/.ssh/%s\n' $k $k >> root/etc/var.skel
 		done
+		# an SSH login greets with neofetch (preinstalled, tools/mk-jb.sh), as a jailbroken iPhone's does
+		printf '[[ -n $SSH_TTY ]] && command -v neofetch >/dev/null && neofetch\n' > root/var/root/.zlogin
+		printf 'f\t644\t0\t0\t/private/var/root/.zlogin\t/var/root/.zlogin\n' >> root/etc/var.skel
 	fi
 	cp ${RC:-rc.launchd} root/etc/rc
 	cp ${RC_JOBS:-rc.jobs} root/etc/rc.jobs

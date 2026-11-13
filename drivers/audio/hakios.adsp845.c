@@ -4246,9 +4246,10 @@ static const int16_t s5_tone[48] = {
 /*
  * Under what Darwin writes, always. r100: 20 dB made the start's chime -41 dBFS, unheard; r101: 0 dB had YouTube 8x over -20 dBFS,
  * the limiter holding it down all the time, so that Darwin's volume made no difference over most of its range. 12: loud media a
- * little over the limit at Darwin's loudest, Darwin's volume heard over the rest.
+ * little over the limit at Darwin's loudest, Darwin's volume heard over the rest; r104: 12 dB made the keyboard's clicks -47 dBFS,
+ * hardly heard. 6: the clicks heard, loud media held by the limiter over the top few steps of Darwin's volume.
  */
-#define S8_BELOW_DB             12u
+#define S8_BELOW_DB             6u
 #define S8_SILENCE              8               /* a sample's size under which it is taken for silence */
 #define S8_QUIET_US             3000000ull      /* this long without sound: the amplifier off */
 static int16_t s8_ring[2 * S8_RING_FRAMES];

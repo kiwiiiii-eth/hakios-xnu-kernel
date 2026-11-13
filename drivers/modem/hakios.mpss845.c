@@ -3464,6 +3464,7 @@ static struct {
 	uint32_t service, instance, node, port;
 	bool there;
 } qrtr_servers[64];
+static unsigned qrtr_gone_count;        /* services the modem has taken away since the start */
 static uint32_t qrtr_peer;                      /* the modem's node; 0: it has not said */
 static uint32_t qrtr_next_port = QRTR_FIRST_PORT, qrtr_in, qrtr_out, qrtr_hellos, qrtr_lookups;
 static thread_t link_thread_is;
@@ -3573,8 +3574,15 @@ qrtr_control(const struct qrtr_header *header, const struct qrtr_control *contro
 			qrtr_servers[found].port = control->words[3];
 		}
 		lck_mtx_unlock(&qrtr_lock);
-		printf("mpss: qrtr: a service: %u (%#x), version %u, instance %u, at node %u port %u\n", control->words[0],
-		    control->words[0], control->words[1] & 0xff, control->words[1] >> 8, control->words[2], control->words[3]);
+		/* (WLFW's, 69, said where a run's live log keeps it: run 51, the radio's firmware stopped answering once the modem
+		 * registered -- did its protection domain go down and come back?) */
+		if (control->words[0] == 69 || qrtr_gone_count != 0) {
+			tell("mpss: qrtr: a service: %u (%#x), version %u, instance %u, at node %u port %u\n", control->words[0],
+			    control->words[0], control->words[1] & 0xff, control->words[1] >> 8, control->words[2], control->words[3]);
+		} else {
+			printf("mpss: qrtr: a service: %u (%#x), version %u, instance %u, at node %u port %u\n", control->words[0],
+			    control->words[0], control->words[1] & 0xff, control->words[1] >> 8, control->words[2], control->words[3]);
+		}
 		qrtr_tell(control->words[0], control->words[1], control->words[2], control->words[3], true);
 		break;
 	case QRTR_DEL_SERVER:
@@ -3588,8 +3596,10 @@ qrtr_control(const struct qrtr_header *header, const struct qrtr_control *contro
 			qrtr_servers[i].there = qrtr_servers[i].there && !gone;
 			lck_mtx_unlock(&qrtr_lock);
 			if (gone) {
-				printf("mpss: qrtr: service %u at node %u port %u has gone\n", qrtr_servers[i].service, qrtr_servers[i].node,
-				    qrtr_servers[i].port);
+				qrtr_gone_count++;
+				tell("mpss: qrtr: SERVICE %u (%#x) at node %u port %u HAS GONE (%s)\n", qrtr_servers[i].service,
+				    qrtr_servers[i].service, qrtr_servers[i].node, qrtr_servers[i].port, control->command == QRTR_BYE ?
+				    "the node said bye" : "deleted");
 				qrtr_tell(qrtr_servers[i].service, qrtr_servers[i].instance, qrtr_servers[i].node, qrtr_servers[i].port, false);
 			}
 		}

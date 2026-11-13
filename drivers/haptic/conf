@@ -6,3 +6,8 @@ driver HAPTIC
 	file    bsd/dev/hakios.haptic.c
 	help    the vibration motor: an Awinic AW86927 driving a linear resonant actuator (haptic=N), its waveforms
 	help    from fw-haptic/
+
+driver HAPTIC8998
+	file    bsd/dev/hakios.haptic8998.c
+	help    the OnePlus 6T's vibration motor: the PMI8998's haptics module driving its LRA (haptic=N); HAPTIC's copy
+	help    with the same boot-args, entry points and Darwin side, so not built together with HAPTIC

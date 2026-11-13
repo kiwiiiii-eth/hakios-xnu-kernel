@@ -57,6 +57,7 @@ CONFIG_HAKIOS_GPUSERVICE=y
 
 # the vibration motor: an Awinic AW86927 driving a linear resonant actuator (haptic=N), its waveforms from fw-haptic/ [hakios.haptic.c]
 CONFIG_HAKIOS_HAPTIC=y
+# CONFIG_HAKIOS_HAPTIC8998 is not set
 
 # QEMU's virtio tablet and keyboard as the touch screen and the buttons (virtio_input=1). QEMU only [hakios.virtio_input.c]
 CONFIG_HAKIOS_VIRTIO_INPUT=y

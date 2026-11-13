@@ -75,8 +75,9 @@ hakios_nas_apply(struct hakios_nas_state *state, const void *frame, size_t lengt
 			next.registered = value[0] == 1;
 			next.bars = next.registered && next.has_signal ? bars_for(next.dbm) : 0;
 			serving = true;
-		} else if (message == 0x24 && type == 0x10 && size >= 5 && size >= (size_t)5 + value[4]) {
-			/* the current PLMN: MCC, MNC (16 bits each), the description's length and bytes */
+		} else if (message == 0x24 && type == 0x12 && size >= 5 && size >= (size_t)5 + value[4]) {
+			/* the current PLMN (TLV 0x12, libqmi's "Current PLMN"; 0x10 is the roaming indicator): MCC, MNC (16 bits each),
+			 * the description's length and bytes */
 			unsigned n = value[4] < sizeof(next.operator_name) - 1 ? value[4] : sizeof(next.operator_name) - 1;
 
 			next.mcc = le16(value);

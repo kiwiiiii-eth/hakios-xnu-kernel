@@ -6362,7 +6362,20 @@ nas_changed(__unused void *context, const struct hakios_nas_state *state)
 {
 	nas_changes++;
 	cellular_registered = state->registered;
-	snprintf(cellular_operator, sizeof(cellular_operator), "%s", state->registered ? state->operator_name : "");
+	{
+		/* the name the status bar shows: Taiwan's networks by their codes, as an iPhone's carrier bundles name them */
+		static const struct { uint16_t mcc, mnc; const char *name; } known[] = {
+			{ 466, 1, "遠傳電信" }, { 466, 92, "中華電信" }, { 466, 97, "台灣大哥大" }, { 466, 5, "亞太電信" }, { 466, 89, "台灣之星" },
+		};
+		const char *name = state->operator_name;
+
+		for (unsigned i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
+			if (known[i].mcc == state->mcc && known[i].mnc == state->mnc) {
+				name = known[i].name;
+			}
+		}
+		snprintf(cellular_operator, sizeof(cellular_operator), "%s", state->registered ? name : "");
+	}
 	cellular_bars = state->bars;
 	cellular_dbm = state->has_signal ? state->dbm : 0;
 	cellular_radio = state->has_signal ? state->radio_interface : 0;

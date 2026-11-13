@@ -7518,7 +7518,7 @@ step_mba(void)
 		mdata_phys = mba_phys + MBA_PART;
 	}
 	/* (Linux's rmtfs_mem shares its buffer with the modem when Linux boots, long before the modem starts) */
-	if (option("modem_rmtfs_early")) {
+	if (option_default_on("modem_rmtfs_early")) {      /* (on by default: every run with Wi-Fi wants it, and the boot-args are full) */
 		if (!rmtfs_buffer_make() || !rmtfs_share(true)) {
 			printf("mpss: %u: the buffer for the modem's files is not shared\n", step);
 		}

@@ -5869,6 +5869,11 @@ static volatile uint64_t mic_sum_squares, mic_frames_heard;
 static volatile uint32_t mic_peak, mic_nonzero;
 static int16_t mic_first[8];
 static volatile bool mic_first_taken;
+/* one second of what is heard, kept to be said in the log (base64, "MICPCM" lines): tools turn it into a WAV on the Mac */
+#define MIC_KEEP_FRAMES         48000u
+static int16_t *mic_kept;
+static volatile uint32_t mic_kept_frames;
+static volatile bool mic_keeping;
 
 static bool
 mic_events(uint8_t service, __unused uint16_t port, uint32_t opcode, uint32_t token, const uint32_t *payload, uint32_t length)
@@ -5893,6 +5898,13 @@ mic_events(uint8_t service, __unused uint16_t port, uint32_t opcode, uint32_t to
 			if (!mic_first_taken && bytes >= 16) {
 				memcpy(mic_first, samples, 16);
 				mic_first_taken = true;
+			}
+			if (mic_keeping && mic_kept != NULL) {
+				uint32_t n = bytes / 2, room = MIC_KEEP_FRAMES - mic_kept_frames;
+
+				n = n < room ? n : room;
+				memcpy(mic_kept + mic_kept_frames, samples, n * 2);
+				mic_kept_frames += n;
 			}
 			for (uint32_t i = 0; i < bytes / 2; i++) {
 				int32_t v = samples[i];
@@ -6254,7 +6266,14 @@ step_mic_capture(void)
 	(void)mic_codec_update(0x0625, 0xc0, 0x40, "ANA_MICB3: on");
 	(void)mic_codec_update(0x0611, 0x1f, 12, "ANA_AMIC4: gain 12 (Android's ADC4 Volume)");
 	sleep_ms(50);
+	if (mic_kept == NULL) {
+		mic_kept = kalloc_data(MIC_KEEP_FRAMES * 2, Z_WAITOK | Z_ZERO);
+	}
+	mic_kept_frames = 0;
+	(void)mic_listen("AMIC4, MIC BIAS1 and 3 on, gain 12: settling", 1000, handle);
+	mic_keeping = true;
 	rms_amic4 = mic_listen("AMIC4, MIC BIAS1 and 3 on, gain 12", 3000, handle);
+	mic_keeping = false;
 	(void)mic_codec_update(0x0622, 0xc0, 0x00, "ANA_MICB1: off");
 	(void)mic_codec_update(0x0625, 0xc0, 0x00, "ANA_MICB3: off");
 	sleep_ms(50);
@@ -6264,6 +6283,29 @@ step_mic_capture(void)
 		printf("adsp845: %u: THE MICROPHONE (AMIC4): gain 0 RMS %u with MIC BIAS1, %u without; gain 12 RMS %u with the biases, %u "
 		    "without: %s\n", step, rms_on, rms_off, rms_amic4, rms_none,
 		    rms_amic4 > 3 * rms_none + 4 ? "IT HEARS (much more with its bias than without)" : "no clear difference");
+	}
+	if (mic_kept != NULL && mic_kept_frames > 0) {
+		static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+		const uint8_t *bytes = (const uint8_t *)mic_kept;
+		uint32_t total = mic_kept_frames * 2, line = 0;
+
+		printf("MICPCM begin %u frames, 48000 Hz, 1 channel, 16 bits\n", mic_kept_frames);
+		for (uint32_t at = 0; at < total; at += 72, line++) {
+			char text[100];
+			uint32_t o = 0, end = at + 72 < total ? at + 72 : total;
+
+			for (uint32_t i = at; i < end; i += 3) {
+				uint32_t w = (uint32_t)bytes[i] << 16 | (i + 1 < end ? (uint32_t)bytes[i + 1] << 8 : 0) | (i + 2 < end ? bytes[i + 2] : 0);
+
+				text[o++] = b64[w >> 18 & 63];
+				text[o++] = b64[w >> 12 & 63];
+				text[o++] = i + 1 < end ? b64[w >> 6 & 63] : '=';
+				text[o++] = i + 2 < end ? b64[w & 63] : '=';
+			}
+			text[o] = 0;
+			printf("MICPCM %u %s\n", line, text);
+		}
+		printf("MICPCM end %u lines\n", line);
 	}
 	hakios_adsp_apr_events(NULL);
 	ok = mic_reads > 0;

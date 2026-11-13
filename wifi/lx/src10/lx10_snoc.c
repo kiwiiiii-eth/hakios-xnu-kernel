@@ -881,6 +881,7 @@ netif_threaded_enable(struct net_device *dev)
 #define NAPI_SCHEDULED          (1ul << 0)
 #define NAPI_DISABLED           (1ul << 1)
 #define NAPI_POLLING            (1ul << 2)
+#define NAPI_MISSED             (1ul << 3)      /* scheduled again while it was polled: polled once more (Linux's MISSED) */
 static struct napi_struct *lx10_napi[LX10_NAPI_MAX];
 static bool lx10_napi_thread;
 
@@ -960,6 +961,12 @@ linuxkpi_napi_schedule(struct napi_struct *napi)
 		napi->state |= NAPI_SCHEDULED;
 		lx10_napi_schedules++;
 		lx_os_wakeup(&lx10_napi_work);
+	} else if ((napi->state & (NAPI_SCHEDULED | NAPI_DISABLED)) == NAPI_SCHEDULED) {
+		/*
+		 * Run 34: snoc.c's poll looks at the engines' pending bits first and says it is complete last; an engine's
+		 * interrupt between the two (its bit set, its interrupt off) was lost for good, and so was WMI's connection.
+		 */
+		napi->state |= NAPI_MISSED;
 	}
 	lx_os_unlock();
 	return (now);
@@ -968,17 +975,24 @@ linuxkpi_napi_schedule(struct napi_struct *napi)
 bool
 linuxkpi_napi_complete(struct napi_struct *napi)
 {
+	bool done;
+
 	lx_os_lock();
-	napi->state &= ~NAPI_SCHEDULED;
+	done = !(napi->state & NAPI_MISSED);
+	if (done) {
+		napi->state &= ~NAPI_SCHEDULED;
+	} else {
+		napi->state &= ~NAPI_MISSED;   /* (still scheduled: the thread polls it again) */
+	}
 	lx_os_unlock();
-	return (true);
+	return (done);
 }
 
 void
 linuxkpi_napi_enable(struct napi_struct *napi)
 {
 	lx_os_lock();
-	napi->state &= ~(NAPI_DISABLED | NAPI_SCHEDULED);
+	napi->state &= ~(NAPI_DISABLED | NAPI_SCHEDULED | NAPI_MISSED);
 	lx_os_unlock();
 }
 
@@ -1000,7 +1014,7 @@ linuxkpi_napi_disable(struct napi_struct *napi)
 	while (napi->state & NAPI_POLLING) {
 		lx_os_sleep(napi, 0);
 	}
-	napi->state &= ~NAPI_SCHEDULED;
+	napi->state &= ~(NAPI_SCHEDULED | NAPI_MISSED);
 	lx_os_unlock();
 }
 

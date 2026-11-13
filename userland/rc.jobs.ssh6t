@@ -1,0 +1,17 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist) on the OnePlus 6T: a way in over Wi-Fi
+# (RC_JOBS=rc.jobs.ssh6t). The 6T's radio comes up by default (fajita.config: wifi=1 wifi_station=1) and is joined from
+# Settings by hand; once configd gives en0 an address, OpenSSH from the package manager's prefix (tools/mk-jb.sh) lets
+# root in with the key in ssh/authorized_keys, which build.sh puts on the data volume (never in the repository). Unlike
+# rc.jobs.ssh there are no taps: the 6T's touch is not the reference phone's, and nothing here needs the screen.
+# sshd is started at once and listens on every interface, so it answers as soon as an address is there; the
+# address is said in the log every few minutes (net_test show) for whoever reads it there.
+/var/jb/usr/sbin/sshd -D -e -h /var/root/.ssh/ssh_host_ed25519_key -o UsePAM=no -o PasswordAuthentication=no -o PermitRootLogin=prohibit-password -o AuthorizedKeysFile=/var/root/.ssh/authorized_keys &
+/var/jb/usr/bin/sleep 60
+/redwood/bin/net_test show
+/var/jb/usr/bin/sleep 120
+/redwood/bin/net_test show
+/var/jb/usr/bin/sleep 180
+/redwood/bin/net_test show
+/var/jb/usr/bin/sleep 300
+/redwood/bin/net_test show
+/var/jb/usr/bin/sleep 36000

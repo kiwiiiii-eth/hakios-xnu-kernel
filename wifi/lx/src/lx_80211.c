@@ -486,19 +486,19 @@ linuxkpi_ieee80211_handle_wake_tx_queue(struct ieee80211_hw *hw, struct ieee8021
  * What became of a frame we sent: whether the access point acknowledged it (run 40: DHCP unanswered; was it
  * heard?). The first eight once a network is joined are said, then every 64th, with the counts so far.
  */
+extern unsigned lx_tx_given;
+
 static void
 tx_noted(struct lx_radio *radio, const struct ieee80211_tx_info *info, unsigned length)
 {
 	static unsigned acked, unacked;
 	bool ack = (info->flags & IEEE80211_TX_STAT_ACK) != 0;
 
-	if (!radio->joined) {
-		return;
-	}
+	(void)radio;
 	ack ? acked++ : unacked++;
 	if (acked + unacked <= 8 || (acked + unacked) % 64 == 0) {
-		printf("lx: a frame of %u bytes sent: %s; so far %u acknowledged, %u not\n", length, ack ? "ACKNOWLEDGED" :
-		    "NOT ACKNOWLEDGED", acked, unacked);
+		printf("lx: a frame of %u bytes sent: %s; so far %u acknowledged, %u not, of %u given to the driver\n", length, ack ?
+		    "ACKNOWLEDGED" : "NOT ACKNOWLEDGED", acked, unacked, lx_tx_given);
 	}
 }
 
@@ -736,11 +736,14 @@ frame_new(struct lx_radio *radio, unsigned length, uint8_t **bytes)
 	return (skb);
 }
 
+unsigned lx_tx_given;   /* frames given to the driver's tx (W5: against the reports of frames sent) */
+
 static void
 frame_send(struct lx_radio *radio, struct sk_buff *skb)
 {
 	struct ieee80211_tx_control control = { .sta = radio->sta };
 
+	lx_tx_given++;
 	radio->ops->tx(&radio->hw, &control, skb);
 }
 

@@ -743,6 +743,66 @@ ath10k_err(struct ath10k *ar, const char *fmt, ...)
 	va_end(ap);
 }
 
+/*
+ * W5: the HTT's lines (ATH10K_DBG_HTT), counted, not said, unless wifi_dbg asks for them: by the type of what the
+ * firmware sends (0x7: TX_COMPL_IND, the reports of frames sent), the descriptors of frames taken and given back, the
+ * reports of frames sent and their states -- every 5 s while they change. Run 41: data frames given, none reported.
+ */
+#define LX10_DBG_HTT            0x00000008u
+static unsigned lx10_dbg_asked;
+static unsigned htt_types[64], htt_taken, htt_given_back, htt_reports, htt_reported, htt_states[4], htt_other;
+static unsigned long long htt_said_at;
+static unsigned htt_said_sum;
+extern unsigned lx_tx_given;
+
+static void
+htt_count(const char *fmt, va_list ap)
+{
+	char line[320];
+	unsigned long long now;
+	unsigned sum, n;
+
+	if (strcmp(fmt, "htt rx, msg_type: 0x%0X\n") == 0) {
+		unsigned type = va_arg(ap, unsigned);
+
+		htt_types[type < 63 ? type : 63]++;
+	} else if (strncmp(fmt, "htt tx alloc msdu_id", 20) == 0) {
+		htt_taken++;
+	} else if (strncmp(fmt, "htt tx free msdu_id", 19) == 0) {
+		htt_given_back++;
+	} else if (strcmp(fmt, "htt tx completion num_msdus %d\n") == 0) {
+		htt_reports++;
+		htt_reported += (unsigned)va_arg(ap, int);
+	} else if (strcmp(fmt, "htt tx completion msdu_id %u status %d\n") == 0) {
+		(void)va_arg(ap, unsigned);
+		htt_states[(unsigned)va_arg(ap, int) & 3]++;
+	} else if (++htt_other <= 40) {
+		ath10k_say(" dbg htt", fmt, ap);
+	}
+	sum = htt_taken + htt_given_back + htt_reports + htt_other;
+	for (unsigned i = 0; i < 64; i++) {
+		sum += htt_types[i];
+	}
+	now = lx_os_nanoseconds();
+	if (sum == htt_said_sum || now - htt_said_at < 5000000000ull) {
+		return;
+	}
+	htt_said_at = now;
+	htt_said_sum = sum;
+	n = (unsigned)snprintf(line, sizeof(line), "ath10k htt: from the firmware, by type:");
+	for (unsigned i = 0; i < 64 && n < sizeof(line); i++) {
+		if (htt_types[i] != 0) {
+			n += (unsigned)snprintf(line + n, sizeof(line) - n, " %#x:%u", i, htt_types[i]);
+		}
+	}
+	if (n < sizeof(line)) {
+		snprintf(line + n, sizeof(line) - n, "; frames given to the driver %u, to the HTT %u, given back %u; %u reports for %u "
+		    "frames: %u acknowledged, %u not, %u discarded, %u none; %u other lines\n", lx_tx_given, htt_taken, htt_given_back,
+		    htt_reports, htt_reported, htt_states[1], htt_states[2], htt_states[3], htt_states[0], htt_other);
+	}
+	lx_os_tell(line);
+}
+
 void
 __ath10k_dbg(struct ath10k *ar, unsigned int mask, const char *fmt, ...)
 {
@@ -753,7 +813,11 @@ __ath10k_dbg(struct ath10k *ar, unsigned int mask, const char *fmt, ...)
 		return;
 	}
 	va_start(ap, fmt);
-	ath10k_say(" dbg", fmt, ap);
+	if ((mask & LX10_DBG_HTT) && !(lx10_dbg_asked & LX10_DBG_HTT)) {
+		htt_count(fmt, ap);
+	} else {
+		ath10k_say(" dbg", fmt, ap);
+	}
 	va_end(ap);
 }
 
@@ -1052,7 +1116,8 @@ lx_start(void)
 		lx_tell("lx10: no thread, or no memory the radio can be given\n");
 		return (ENOMEM);
 	}
-	ath10k_debug_mask = lx_os_option("wifi_dbg") ? lx_os_option("wifi_dbg") : 0x00000010 | 0x00000020 | 0x00000800 | 0x00200000;  /* MAC BOOT REGULATORY QMI (wifi_dbg=: another) */
+	lx10_dbg_asked = lx_os_option("wifi_dbg") ? lx_os_option("wifi_dbg") : 0x00000010 | 0x00000020 | 0x00000800 | 0x00200000;  /* MAC BOOT REGULATORY QMI (wifi_dbg=: another) */
+	ath10k_debug_mask = lx10_dbg_asked | LX10_DBG_HTT;      /* the HTT's lines counted (htt_count()) */
 	wifi_device.name = "wifi";
 	wifi_device.id = -1;
 	wifi_device.dev.of_node = &wifi_node;

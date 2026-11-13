@@ -6791,7 +6791,8 @@ static void
 wds_open(void)
 {
 	/* (the 6T: the data path, the IPA, is not made yet; modem_data=1 asks for the session all the same) */
-	if (wds_port == NULL && !option("modem_data_off") && option("modem_data")) {
+	/* (ipa8=10: the IPA's data path, the modem online and its data asked for: the three in one boot-arg, for room) */
+	if (wds_port == NULL && !option("modem_data_off") && (option("modem_data") || ipa8_asked() >= 10)) {
 		wds_port = qrtr_open(wds_receive, wds_server, NULL);
 		if (wds_port != NULL) {
 			qrtr_lookup(wds_port, QMI_WDS, 0, 0);
@@ -7236,6 +7237,9 @@ step_nas(void)
 		}
 	}
 	PE_parse_boot_argn("modem_nas_wait", &wait_seconds, sizeof(wait_seconds));
+	if (ipa8_asked() >= 10) {
+		online = 1;                     /* with the IPA set up and the modem told (run 67), it may go online */
+	}
 	PE_parse_boot_argn("modem_online", &online, sizeof(online));
 	PE_parse_boot_argn("modem_data_wait", &data_wait, sizeof(data_wait));
 	announce("look the modem's services up as they come (they take some 30 s): DMS asked to put the modem online as soon as it is "

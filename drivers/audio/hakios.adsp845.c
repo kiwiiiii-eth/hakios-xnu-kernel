@@ -143,7 +143,7 @@ static LCK_GRP_DECLARE(adsp_lock_group, "hakios-adsp845");
 
 static void bb_say(const char *format, ...) __printflike(1, 2);
 
-#define STEPS                   17
+#define STEPS                   21
 #define FIRST_INDEPENDENT_STEP  12      /* the steps from here on do not need the DSP (800 of adsp8=N leaves it alone) */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
@@ -4919,11 +4919,125 @@ out:
 	return ok;
 }
 
+/* ---- the microphone: steps 21 to 28 (M1..M8 of lane-b-notes/mic-shortest-path.md) -------------------------------------- */
+/*
+ * The 6T's microphones are the WCD9340's (Tavil): its analog inputs, its ADCs and decimators, and its SLIMbus port to the audio
+ * DSP's AFE (SLIMBUS_0_TX, 0x4001). The application processor talks to the codec only over SLIMbus, through LPASS's NGD (a
+ * satellite of the DSP, which is the bus's master) and its BAM, and only once the DSP has powered them up when asked over QMI
+ * (service 0x301). Agreed to by the user, 11-14: the codec's writes (its reset, MIC BIAS 2.7 V), the SLIMbus pins, the NGD's and
+ * the BAM's registers, SMMU stream 0x1806, the RPMh vote for its MCLK (LN_BB_CLK2), the DSP's SLIMbus and capture commands. No PMIC
+ * write is needed (the codec's supplies are S4A, 1.8 V, always on). Nothing is played. Steps 21 and up do not run 12 to 20.
+ */
+#define MIC_STREAM_6T           0x1806u         /* sdm845.dtsi: the NGD's iommus */
+#define MIC_FIRST_STEP          21u
+
+static struct pin_look mic_pins[] = {
+	{ { "gpio54", TLMM_NORTH + 0x1000u * 54, 0x1000, 0 }, 54, 0, "the codec's interrupt (wcd_intr, not used: polled)" },
+	{ { "gpio64", TLMM_NORTH + 0x1000u * 64, 0x1000, 0 }, 64, 0, "the codec's reset (high: running)" },
+	{ { "gpio70", TLMM_EAST + 0x1000u * 70, 0x1000, 0 }, 70, 1, "SLIMbus clock (lpass_slimbus)" },
+	{ { "gpio71", TLMM_EAST + 0x1000u * 71, 0x1000, 0 }, 71, 1, "SLIMbus data 0 (lpass_slimbus)" },
+	{ { "gpio72", TLMM_EAST + 0x1000u * 72, 0x1000, 0 }, 72, 1, "SLIMbus data 1 (lpass_slimbus)" },
+};
+
+/* an RPMh resource's address in the boot loader's command database (cmd-db), or 0 */
+static uint32_t
+cmd_db_address(const char *name)
+{
+	char id[8] = { 0 };
+
+	if (cmd_db == NULL) {
+		cmd_db = (const struct cmd_db_header *)ml_io_map_unmappable(CMD_DB_PHYS, CMD_DB_SIZE, VM_WIMG_WCOMB);
+	}
+	if (!(cmd_db->magic[0] == 0xdb && cmd_db->magic[1] == 0x30 && cmd_db->magic[2] == 0x03 && cmd_db->magic[3] == 0x0c)) {
+		return 0;
+	}
+	strlcpy(id, name, sizeof(id));
+	for (unsigned s = 0; s < 8; s++) {
+		const struct cmd_db_slave *slave = &cmd_db->slave[s];
+		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(cmd_db->data + slave->header_offset);
+
+		if (slave->id == 0 || slave->count > 512) {
+			continue;
+		}
+		for (unsigned i = 0; i < slave->count; i++) {
+			if (memcmp(entry[i].id, id, sizeof(id)) == 0) {
+				return entry[i].address;
+			}
+		}
+	}
+	return 0;
+}
+
+/* what the SMMU does with a stream now: read only */
+static void
+smmu_stream_look(uint32_t stream)
+{
+	uint32_t idr0 = get(&s5_smmu, "idr0", SMMU_IDR0), matches = idr0 & 0xff, found = 0;
+
+	for (uint32_t n = 0; n < matches && SMMU_SMR(n) < 0xc00; n++) {
+		uint32_t smr = rd(s5_smmu.base + SMMU_SMR(n)), s2cr = rd(s5_smmu.base + SMMU_S2CR(n));
+		uint32_t id = smr & 0x7fff, mask = smr >> 16 & 0x7fff;
+
+		if (smr >> 31 && ((id ^ stream) & ~mask) == 0) {
+			static const char *const kinds[] = { "translated (a context)", "PASSED untranslated", "FAULTED", "reserved" };
+
+			printf("adsp845: %u: SMMU stream %#x: match register %u (smr %#x, s2cr %#x): %s, context %u\n", step, stream, n, smr, s2cr,
+			    kinds[s2cr >> 16 & 3], s2cr & 0xff);
+			found++;
+		}
+	}
+	if (found == 0) {
+		printf("adsp845: %u: SMMU stream %#x: no match register covers it (the SMMU's default for unmatched streams applies)\n", step,
+		    stream);
+	}
+}
+
+/* M1: what is there, read only. The NGD and the BAM are not read: before the DSP powers them up (QMI), a read can hang the bus. */
+static bool
+step_mic_survey(void)
+{
+	static const char *const names[] = { "lnbclka2", "lnbclkg2", "lnbclka3", "rfclka2" };
+
+	announce("READ only, for the microphone: cmd-db's LN_BB_CLK2 (the codec's MCLK), gpio54/64/70-72 (the codec's interrupt and "
+	    "reset, SLIMbus), the DSP's QRTR services 0x301 (SLIMbus) and 0x42 (the audio PD), SMMU stream 0x1806 (the NGD's); NOT the NGD "
+	    "nor the BAM");
+	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		uint32_t address = cmd_db_address(names[i]);
+
+		printf("adsp845: %u: cmd-db \"%s\": %s%#x\n", step, names[i], address ? "at " : "NOT THERE ", address);
+	}
+	for (unsigned i = 0; i < sizeof(mic_pins) / sizeof(mic_pins[0]); i++) {
+		uint32_t ctl = get(&mic_pins[i].page, "control", 0), io = get(&mic_pins[i].page, "I/O", 4);
+
+		printf("adsp845: %u: gpio%u (%s): control %#x (function %u%s, %s, pull %u), I/O %#x (reads %u, would drive %u)\n", step,
+		    mic_pins[i].number, mic_pins[i].what, ctl, (ctl >> 2) & 0xf, ((ctl >> 2) & 0xf) == mic_pins[i].function ? ", as wanted" :
+		    ", NOT as wanted", (ctl & (1u << 9)) ? "an output" : "an input", ctl & 3, io, io & 1, (io >> 1) & 1);
+	}
+	for (unsigned i = 0; i < sizeof(qrtr_servers) / sizeof(qrtr_servers[0]); i++) {
+		if (qrtr_servers[i].there && (qrtr_servers[i].service == 0x301 || qrtr_servers[i].service == 0x42)) {
+			printf("adsp845: %u: QRTR service %#x instance %u at node %u port %u\n", step, qrtr_servers[i].service,
+			    qrtr_servers[i].instance, qrtr_servers[i].node, qrtr_servers[i].port);
+		}
+	}
+	smmu_stream_look(MIC_STREAM_6T);
+	smmu_stream_look(AUDIO_STREAM_6T);
+	printf("adsp845: %u: over; nothing was written\n", step);
+	return true;
+}
+
+/* steps 18 to 20: none (the numbers are kept for the speaker's later steps) */
+static bool
+step_none(void)
+{
+	return true;
+}
+
 /* ---- the steps, and their end ----------------------------------------------------------------------- */
 
 static bool (*const steps[STEPS])(void) = {
 	step_survey, step_firmware, step_mailbox, step_header, step_image, step_our_item, step_start, step_queues, step_link, step_qrtr,
-	step_apr, step_tfa, step_amplifier, step_afe, step_stream, step_speaker, step_darwin,
+	step_apr, step_tfa, step_amplifier, step_afe, step_stream, step_speaker, step_darwin, step_none, step_none, step_none,
+	step_mic_survey,
 };
 
 static bool keep;                       /* the DSP and the link stay up while the system runs (adsp8_keep) */
@@ -5011,6 +5125,9 @@ run_steps(void)
 
 	/* (adsp8=8NN: the DSP is left alone: steps 11 and under all need it, the amplifier's probe (12) does not) */
 	for (step = flag_alone ? FIRST_INDEPENDENT_STEP : 1; step <= last_step; step++) {
+		if (last_step >= MIC_FIRST_STEP && step >= FIRST_INDEPENDENT_STEP && step < MIC_FIRST_STEP) {
+			continue;               /* (the microphone's steps: the speaker's, 12 to 20, are not run -- nothing is played) */
+		}
 		if (!steps[step - 1]()) {
 			tell("adsp845: step %u: FAILED; the steps after it are not attempted\n", step);
 			break;

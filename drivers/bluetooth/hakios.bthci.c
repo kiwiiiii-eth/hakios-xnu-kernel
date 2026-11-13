@@ -260,6 +260,26 @@ quirks(uint8_t *p, unsigned length)
 			p[7 + 25 + i] |= le_commands[i];
 		}
 		p[7 + 24] |= 0x60;
+		/* bt_allcmds=1 (a look): every command said supported, so that bluetoothd sends the one it wanted next and the log
+		 * names it (run 86: "HCI initialization failed" right after 0x0c31, nothing sent -- it looks in the mask first) */
+		{
+			uint32_t all = 0;
+			static unsigned said_mask;
+
+			PE_parse_boot_argn("bt_allcmds", &all, sizeof(all));
+			if (said_mask++ < 2) {
+				char hex[3 * 64 + 1];
+				unsigned n = 0;
+
+				for (unsigned i = 0; i < 64; i++) {
+					n += (unsigned)snprintf(hex + n, sizeof(hex) - n, " %02x", p[7 + i]);
+				}
+				say("supported commands (octets 0..63, after the LE bits%s):%s\n", all ? ", before all set" : "", hex);
+			}
+			if (all) {
+				memset(p + 7, 0xff, 64);
+			}
+		}
 	}
 	return length;
 }

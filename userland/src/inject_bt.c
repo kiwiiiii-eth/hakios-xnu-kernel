@@ -191,9 +191,16 @@ os_log_watched(const char *format, const uint8_t *buf, uint32_t size)
 	    strstr(format, "VSC") != NULL || strstr(format, "stall") != NULL || strstr(format, "ompleted") != NULL ||
 	    strstr(format, "eady") != NULL || strstr(format, "ransport") != NULL || strstr(format, "tack") != NULL ||
 	    strstr(format, "hipset") != NULL || strstr(format, "ailed") != NULL || strstr(format, "No bluetooth") != NULL ||
-	    strstr(format, "ddress") != NULL;
+	    strstr(format, "ddress") != NULL || strstr(format, "air") != NULL || strstr(format, "eychain") != NULL ||
+	    strstr(format, "HID") != NULL || strstr(format, "onnect") != NULL || strstr(format, "ond") != NULL;
+	/* (the 6T, runs 89-92: these, many times a second, used up bt_lines before anything was paired) */
+	bool noise = strstr(format, "decryptProximityPairingPayload") != NULL || strstr(format, "statedump") != NULL ||
+	    strstr(format, "getDeviceEncryptionKey") != NULL || strstr(format, "Unable to locate device address") != NULL ||
+	    strstr(format, "advertisingAddressDidChange") != NULL || strstr(format, "Power state changed") != NULL ||
+	    strstr(format, "PowerManager power state") != NULL || strstr(format, "canScanNow") != NULL ||
+	    strstr(format, "ShouldScan") != NULL || strstr(format, "AnyValidScanRequests") != NULL;
 
-	if (!wanted || said >= may_say) {
+	if (!wanted || noise || said >= may_say) {
 		return;
 	}
 	/* the arguments, in the order of the format's conversions: s a string, d/u/x... a number, the rest skipped */

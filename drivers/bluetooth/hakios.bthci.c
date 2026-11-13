@@ -158,6 +158,17 @@ dump(const char *direction, const uint8_t *bytes, unsigned length, uint32_t *cou
 	char text[3 * 32 + 1];
 	unsigned n = length < 32 ? length : 32;
 
+	/* (the 6T, runs 89-93: the LE advertising reports of everything around, many a second, used up bt_said before a
+	 * connection; scanning commands too. Neither is said, nor counted) */
+	if (length >= 4 && bytes[0] == 0x04 && bytes[1] == 0x3e && (bytes[3] == 0x02 || bytes[3] == 0x0d || bytes[3] == 0x0b)) {
+		return;
+	}
+	if (length >= 3 && bytes[0] == 0x01 && bytes[2] == 0x20 && (bytes[1] == 0x0b || bytes[1] == 0x0c)) {
+		return;
+	}
+	if (length >= 6 && bytes[0] == 0x04 && bytes[1] == 0x0e && bytes[5] == 0x20 && (bytes[4] == 0x0b || bytes[4] == 0x0c)) {
+		return;
+	}
 	if ((*counter)++ >= said_max) {
 		return;
 	}

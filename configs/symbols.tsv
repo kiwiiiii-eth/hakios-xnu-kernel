@@ -312,6 +312,7 @@ SOUND_PAUSE	arg	sound_pause	Audio and battery	k	hakios.sound.c
 SOUND_SECS	arg	sound_secs	Audio and battery	k	hakios.sound.c	
 SPEAKER_PROBE	arg	speaker_probe	Audio and battery	k	hakios.speaker.c	reads registers and nothing else: the pins, the power names (below)
 SURF_CLEAR	arg	surf_clear	GPU and display	k	MiniIOSurface.cpp	kept memory is given out as it is (to see what the clearing costs; a surface is then not all zeroes)
+SURF_ROW_ALIGN	arg	surf_row_align	GPU and display	k	MiniIOSurface.cpp	
 SURF_WRAP	arg	surf_wrap	GPU and display	k	MiniIOSurface.cpp	surfaces around the client's pictures refused, as before methodWrapClientImage (for comparing)
 SURFTRACE	arg	surftrace	GPU and display	k	MiniIOSurface.cpp	log the first N surfaces created (default 24)
 SURFTRACE_OF	arg	surftrace_of	GPU and display	k	MiniIOSurface.cpp	

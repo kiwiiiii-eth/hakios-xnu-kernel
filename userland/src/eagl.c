@@ -242,6 +242,7 @@ struct image {
 	GLenum to, internal, format, type;
 	uint32_t plane, seed;
 	GLsizei width, height;
+	GLsizei held_width, held_height;        /* (gpu_fill) the size the library's own texture has storage for, 0: none yet */
 };
 
 struct eagl {
@@ -310,8 +311,10 @@ struct eagl {
 	/* a frame's worth */
 	unsigned calls, draws, triangles, uploads, clears, last_draws;
 	uint64_t upload_bytes, began, attaching, flushing;
+	uint64_t gpu_fill_bytes;        /* (gpu_fill) what the GPU copied from surfaces instead of this processor */
+	unsigned gpu_fills, fill_mirrors;
 	/* everything so far */
-	unsigned frames, shaders, programs, errors, shared, refused;
+	unsigned frames, shaders, programs, errors, shared, refused, big_refills;
 	uint64_t all_calls, all_draws, all_triangles, readback_us, wait_us, attach_us, flush_us, frame_us;
 	unsigned most_calls, most_triangles;
 	const char *sources[256];       /* the text of the shaders being made, by name (modulo this) */
@@ -352,6 +355,14 @@ static int share_surfaces = 1;          /* boot-arg glcopy=1: 0 */
  * Boot-arg glblit=0: the surface's memory, as before.
  */
 static int blit_targets = 1;
+/*
+ * A texture that is not its surface's memory is filled from the surface by the GPU, from a second texture that is (its mirror),
+ * rather than by this processor (glTexImage2D of the pixels): the window server's own surfaces, 1125 x 2436, were filled so
+ * whenever CoreAnimation attached one, 11 MB at a time, and every application's launch and every switch of screens took
+ * frames of 30 to 60 ms (the 6T, r130 and r134: 98 surfaces shared and 494 copied). A surface that is shown and cannot be the
+ * texture itself (the library refused it) gets a mirror for this too, where the library takes one. Boot-arg glfill=0: not.
+ */
+static int gpu_fill = 1;
 /*
  * A frame that is handed to the display must have been drawn. The display's driver waits for
  * the GPU itself before it puts a surface on the panel, on a thread of its own, and says so in
@@ -500,10 +511,12 @@ summary(struct eagl *e)
 	say("hakios-gl: after %u frames: %llu calls, %llu draws and %llu triangles a frame on average; the most in one: "
 	    "%u calls, %u triangles; %llu us a frame, of which %llu handing the commands on, %llu waiting for the picture "
 	    "to be drawn and %llu copying it out, and before each %llu making textures of IOSurfaces; %u IOSurfaces were "
-	    "the textures' memory, %u had to be copied; %u shaders, %u programs; biggest texture %u x %u; %u errors\n",
+	    "the textures' memory, %u had to be copied (%u of them through a mirror; %u fills by the GPU, %llu KB); %u shaders, %u programs; "
+	    "biggest texture %u x %u; %u errors\n",
 	    e->frames, e->all_calls / frames, e->all_draws / frames, e->all_triangles / frames, e->most_calls,
 	    e->most_triangles, e->frame_us / frames, e->flush_us / frames, e->wait_us / frames, e->readback_us / frames,
-	    e->attach_us / frames, e->shared, e->refused, e->shaders, e->programs, widest_texture, tallest_texture, e->errors);
+	    e->attach_us / frames, e->shared, e->refused, e->fill_mirrors, e->gpu_fills, (unsigned long long)(e->gpu_fill_bytes >> 10),
+	    e->shaders, e->programs, widest_texture, tallest_texture, e->errors);
 	for (unsigned i = 0; i < sizeof(formats) / sizeof(formats[0]) && formats[i].count; i++) {
 		say("hakios-gl:   textures: %s %#x/%#x/%#x: %u times, up to %u x %u\n", formats[i].how, formats[i].internal,
 		    formats[i].format, formats[i].type, formats[i].count, formats[i].widest, formats[i].tallest);
@@ -622,6 +635,25 @@ surface_mirrored(struct eagl *e, struct image *image)
 	return true;
 }
 
+/* (gpu_fill) A mirror for a surface that is shown and could not be the texture itself: as surface_mirrored(), not only for targets. */
+static bool
+surface_fill_mirror(struct eagl *e, struct image *image)
+{
+	bool target = image->target, made;
+
+	if (!gpu_fill || image->mirror != 0 || image->invert) {
+		return image->mirror != 0;
+	}
+	image->target = true;
+	made = surface_mirrored(e, image);
+	image->target = target;
+	if (made) {
+		e->shared--;                    /* (counted apart: the texture is still a copy, made by the GPU) */
+		e->fill_mirrors++;
+	}
+	return made;
+}
+
 /*
  * Make a texture, which is bound, of its IOSurface's own memory, if that is what is asked for
  * (the whole of a surface of blue-first pixels, the same way up) and the library can do it.
@@ -701,6 +733,45 @@ surface_changed(struct eagl *e, struct image *image)
 	return true;
 }
 
+/*
+ * (gpu_fill) The texture, which is bound, filled from its mirror by the GPU: one blit, as target_to_surface() makes the other way.
+ * False if the library would not: the processor fills it then.
+ */
+static bool
+mirror_to_texture(struct eagl *e, struct image *image)
+{
+	GLint read = 0, draw = 0;
+
+	while (glGetError() != 0) {
+	}
+	if (image->held_width != image->width || image->held_height != image->height) {
+		glTexImage2D(GL_TEXTURE_2D, 0, (GLint)internal_format(image->internal, image->format), image->width, image->height, 0,
+		    image->format, image->type, NULL);
+		image->held_width = image->width;
+		image->held_height = image->height;
+	}
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+	if (e->reader == 0) {
+		glGenFramebuffers(1, &e->reader);
+	}
+	if (e->writer == 0) {
+		glGenFramebuffers(1, &e->writer);
+	}
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->mirror, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->writer);
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
+	glBlitFramebuffer(0, 0, image->width, image->height, 0, 0, image->width, image->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+	if (glGetError() != 0) {
+		image->held_width = image->held_height = 0;
+		return false;
+	}
+	return true;
+}
+
 /* Fill a texture, which is bound, from its IOSurface, unless it is the surface. */
 static void
 surface_to_texture(struct eagl *e, struct image *image)
@@ -714,6 +785,13 @@ surface_to_texture(struct eagl *e, struct image *image)
 	bool alpha_first = image->alpha_first && !planar && pixel == 4;
 
 	if (image->shared) {
+		return;
+	}
+	if (gpu_fill && image->mirror != 0 && !image->invert && !alpha_first && !planar && image->to == GL_TEXTURE_2D &&
+	    image->format == GL_BGRA && image->type == GL_UNSIGNED_BYTE && mirror_to_texture(e, image)) {
+		image->seed = IOSurfaceGetSeed(surface);
+		e->gpu_fills++;
+		e->gpu_fill_bytes += row * (size_t)image->height;
 		return;
 	}
 	if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != 0) {
@@ -779,6 +857,18 @@ surface_to_texture(struct eagl *e, struct image *image)
 	image->seed = IOSurfaceGetSeed(surface);
 	e->uploads++;
 	e->upload_bytes += row * (size_t)image->height;
+	/*
+	 * the copies that cost: a frame that refilled 11 to 16 MB took 30 to 60 ms on the 6T (r130), and which surfaces those were
+	 * the first refusals above do not say (the 6T, 11-14)
+	 */
+	if (row * (size_t)image->height >= (1u << 20) && e->big_refills++ < 60) {
+		say("hakios-gl: frame %u: %zu KB refilled from surface %u ('%.4s' %d x %d, %zu bytes a row)%s%s%s%s%s\n", e->frames + 1,
+		    row * (size_t)image->height >> 10, IOSurfaceGetID(surface),
+		    (const char *)&(uint32_t){ OSSwapInt32(IOSurfaceGetPixelFormat(surface)) }, image->width, image->height, row,
+		    image->wrapped ? ", wrapped memory" : "", image->invert ? ", turned over" : "", image->alpha_first ? ", alpha first" : "",
+		    image->format != GL_BGRA || image->type != GL_UNSIGNED_BYTE ? ", not BGRA bytes" : "",
+		    image->plane != 0 ? ", a plane" : "");
+	}
 }
 
 /* What has been drawn into a texture, into its IOSurface, unless it is there (frame_end() waits for it). */
@@ -4087,6 +4177,7 @@ my_texImageIOSurface(id self, SEL selector, IOSurfaceRef surface, unsigned long 
 	began = now_us();
 	if (!surface_shared(e, image)) {
 		surface_changed(e, image);              /* (what it adds up to now) */
+		(void)surface_fill_mirror(e, image);
 		surface_to_texture(e, image);
 	}
 	e->attaching += now_us() - began;
@@ -4313,6 +4404,7 @@ install(void)
 		}
 		share_surfaces = strstr(arguments, "glcopy=1") == NULL;
 		blit_targets = strstr(arguments, "glblit=0") == NULL;
+		gpu_fill = strstr(arguments, "glfill=0") == NULL;
 		sync_frames = strstr(arguments, "glsync=0") == NULL;
 		if (strstr(arguments, "glwait=0") != NULL || (strstr(arguments, "glwait=1") == NULL && display_waits())) {
 			wait_for_frames = 0;

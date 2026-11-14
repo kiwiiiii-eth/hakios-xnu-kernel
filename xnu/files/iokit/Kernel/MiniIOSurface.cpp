@@ -77,7 +77,29 @@ enum {
 #define MINISURF_TABLE_SIZE     16384
 #define MINISURF_MAX_DIMENSION  16384
 #define MINISURF_MAX_ALLOC      (512u << 20)
-#define MINISURF_ROW_ALIGN      64
+/*
+ * Rows of a surface start every MINISURF_ROW_ALIGN bytes unless its maker says otherwise; boot-arg surf_row_align=N (a power
+ * of two, 16 to 4096) instead. 64 suits redwood's Adreno 642L; the 6T's Adreno 630 refused most surfaces as textures of
+ * their own memory ("copied, not shared: (the library refused)", r130: 98 shared, 494 copied, a frame that copied 11 MB
+ * taking 30 to 60 ms), and wider rows are being tried there (11-14).
+ */
+#define MINISURF_ROW_ALIGN      rowAlign()
+static uint32_t gRowAlign;
+
+static uint32_t
+rowAlign(void)
+{
+	if (gRowAlign == 0) {
+		uint32_t align = 64;
+
+		if (!PE_parse_boot_argn("surf_row_align", &align, sizeof(align)) || align < 16 || align > 4096 ||
+		    (align & (align - 1)) != 0) {
+			align = 64;
+		}
+		gRowAlign = align;
+	}
+	return gRowAlign;
+}
 
 #define FOURCC(a, b, c, d) ((uint32_t)(a) << 24 | (uint32_t)(b) << 16 | (uint32_t)(c) << 8 | (uint32_t)(d))
 

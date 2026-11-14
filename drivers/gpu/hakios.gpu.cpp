@@ -818,6 +818,13 @@ HakiosGPUUserClient::surfaceBuffer(struct hakios_surface * request)
 	}
 	if (s->client != NULL) {
 		/* (memory of a program's own with a surface made around it: not in whole pages, and seldom in rows the GPU takes) */
+		static uint32_t said;
+
+		if (said++ < 40 || (uint64_t)s->info.width * s->info.height >= 512 * 512) {
+			printf("HakiosGPU: surface %u ('%c%c%c%c' %u x %u, %u bytes a row, %u bytes): a program's own memory, not a buffer\n",
+			    request->surface, (char)(s->info.pixelFormat >> 24), (char)(s->info.pixelFormat >> 16), (char)(s->info.pixelFormat >> 8),
+			    (char)s->info.pixelFormat, s->info.width, s->info.height, s->info.bytesPerRow, (unsigned)s->info.allocSize);
+		}
 		MiniIOSurfaceDrop(s);
 		return kIOReturnUnsupported;
 	}
@@ -862,6 +869,12 @@ HakiosGPUUserClient::surfaceBuffer(struct hakios_surface * request)
 	gGPUStat.taking += mach_absolute_time() - began;
 	IOLockUnlock(gGPULock);
 	if (b == NULL) {
+		static uint32_t said;
+
+		if (said++ < 20) {
+			printf("HakiosGPU: surface %u (%u x %u, %llu bytes): no buffer could be made of it\n", request->surface, s->info.width,
+			    s->info.height, size);
+		}
 		memory->release();
 		MiniIOSurfaceDrop(s);
 		return kIOReturnNoMemory;

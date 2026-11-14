@@ -336,6 +336,7 @@ sound_pause	k
 sound_secs	k
 speaker_probe	k
 surf_clear	k
+surf_row_align	k
 surf_wrap	k
 surftrace	k
 surftrace_of	k

@@ -1,0 +1,27 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist) on the OnePlus 6T: rc.jobs.ssh6t, then a
+# restart asked of launchd after four minutes (RC_JOBS=rc.jobs.halt6t), for varsaver's save on SIGTERM. As rc.jobs.ssh6t:
+# a way in over Wi-Fi. The 6T's radio comes up by default (fajita.config: wifi=1 wifi_station=1); a network is joined
+# from Settings once and again by itself at every boot after (r161); once configd gives en0 an address, OpenSSH from the package manager's prefix (tools/mk-jb.sh) lets
+# root in with the key in ssh/authorized_keys, which build.sh puts on the data volume (never in the repository). Unlike
+# rc.jobs.ssh there are no taps: the 6T's touch is not the reference phone's, and nothing here needs the screen.
+# sshd is started at once and listens on every interface, so it answers as soon as an address is there; the
+# address is said in the log every few minutes (net_test show) for whoever reads it there.
+# the widgets' extensions and the daemons behind them in the background, so that the screen has the processors (src/quietboot.c)
+/redwood/bin/quietboot &
+# the modem's positions to locationd once the kernel has any (with gnss=1 among the kernel's arguments; src/gnssfeed.m)
+/redwood/bin/gnssfeed &
+# the data volume across boots, seen at every boot (var_store keeps /private/var in the partition darwin): what the runs before
+# this one wrote, then this run's own line
+/var/jb/usr/bin/cat /private/var/root/hakios-runs.txt
+/var/jb/usr/bin/cat /private/var/root/halt-test.txt
+/redwood/bin/var_store stamp /private/var/root/hakios-runs.txt
+/var/jb/usr/sbin/sshd -D -e -h /var/root/.ssh/ssh_host_ed25519_key -o UsePAM=no -o PasswordAuthentication=no -o PermitRootLogin=prohibit-password -o AuthorizedKeysFile=/var/root/.ssh/authorized_keys &
+/var/jb/usr/bin/sleep 60
+/redwood/bin/net_test show
+# the test of a shutdown by the system itself (Beta 0.4: a phone that boots with no host): a line into /private/var
+# that only the save on launchd's SIGTERM can keep (varsaver), then an orderly restart; the next boot shows the file
+/var/jb/usr/bin/sleep 180
+/redwood/bin/var_store stamp /private/var/root/halt-test.txt
+/var/jb/usr/bin/sleep 5
+/var/jb/usr/bin/launchctl reboot
+/var/jb/usr/bin/sleep 36000

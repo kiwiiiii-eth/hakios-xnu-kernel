@@ -384,4 +384,19 @@ psci_smp_stop_here(void)
 	}
 }
 
+/*
+ * The whole system off, or reset, by TrustZone's own PSCI calls (SYSTEM_OFF, SYSTEM_RESET): what a phone that booted by
+ * itself does when iOS shuts down or restarts, where there is no host to hand the run back to (halt_psci=1; see
+ * halt_all_cpus). Returns only if the call is refused.
+ */
+#define PSCI_SYSTEM_OFF         0x84000008u
+#define PSCI_SYSTEM_RESET       0x84000009u
+
+void
+psci_system_power(boolean_t reset)
+{
+	int64_t status = psci_call(reset ? PSCI_SYSTEM_RESET : PSCI_SYSTEM_OFF, 0, 0, 0);
+
+	printf("psci: %s refused: %lld\n", reset ? "SYSTEM_RESET" : "SYSTEM_OFF", status);
+}
 #endif /* defined(GENERIC_PSCI_SMP) */

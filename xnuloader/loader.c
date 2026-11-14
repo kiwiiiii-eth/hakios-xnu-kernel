@@ -2591,6 +2591,7 @@ struct payload_info {
 	const uint8_t *resident;        /* ... or one the payload carries, which the loader puts there itself */
 	uint32_t resident_size;
 	const char *kernel_version;     /* kernel.ver: the version of the kernel in this payload (tools/kernel-version.py) */
+	const char *rdsrc;              /* rdsrc: "darwin": the root image is the one in darwin (oem darwinput), read at boot */
 	int usb_mode;
 };
 
@@ -2669,6 +2670,8 @@ parse_payload(struct payload_info *pi, int verbose)
 			pi->kernel_version = text;                /* printed under the banner; the kernel gets it as hakios_kver */
 		} else if (str_eq(e->name, "checkpoint")) {
 			pi->checkpoint = parse_number(text, 10);  /* where the kernel should stop and come back */
+		} else if (str_eq(e->name, "rdsrc")) {
+			pi->rdsrc = (const char *)(p + sizeof(*e));
 		} else if (str_eq(e->name, "usb")) {
 			pi->usb_mode = 1;                         /* stay in the loader and take commands over USB */
 		}
@@ -3802,6 +3805,379 @@ fb_reply(const char *code, const char *text)
 	usb_tx(usb_tx_buf, n);
 }
 
+/* ------------------------------------------------------------------------ */
+/* The system image in darwin: a boot with no host                          */
+/*
+ * Darwin's first BLOCK_WRITE_FIRST blocks hold what a run otherwise sends over USB as the root image
+ * (userland/system.apfs): a header in block 0, the image from SYSIMG_OFFSET on. "oem darwinput [EPOCH]" writes the
+ * image staged in the resident area ("oem ramdisk", then the download) there: the header cleared first and written
+ * last, every 8 MB read back and compared before the next, so that a write cut short leaves no header that claims
+ * it. "oem ramdisk darwin" reads it back into the resident area, checks its length and FNV-1a against the header, and
+ * takes it as the root image a download would have been; "oem darwininfo" says what the header holds.
+ *
+ * Nothing else is written. The partition is proved as for the kernel's writes (block_is_darwin: its name, the APFS
+ * type GUID, blocks of 4096, at least the port's size, not read only), and only its blocks below BLOCK_WRITE_FIRST
+ * are written here: the kernel's writes, the data volume's, begin there and are refused before it.
+ */
+#define SYSIMG_MAGIC    0x474d49535953484bULL   /* "HKSYSIMG" */
+#define SYSIMG_VERSION  1
+#define SYSIMG_OFFSET   (1ULL << 20)
+#define SYSIMG_PIECE    (8ULL << 20)
+
+struct sysimg_header {
+	uint64_t magic;
+	uint32_t version, crc;                  /* CRC-32 of the header with crc 0 */
+	uint64_t offset, bytes, fnv;            /* the image: where in darwin, how long, its FNV-1a */
+	uint64_t written_epoch;                 /* the host's clock when it was written ("oem darwinput EPOCH"), or 0 */
+	uint64_t write_ms;
+	char note[64];
+};
+
+static uint8_t sysimg_block[4096] __attribute__((aligned(4096)));
+
+/* "PREFIX<decimal>SUFFIX" into out (the loader has no snprintf) */
+static void
+sysimg_text(char *out, unsigned size, const char *prefix, uint64_t v, const char *suffix)
+{
+	char digits[24];
+	unsigned n = 0, k = 0;
+
+	do {
+		digits[n++] = (char)('0' + v % 10);
+		v /= 10;
+	} while (v != 0 && n < sizeof(digits));
+	for (; *prefix && k + 1 < size; prefix++) {
+		out[k++] = *prefix;
+	}
+	while (n > 0 && k + 1 < size) {
+		out[k++] = digits[--n];
+	}
+	for (; *suffix && k + 1 < size; suffix++) {
+		out[k++] = *suffix;
+	}
+	out[k] = 0;
+}
+
+static efi_block_io *
+find_darwin(void)
+{
+	static const efi_guid part_guid = EFI_PARTITION_INFO_GUID;
+	static const efi_guid blk_guid = EFI_BLOCK_IO_GUID;
+	static const efi_guid type = BLOCK_DARWIN_TYPE;
+	efi_handle *handles;
+	efi_block_io *found = NULL;
+	uint64_t count, matches = 0;
+
+	if (EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &part_guid, NULL, &count, &handles))) {
+		return NULL;
+	}
+	for (uint64_t i = 0; i < count; i++) {
+		efi_partition_info *info;
+		efi_block_io *bio;
+		char have[40];
+
+		if (EFI_ERROR(BS->handle_protocol(handles[i], &part_guid, (void **)&info)) || info->type != 2) {
+			continue;
+		}
+		ufs_name(info, have, sizeof(have));
+		if (!str_eq(have, "darwin") || EFI_ERROR(BS->handle_protocol(handles[i], &blk_guid, (void **)&bio))) {
+			continue;
+		}
+		matches++;
+		if (memcmp(&info->type_guid, &type, sizeof(type)) == 0 && bio->media->block_size == 4096 &&
+		    bio->media->last_block + 1 >= BLOCK_DARWIN_MIN && !bio->media->read_only &&
+		    info->end_lba - info->start_lba + 1 == bio->media->last_block + 1) {
+			found = bio;
+		}
+	}
+	BS->free_pool(handles);
+	if (matches != 1) {
+		print("sysimg: %d partitions named darwin: none is used\n", matches);
+		return NULL;
+	}
+	if (found == NULL) {
+		print("sysimg: darwin is not the port's (type, block size or size)\n");
+	}
+	return found;
+}
+
+static uint32_t
+sysimg_crc(const struct sysimg_header *h)
+{
+	struct sysimg_header c = *h;
+
+	c.crc = 0;
+	return ufs_crc32((const uint8_t *)&c, sizeof(c));
+}
+
+/* the header in block 0, if there is a whole one: 1, else 0 (and why, in the log) */
+static int
+sysimg_read_header(efi_block_io *bio, struct sysimg_header *h)
+{
+	if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, 0, sizeof(sysimg_block), sysimg_block))) {
+		print("sysimg: darwin's first block does not read\n");
+		return 0;
+	}
+	memcpy(h, sysimg_block, sizeof(*h));
+	if (h->magic != SYSIMG_MAGIC || h->version != SYSIMG_VERSION || h->crc != sysimg_crc(h)) {
+		print("sysimg: no system image in darwin (no header, or a torn one)\n");
+		return 0;
+	}
+	if (h->offset != SYSIMG_OFFSET || h->bytes == 0 || h->offset + h->bytes > BLOCK_WRITE_FIRST * 4096) {
+		print("sysimg: the header claims an image out of bounds\n");
+		return 0;
+	}
+	return 1;
+}
+
+/* one piece written and read back the same: 0, or the step that failed */
+static const char *
+sysimg_write_piece(efi_block_io *bio, uint64_t at, uint8_t *data, uint64_t len, uint8_t *scratch)
+{
+	if (at + len > BLOCK_WRITE_FIRST * 4096 || at % 4096 != 0 || len % 4096 != 0) {
+		return "out of bounds";
+	}
+	if (EFI_ERROR(bio->write_blocks(bio, bio->media->media_id, at / 4096, len, data))) {
+		return "write";
+	}
+	if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, at / 4096, len, scratch))) {
+		return "read back";
+	}
+	if (memcmp(data, scratch, len) != 0) {
+		return "read back different";
+	}
+	return NULL;
+}
+
+static void
+sysimg_put(const char *arg)
+{
+	efi_block_io *bio = find_darwin();
+	uint8_t *img = (uint8_t *)(win_base + RESIDENT_RD_OFFSET), *scratch;
+	uint64_t bytes = resident_rd_size, padded, started = READ_SYSREG(CNTVCT_EL0), last_said = 0;
+	struct sysimg_header h;
+	const char *bad;
+	char text[64];
+
+	if (bio == NULL) {
+		fb_reply("FAIL", "no darwin of the port's");
+		return;
+	}
+	if (bytes == 0) {
+		fb_reply("FAIL", "no root image staged: oem ramdisk, then the download");
+		return;
+	}
+	padded = (bytes + 4095) & ~4095ULL;
+	if (SYSIMG_OFFSET + padded > BLOCK_WRITE_FIRST * 4096) {
+		fb_reply("FAIL", "the image is larger than darwin's system area");
+		return;
+	}
+	scratch = img + ((padded + SYSIMG_PIECE - 1) & ~(SYSIMG_PIECE - 1));
+	if ((uint64_t)(uintptr_t)scratch + SYSIMG_PIECE > win_base + win_size) {
+		fb_reply("FAIL", "no room to read back");
+		return;
+	}
+	if (padded != bytes) {
+		memset(img + bytes, 0, padded - bytes);     /* (the last block's tail; not part of the image's FNV) */
+	}
+	memset(&h, 0, sizeof(h));
+	h.magic = SYSIMG_MAGIC;
+	h.version = SYSIMG_VERSION;
+	h.offset = SYSIMG_OFFSET;
+	h.bytes = bytes;
+	h.fnv = ufs_fnv(0xcbf29ce484222325ULL, img, bytes);
+	h.written_epoch = parse_number(arg, 10);
+	print("sysimg: writing %d bytes into darwin at %d, fnv %x\n", bytes, (uint64_t)SYSIMG_OFFSET, h.fnv);
+	/* 1. no header while the image is half written */
+	memset(sysimg_block, 0, sizeof(sysimg_block));
+	if ((bad = sysimg_write_piece(bio, 0, sysimg_block, sizeof(sysimg_block), scratch)) != NULL) {
+		print("sysimg: clearing the header: %s\n", bad);
+		fb_reply("FAIL", "clearing the header");
+		return;
+	}
+	/* 2. the image, piece by piece, each read back */
+	for (uint64_t done = 0; done < padded; done += SYSIMG_PIECE) {
+		uint64_t len = padded - done < SYSIMG_PIECE ? padded - done : SYSIMG_PIECE;
+
+		if ((bad = sysimg_write_piece(bio, SYSIMG_OFFSET + done, img + done, len, scratch)) != NULL) {
+			print("sysimg: at byte %d of the image: %s\n", done, bad);
+			fb_reply("FAIL", "writing the image");
+			return;
+		}
+		if (wdt_armed) {
+			wdt_pet();
+		}
+		if (done - last_said >= (256ULL << 20)) {
+			last_said = done;
+			sysimg_text(text, sizeof(text), "", done >> 20, " MB written");
+			fb_reply("INFO", text);
+		}
+	}
+	bio->flush_blocks(bio);
+	/* 3. the header last */
+	h.write_ms = (READ_SYSREG(CNTVCT_EL0) - started) * 1000 / READ_SYSREG(CNTFRQ_EL0);
+	h.crc = sysimg_crc(&h);
+	memset(sysimg_block, 0, sizeof(sysimg_block));
+	memcpy(sysimg_block, &h, sizeof(h));
+	if ((bad = sysimg_write_piece(bio, 0, sysimg_block, sizeof(sysimg_block), scratch)) != NULL) {
+		print("sysimg: writing the header: %s\n", bad);
+		fb_reply("FAIL", "writing the header");
+		return;
+	}
+	bio->flush_blocks(bio);
+	print("sysimg: %d bytes written and read back in %d ms\n", bytes, h.write_ms);
+	fb_reply("OKAY", "");
+}
+
+/* the image in darwin into the resident area as the root image: 1, or 0 and the reason in the log */
+static int
+sysimg_load(void)
+{
+	efi_block_io *bio = find_darwin();
+	struct sysimg_header h;
+	struct payload_info pi;
+	uint8_t *img;
+	uint64_t started = READ_SYSREG(CNTVCT_EL0), padded, fnv, read_ms;
+
+	if (bio == NULL || !sysimg_read_header(bio, &h)) {
+		return 0;
+	}
+	parse_payload(&pi, 0);
+	if (!choose_window(&pi) || win_size <= RESIDENT_RD_OFFSET + RESIDENT_RD_RESERVE ||
+	    h.bytes > win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE) {
+		print("sysimg: no room for %d bytes in the memory window\n", h.bytes);
+		return 0;
+	}
+	img = (uint8_t *)(win_base + RESIDENT_RD_OFFSET);
+	padded = (h.bytes + 4095) & ~4095ULL;
+	resident_rd_size = 0;
+	for (uint64_t done = 0; done < padded; done += SYSIMG_PIECE) {
+		uint64_t len = padded - done < SYSIMG_PIECE ? padded - done : SYSIMG_PIECE;
+
+		if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, (h.offset + done) / 4096, len, img + done))) {
+			print("sysimg: reading at byte %d of the image failed\n", done);
+			return 0;
+		}
+		if (wdt_armed) {
+			wdt_pet();
+		}
+	}
+	read_ms = (READ_SYSREG(CNTVCT_EL0) - started) * 1000 / READ_SYSREG(CNTFRQ_EL0);
+	fnv = ufs_fnv(0xcbf29ce484222325ULL, img, h.bytes);
+	if (fnv != h.fnv) {
+		print("sysimg: the image read back is not the one written (fnv %x, the header says %x)\n", fnv, h.fnv);
+		return 0;
+	}
+	resident_rd_size = h.bytes;
+	print("sysimg: the root image from darwin: %d bytes, read in %d ms, checked in %d ms (written at %d)\n", h.bytes,
+	    read_ms, (READ_SYSREG(CNTVCT_EL0) - started) * 1000 / READ_SYSREG(CNTFRQ_EL0) - read_ms, h.written_epoch);
+	return 1;
+}
+
+static void
+sysimg_info(void)
+{
+	efi_block_io *bio = find_darwin();
+	struct sysimg_header h;
+	char text[64];
+
+	if (bio == NULL) {
+		fb_reply("FAIL", "no darwin of the port's");
+		return;
+	}
+	if (!sysimg_read_header(bio, &h)) {
+		fb_reply("OKAY", "none");
+		return;
+	}
+	print("sysimg: in darwin: %d bytes at %d, fnv %x, written at %d in %d ms\n", h.bytes, h.offset, h.fnv,
+	    h.written_epoch, h.write_ms);
+	sysimg_text(text, sizeof(text), "", h.bytes, " bytes");
+	fb_reply("OKAY", text);
+}
+
+/*
+ * "oem readpart NAME": a partition read whole into the resident area and staged for "fastboot get_staged", so that a
+ * copy of it is on the host before anything near it is written (installing on the 6T: boot, dtbo and vbmeta of both
+ * slots). Read only. Refused while a root image is in the resident area (it would be read over), and for a partition
+ * larger than the area. The log says its size and an FNV-1a of what was read; the host reads it twice and compares.
+ */
+static efi_block_io *
+find_partition_named(const char *name)
+{
+	static const efi_guid part_guid = EFI_PARTITION_INFO_GUID;
+	static const efi_guid blk_guid = EFI_BLOCK_IO_GUID;
+	efi_handle *handles;
+	efi_block_io *found = NULL;
+	uint64_t count;
+
+	if (EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &part_guid, NULL, &count, &handles))) {
+		return NULL;
+	}
+	for (uint64_t i = 0; i < count && found == NULL; i++) {
+		efi_partition_info *info;
+		efi_block_io *bio;
+		char have[40];
+
+		if (EFI_ERROR(BS->handle_protocol(handles[i], &part_guid, (void **)&info)) || info->type != 2) {
+			continue;
+		}
+		ufs_name(info, have, sizeof(have));
+		if (str_eq(have, name) && !EFI_ERROR(BS->handle_protocol(handles[i], &blk_guid, (void **)&bio))) {
+			found = bio;
+		}
+	}
+	BS->free_pool(handles);
+	return found;
+}
+
+static void
+read_partition_staged(const char *name)
+{
+	struct payload_info pi;
+	efi_block_io *bio = find_partition_named(name);
+	uint64_t bs, bytes, room, done = 0, h = 0xcbf29ce484222325ULL;
+	uint8_t *dest;
+
+	if (bio == NULL || bio->media == NULL) {
+		fb_reply("FAIL", "no such partition");
+		return;
+	}
+	if (resident_rd_size != 0) {
+		fb_reply("FAIL", "a root image is in the resident area");
+		return;
+	}
+	parse_payload(&pi, 0);
+	if (!choose_window(&pi) || win_size <= RESIDENT_RD_OFFSET + RESIDENT_RD_RESERVE) {
+		fb_reply("FAIL", "no memory window");
+		return;
+	}
+	bs = bio->media->block_size;
+	bytes = (bio->media->last_block + 1) * bs;
+	room = win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE;
+	if (bs == 0 || bytes > room || bytes > 0xffffffffULL) {
+		fb_reply("FAIL", "partition too large");
+		return;
+	}
+	dest = (uint8_t *)(win_base + RESIDENT_RD_OFFSET);
+	while (done < bytes) {
+		uint64_t want = bytes - done < (8ULL << 20) ? bytes - done : (8ULL << 20);
+		efi_status st = bio->read_blocks(bio, bio->media->media_id, done / bs, want, dest + done);
+
+		if (EFI_ERROR(st)) {
+			print("readpart: %s: error %x at byte %d\n", name, (uint64_t)st, done);
+			fb_reply("FAIL", "read error");
+			return;
+		}
+		done += want;
+	}
+	h = ufs_fnv(h, dest, bytes);
+	print("readpart: %s: %d bytes in blocks of %d, fnv %x\n", name, bytes, bs, h);
+	staged_data = (const char *)dest;
+	staged_len = bytes;
+	fb_reply("OKAY", "");
+}
+
+
 static void
 fb_reply_data(uint64_t len)
 {
@@ -3836,7 +4212,8 @@ fb_command(char *cmd)
 	{
 		if (busy && (starts_with(cmd, "oem ramdisk") || starts_with(cmd, "download:") || starts_with(cmd, "oem run") ||
 		    starts_with(cmd, "oem selftest") || starts_with(cmd, "oem hang") || starts_with(cmd, "oem recording") ||
-		    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap"))) {
+		    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap") ||
+		    starts_with(cmd, "oem readpart") || starts_with(cmd, "oem darwin"))) {
 			fb_reply("FAIL", "a kernel is running (oem stop ends it)");
 		} else if (starts_with(cmd, "oem stop")) {
 			/* the kernel looks at this once a second and comes back as it does when its time is up */
@@ -3868,6 +4245,16 @@ fb_command(char *cmd)
 			/* "oem ramdisk": the next download is a root image for the resident area; "oem ramdisk none" drops it */
 			struct payload_info pi;
 
+			if (starts_with(cmd, "oem ramdisk darwin")) {
+				download_to_ramdisk = 0;
+				log_len = 0;
+				if (sysimg_load()) {
+					fb_reply("OKAY", "");
+				} else {
+					fb_reply("FAIL", "no system image from darwin (see oem log)");
+				}
+				return;
+			}
 			if (starts_with(cmd, "oem ramdisk none")) {
 				resident_rd_size = 0;
 				/* (an "oem ramdisk" before this one must not leave the next download aimed at the resident area) */
@@ -3956,6 +4343,12 @@ fb_command(char *cmd)
 				sent += chunk;
 			}
 			fb_reply("OKAY", "");
+		} else if (starts_with(cmd, "oem darwinput")) {
+			sysimg_put(cmd[13] == ' ' ? cmd + 14 : "0");
+		} else if (starts_with(cmd, "oem darwininfo")) {
+			sysimg_info();
+		} else if (starts_with(cmd, "oem readpart ")) {
+			read_partition_staged(cmd + 13);
 		} else if (starts_with(cmd, "oem screenshot")) {
 			/* stage the raw framebuffer; "getvar screen" gives its geometry */
 			if (SCREEN.base == 0) {
@@ -4389,9 +4782,17 @@ efi_main(efi_handle image, efi_system_table *st)
 		usb_command_loop();
 	}
 
-	/* One-shot mode: run the kernel that came with the image, then reset. */
+	/*
+	 * One-shot mode: run the kernel that came with the image, then reset. With rdsrc=darwin (a boot from the phone's
+	 * own boot partition, with no host) the root image is read from darwin first, as "oem ramdisk darwin" reads it;
+	 * if there is none whole, the kernel is not started (it would have no root) and the way back below is taken.
+	 */
 	if (have_payload) {
-		run_kernel(0, 0);
+		if (pi.rdsrc != NULL && str_eq(pi.rdsrc, "darwin") && !sysimg_load()) {
+			print("loader: rdsrc=darwin, and no system image could be read from darwin: the kernel is not started\n");
+		} else {
+			run_kernel(0, 0);
+		}
 	}
 	if (PLAT == &platform_fajita) {
 		/* back to U-Boot (its fastboot): a reset would land in the phone's other boot slot */

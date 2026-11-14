@@ -231,6 +231,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			install -m 644 "$MACSDK"/usr/include/net/route.h obj/macinc/net/
 			$DYN -idirafter obj/macinc -o obj/socks src/socks.c
 		fi
+		# the launchd job that keeps /private/var (com.hakios.varstore.plist; src/varsaver.c): var_store save on SIGTERM too
+		$DYN -o obj/varsaver src/varsaver.c
 		# where a process's threads are, from outside it (src/stacks.c), signed for task_for_pid
 		$DYN -o obj/stacks src/stacks.c &&
 			{ ${LDID:-ldid} -Ssrc/stacks.entitlements obj/stacks 2>/dev/null ||
@@ -393,6 +395,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/socks ] && cp obj/socks root/bin/
 	[ -f obj/logdump ] && cp obj/logdump root/bin/
 	[ -f obj/stacks ] && cp obj/stacks root/bin/
+	[ -f obj/varsaver ] && cp obj/varsaver root/bin/
 	[ -f obj/gnssfeed ] && cp obj/gnssfeed root/bin/
 	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
 	[ -f obj/cg_test ] && cp obj/cg_test root/bin/

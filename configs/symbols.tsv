@@ -177,6 +177,7 @@ GPU_DVFS	arg	gpu_dvfs	User space	k	hakios.a630.c
 GPU_EXACT	arg	gpu_exact	GPU and display	k	hakios.a630.c,hakios.adreno.c	
 GPU_KEEP	arg	gpu_keep	GPU and display	k	hakios.gpu.cpp	
 GPU_LOG	arg	gpu_log	GPU and display	k	hakios.a630.c,hakios.adreno.c	
+HALT_PSCI	arg	halt_psci	CPU, memory and boot	k	(patch)	
 HAPTIC_EFFECT	arg	haptic_effect	Haptics and torch	k	hakios.haptic.c	
 HAPTIC_MS	arg	haptic_ms	User space	k	hakios.haptic8998.c	
 HAPTIC_STRENGTH	arg	haptic_strength	User space	k	hakios.haptic8998.c	
@@ -382,6 +383,7 @@ WIFI_MAC	arg	wifi_mac	Wi-Fi	k	hakios.bt3990.c,hakios.wifi.c,hakios.wifi10.c	the 
 WIFI_MISSION	arg	wifi_mission	Wi-Fi	k	hakios.wlfw.c	
 WIFI_NEW	arg	wifi_new	Wi-Fi	k	hakios.wifi.c	steps K and later have not been seen to work (default: the last one)
 WIFI_PAUSE	arg	wifi_pause	Wi-Fi	k	hakios.wifi.c	
+WIFI_POWER_EARLY	arg	wifi_power_early	Wi-Fi	k	hakios.apple80211.c	
 WIFI_QUIET	arg	wifi_quiet	Wi-Fi	k	lx_bus.c	
 WIFI_RADIO_READ	arg	wifi_radio_read	Wi-Fi	k	hakios.wifi.c	step 16 does read (2: whatever mode the firmware is in)
 WIFI_READY	arg	wifi_ready	Wi-Fi	k	hakios.wlfw.c	

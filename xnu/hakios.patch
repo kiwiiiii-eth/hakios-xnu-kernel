@@ -119,10 +119,10 @@ index 4b83160780c3..8997af1f0e1b 100644
  include $(MakeInc_rule)
  include $(MakeInc_dir)
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a4cf..27cccab98c8e 100644
+index 44274016a4cf..6ba02a37aa04 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,51 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,64 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -137,44 +137,57 @@ index 44274016a4cf..27cccab98c8e 100644
 +bsd/dev/hakios.sparse.c                  standard
 +bsd/dev/hakios.apfs_check.c              optional apfs
 +bsd/dev/hakios.adsp.c                    optional hakios_adsp
++bsd/dev/hakios.adsp845.c                 optional hakios_adsp845
 +bsd/dev/hakios.speaker.c                 optional hakios_speaker
 +bsd/dev/hakios.sound.c                   optional hakios_sound
 +bsd/dev/hakios.guard.c                   optional hakios_sound
 +bsd/dev/hakios.mic.c                     optional hakios_mic
 +bsd/dev/hakios.virtio_sound.c            optional hakios_virtio_sound
 +bsd/dev/hakios.bt.c                      optional hakios_bt
++bsd/dev/hakios.bt3990.c                  optional hakios_bt3990
++bsd/dev/hakios.bthci.c                   optional hakios_bt3990
++bsd/dev/hakios.btsk.c                    optional hakios_bt3990
 +bsd/dev/hakios.camera.c                  optional hakios_camera
 +bsd/dev/hakios.torch.c                   optional hakios_torch
++bsd/dev/hakios.torch8998.c               optional hakios_torch8998
 +bsd/dev/hakios.socinfo.c                 optional hakios_socinfo
 +bsd/dev/hakios.adreno.c                  optional hakios_adreno
++bsd/dev/hakios.a630.c                    optional hakios_a630
++bsd/dev/hakios.dsibl.c                   optional hakios_dsibl
 +bsd/dev/hakios.haptic.c                  optional hakios_haptic
++bsd/dev/hakios.haptic8998.c              optional hakios_haptic8998
 +bsd/dev/hakios.virtio_input.c            optional hakios_virtio_input
 +bsd/dev/hakios.goodix.c                  optional hakios_goodix
++bsd/dev/hakios.rmi4.c                    optional hakios_rmi4
 +bsd/dev/hakios.buttons.c                 optional hakios_buttons
++bsd/dev/hakios.hidres.c                  optional hakios_hidresource
 +bsd/dev/hakios.qmi.c                     optional hakios_qmi
++bsd/dev/hakios.cell.c                    optional hakios_cell
++bsd/dev/hakios.nas.c                     optional hakios_cell
++bsd/dev/hakios.ipa.c                     optional hakios_cell
 +bsd/dev/hakios.mpss.c                    optional hakios_modem
-+bsd/dev/hakios.cell.c                    optional hakios_modem
-+bsd/dev/hakios.nas.c                     optional hakios_modem
-+bsd/dev/hakios.ipa.c                     optional hakios_modem
++bsd/dev/hakios.mpss845.c                 optional hakios_mpss845
 +bsd/dev/hakios.virtio_net.c              optional hakios_virtio_net
 +bsd/dev/hakios.battery.c                 optional hakios_battery
 +bsd/dev/hakios.cpufreq.c                 optional hakios_cpufreq
 +bsd/dev/hakios.thermal.c                 optional hakios_thermal
 +bsd/dev/hakios.pmic.c                    optional hakios_pmic
 +bsd/dev/hakios.battguard.c               optional hakios_battguard
++bsd/dev/hakios.fg8998.c                  optional hakios_fg8998
 +bsd/dev/hakios.ufs.c                     optional hakios_ufs
 +bsd/dev/hakios.ufshc.c                   optional hakios_ufs
 +bsd/dev/hakios.virtio_blk.c              optional hakios_virtio_blk
++bsd/dev/hakios.lx.c                      optional hakios_wifilx
++bsd/dev/hakios.sta.c                     optional hakios_wifilx
++bsd/dev/hakios.apple80211.c              optional hakios_wifilx
 +bsd/dev/hakios.wifi.c                    optional hakios_wifi
 +bsd/dev/hakios.wlfw.c                    optional hakios_wifi
-+bsd/dev/hakios.lx.c                      optional hakios_wifi
-+bsd/dev/hakios.sta.c                     optional hakios_wifi
-+bsd/dev/hakios.apple80211.c              optional hakios_wifi
++bsd/dev/hakios.wifi10.c                  optional hakios_wifi10
 +# end of the HakiOS drivers
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +200,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +213,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -227,7 +240,7 @@ index 44274016a4cf..27cccab98c8e 100644
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +452,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +465,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -235,7 +248,7 @@ index 44274016a4cf..27cccab98c8e 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +475,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +488,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard
@@ -1900,10 +1913,10 @@ index 83259ebf9835..8864e5c7cc41 100644
  DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
  endif
 diff --git a/iokit/conf/files b/iokit/conf/files
-index 5fb0a52062e0..7cfee3142b5b 100644
+index 5fb0a52062e0..ea33d279414f 100644
 --- a/iokit/conf/files
 +++ b/iokit/conf/files
-@@ -79,6 +79,17 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
+@@ -79,6 +79,19 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
  iokit/Kernel/IOGuardPageMemoryDescriptor.cpp		optional iokitcpp
  
  iokit/Kernel/IOPlatformExpert.cpp			optional iokitcpp
@@ -1912,9 +1925,11 @@ index 5fb0a52062e0..7cfee3142b5b 100644
 +iokit/Kernel/MiniIOMobileFramebuffer.cpp		optional iokitcpp
 +# HakiOS drivers: made by tools/hakios-config.py kernel from drivers/*/conf. Edit those, not these lines.
 +iokit/Kernel/hakios.stubs.cpp            optional iokitcpp
-+iokit/Kernel/hakios.gpu.cpp              optional hakios_adreno iokitcpp
++iokit/Kernel/hakios.bluetooth.cpp        optional hakios_bt3990 iokitcpp
++iokit/Kernel/hakios.gpu.cpp              optional hakios_gpuservice iokitcpp
++iokit/Kernel/hakios.hidresource.cpp      optional hakios_hidresource iokitcpp
 +iokit/Kernel/hakios.battery.cpp          optional hakios_battery iokitcpp
-+iokit/Kernel/hakios.wlan.cpp             optional hakios_wifi iokitcpp
++iokit/Kernel/hakios.wlan.cpp             optional hakios_wifilx iokitcpp
 +# end of the HakiOS drivers
 +iokit/Kernel/MiniAppleKeyStore.cpp			optional iokitcpp
 +iokit/Kernel/MiniIONetworkStack.cpp			optional iokitcpp
@@ -2250,6 +2265,24 @@ index e26a1d70f470..f91095c98d26 100644
  
  #if APPLE_ARM64_ARCH_FAMILY
  	configure_late_apple_regs();
+diff --git a/osfmk/arm/io_map.c b/osfmk/arm/io_map.c
+index 18ef2f02122f..77ca43185d6d 100644
+--- a/osfmk/arm/io_map.c
++++ b/osfmk/arm/io_map.c
+@@ -62,7 +62,12 @@
+ 
+ extern vm_offset_t virtual_space_start;     /* Next available kernel VA */
+ 
+-#define IO_MAP_SIZE            (8ul << 20)
++/*
++ * HakiOS: 128 MB, not 8 -- every ml_io_map() of a driver's registers is a permanent mapping in this submap, and the OnePlus 6T's drivers
++ * (the modem's 2 MB of the GCC, the touch screen's pin controller, the GPU, Wi-Fi, the IPA, the audio DSP, Bluetooth) ran out of
++ * 8 MB: kmem_alloc(..., 16384, KMEM_PERMANENT | KMEM_PAGEABLE | KMEM_NOFAIL) "failed with 3", a panic (runs 82, 96)
++ */
++#define IO_MAP_SIZE            (128ul << 20)
+ 
+ __startup_data static struct mach_vm_range io_range;
+ static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;
 diff --git a/osfmk/arm/model_dep.c b/osfmk/arm/model_dep.c
 index 39daaf8db949..64ceb1a5f201 100644
 --- a/osfmk/arm/model_dep.c
@@ -2392,30 +2425,52 @@ index 94e91306b143..0ec1323086b7 100644
  #endif
  
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
-index e76e7e70ab9c..828a51171c7e 100644
+index e76e7e70ab9c..6ff96a52c3a3 100644
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
-@@ -734,6 +734,9 @@ ml_get_machine_mem(void)
+@@ -734,6 +734,13 @@ ml_get_machine_mem(void)
  	return machine_info.memory_size;
  }
  
 +extern void loader_return(void);
 +extern void hakios_adreno_stop(void);
++extern void hakios_wifi_stop(void);
++extern void hakios_adsp_stop(void);
++extern void hakios_mpss_stop(void);
++extern void psci_system_power(boolean_t reset);
 +
  __attribute__((noreturn))
  void
  halt_all_cpus(boolean_t reboot)
-@@ -745,6 +748,9 @@ halt_all_cpus(boolean_t reboot)
+@@ -745,6 +752,27 @@ halt_all_cpus(boolean_t reboot)
  		printf("CPU halted\n");
  		PEHaltRestart(kPEHaltCPU);
  	}
-+	/* No platform driver powers the machine off: hand control (and the log) back to the loader. */
++	/*
++	 * No platform driver powers the machine off. A phone that booted by itself (halt_psci=1: no host to hand the run
++	 * back to) stops its devices as the end of a run does and is powered off, or reset into its boot slot again,
++	 * through PSCI. Otherwise control (and the log) goes back to the loader, as for every run from a host.
++	 * (/private/var was saved before this, by varsaver on launchd's SIGTERM.)
++	 */
++	{
++		uint32_t psci = 0;
++
++		PE_parse_boot_argn("halt_psci", &psci, sizeof(psci));
++		if (psci) {
++			printf("%s through PSCI (halt_psci=1)\n", reboot ? "Reset" : "Power off");
++			hakios_adreno_stop();
++			hakios_wifi_stop();
++			hakios_adsp_stop();
++			hakios_mpss_stop();
++			psci_system_power(reboot);
++		}
++	}
 +	hakios_adreno_stop();
 +	loader_return();
  	while (1) {
  		;
  	}
-@@ -932,6 +938,99 @@ ml_read_chip_revision(unsigned int *rev __unused)
+@@ -932,6 +960,99 @@ ml_read_chip_revision(unsigned int *rev __unused)
  #endif
  }
  
@@ -2515,7 +2570,7 @@ index e76e7e70ab9c..828a51171c7e 100644
  void
  ml_parse_cpu_topology(void)
  {
-@@ -945,6 +1044,7 @@ ml_parse_cpu_topology(void)
+@@ -945,6 +1066,7 @@ ml_parse_cpu_topology(void)
  	int64_t cluster_max_cpu_phys_id[MAX_CPU_CLUSTER_PHY_ID + 1];
  	const boolean_t cpus_boot_arg_present = PE_parse_boot_argn("cpus", &cpu_boot_arg, sizeof(cpu_boot_arg));
  	const boolean_t cpumask_boot_arg_present = PE_parse_boot_argn("cpumask", &cpumask_boot_arg, sizeof(cpumask_boot_arg));
@@ -2523,7 +2578,7 @@ index e76e7e70ab9c..828a51171c7e 100644
  
  	// The cpus=N and cpumask=N boot args cannot be used simultaneously. Flag this
  	// so that we trigger a panic later in the boot process, once serial is enabled.
-@@ -1005,6 +1105,20 @@ ml_parse_cpu_topology(void)
+@@ -1005,6 +1127,20 @@ ml_parse_cpu_topology(void)
  		cpu->phys_id = (uint32_t)ml_readprop(child, "reg", ML_READPROP_MANDATORY);
  
  		cpu->l2_access_penalty = (uint32_t)ml_readprop(child, "l2-access-penalty", 0);
@@ -2544,7 +2599,7 @@ index e76e7e70ab9c..828a51171c7e 100644
  		cpu->l2_cache_size = (uint32_t)ml_readprop(child, "l2-cache-size", 0);
  		cpu->l2_cache_id = (uint32_t)ml_readprop(child, "l2-cache-id", 0);
  		cpu->l3_cache_size = (uint32_t)ml_readprop(child, "l3-cache-size", 0);
-@@ -1107,6 +1221,7 @@ ml_parse_cpu_topology(void)
+@@ -1107,6 +1243,7 @@ ml_parse_cpu_topology(void)
  	cluster_offsets[0] = 0;
  #endif
  	assert(topology_info.boot_cpu != NULL);
@@ -2552,7 +2607,7 @@ index e76e7e70ab9c..828a51171c7e 100644
  	ml_read_chip_revision(&topology_info.chip_revision);
  
  	/*
-@@ -1427,17 +1542,15 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
+@@ -1427,17 +1564,15 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
  	processor_t processor = PERCPU_GET_RELATIVE(processor, cpu_data, this_cpu_datap);
  	if (!is_boot_cpu) {
  		processor_init(processor, this_cpu_datap->cpu_number, pset);
@@ -2578,7 +2633,7 @@ index e76e7e70ab9c..828a51171c7e 100644
  
  	*processor_out = processor;
  	*ipi_handler_out = cpu_signal_handler;
-@@ -2237,8 +2350,16 @@ _enable_virtual_timer(void)
+@@ -2237,8 +2372,16 @@ _enable_virtual_timer(void)
  	uint64_t cntvctl = CNTV_CTL_EL0_ENABLE; /* One wants to use 32 bits, but "mrs" prefers it this way */
  
  	__builtin_arm_wsr64("CNTV_CTL_EL0", cntvctl);
@@ -3565,21 +3620,3 @@ index 3ebc295117a3..de101eafc83b 100755
  def find_non_ascii(s):
      for c in s:
          if ord(c) >= 0x80: return True
-diff --git a/osfmk/arm/io_map.c b/osfmk/arm/io_map.c
-index 18ef2f02122f..77ca43185d6d 100644
---- a/osfmk/arm/io_map.c
-+++ b/osfmk/arm/io_map.c
-@@ -62,7 +62,12 @@
- 
- extern vm_offset_t virtual_space_start;     /* Next available kernel VA */
- 
--#define IO_MAP_SIZE            (8ul << 20)
-+/*
-+ * HakiOS: 128 MB, not 8 -- every ml_io_map() of a driver's registers is a permanent mapping in this submap, and the OnePlus 6T's drivers
-+ * (the modem's 2 MB of the GCC, the touch screen's pin controller, the GPU, Wi-Fi, the IPA, the audio DSP, Bluetooth) ran out of
-+ * 8 MB: kmem_alloc(..., 16384, KMEM_PERMANENT | KMEM_PAGEABLE | KMEM_NOFAIL) "failed with 3", a panic (runs 82, 96)
-+ */
-+#define IO_MAP_SIZE            (128ul << 20)
- 
- __startup_data static struct mach_vm_range io_range;
- static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;

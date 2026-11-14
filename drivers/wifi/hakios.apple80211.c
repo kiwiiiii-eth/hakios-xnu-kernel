@@ -325,6 +325,20 @@ get(struct apple80211req *request)
 		}
 		return give(request, bits, sizeof(bits));
 	}
+	case 106: {                             /* RSSI_BOUNDS: the weakest and strongest it reports, and auto-join's floor */
+		/*
+		 * wifid reads this once, as the interface is bound (Apple80211CopyValue: RSSI_MIN, RSSI_MAX, RSSI_THRESHOLD; "Device
+		 * RSSI bounds (%ld, %ld) with treshold (%ld)"), and auto-join turns away every network weaker than the threshold.
+		 * Refused, all three stayed 0: r159 and r160 found the known networks (-62 to -74 dBm) and joined none of them, each
+		 * "Below minimum RSSI threshold". -80 dBm is a phone's usual floor; the three differ so that the log shows their order.
+		 */
+		struct {
+			uint32_t version;
+			int32_t minimum, maximum, threshold;
+		} answer = { .version = 1, .minimum = -90, .maximum = -20, .threshold = -80 };
+
+		return give(request, &answer, sizeof(answer));
+	}
 	case 19: {                              /* the radio's power: one radio */
 		/*
 		 * Off until the driver is up (wifi_power_early=1: on, as it was). Counted as on before, wifid ran its auto-join at

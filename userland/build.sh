@@ -223,6 +223,22 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -o obj/cputop src/cputop.c
 		# what works behind the screen (widgets' extensions, the daemons behind them) to the background (src/quietboot.c)
 		$DYN -o obj/quietboot src/quietboot.c
+		# the sockets of named processes, as lsof -i would show them (src/socks.c): libproc's structures from the macOS SDK
+		MACSDK=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || echo /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk)
+		if [ -f "$MACSDK/usr/include/sys/proc_info.h" ]; then
+			mkdir -p obj/macinc/sys obj/macinc/net
+			install -m 644 "$MACSDK"/usr/include/sys/proc_info.h "$MACSDK"/usr/include/sys/kern_control.h obj/macinc/sys/
+			install -m 644 "$MACSDK"/usr/include/net/route.h obj/macinc/net/
+			$DYN -idirafter obj/macinc -o obj/socks src/socks.c
+		fi
+		# where a process's threads are, from outside it (src/stacks.c), signed for task_for_pid
+		$DYN -o obj/stacks src/stacks.c &&
+			{ ${LDID:-ldid} -Ssrc/stacks.entitlements obj/stacks 2>/dev/null ||
+			  echo "build.sh: no ldid: stacks is unsigned, and gets no task port"; }
+		# what logd kept, read on the phone through LoggingSupport (src/logdump.m), signed to read the system's store
+		$DYN -fobjc-arc -framework Foundation -o obj/logdump src/logdump.m &&
+			{ ${LDID:-ldid} -Ssrc/logdump.entitlements obj/logdump 2>/dev/null ||
+			  echo "build.sh: no ldid: logdump is unsigned, and logd will not let it read"; }
 		# the modem's positions to locationd, as Xcode's simulated ones (src/gnssfeed.m; the kernel's gnss=1), signed with the
 		# entitlement CLSimulationManager wants if ldid is there
 		$DYN -fobjc-arc -framework Foundation -framework CoreLocation -o obj/gnssfeed src/gnssfeed.m &&
@@ -374,6 +390,9 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
 	[ -f obj/cputop ] && cp obj/cputop root/bin/
 	[ -f obj/quietboot ] && cp obj/quietboot root/bin/
+	[ -f obj/socks ] && cp obj/socks root/bin/
+	[ -f obj/logdump ] && cp obj/logdump root/bin/
+	[ -f obj/stacks ] && cp obj/stacks root/bin/
 	[ -f obj/gnssfeed ] && cp obj/gnssfeed root/bin/
 	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
 	[ -f obj/cg_test ] && cp obj/cg_test root/bin/

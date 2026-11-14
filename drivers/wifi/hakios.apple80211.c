@@ -34,6 +34,7 @@
 #include <kern/kalloc.h>
 #include <kern/locks.h>
 #include <libkern/libkern.h>
+#include <pexpert/pexpert.h>
 #include <sys/errno.h>
 #include <sys/kern_event.h>
 #include <sys/kernel.h>
@@ -314,11 +315,21 @@ get(struct apple80211req *request)
 		}
 		return give(request, bits, sizeof(bits));
 	}
-	case 19: {                              /* the radio's power: one radio. Until the driver is up it counts as on: it */
-		struct {                        /* is being brought up, and Darwin asks this once, early */
+	case 19: {                              /* the radio's power: one radio */
+		/*
+		 * Off until the driver is up (wifi_power_early=1: on, as it was). Counted as on before, wifid ran its auto-join at
+		 * once, found no channels yet and gave up (the 6T, r157: nine "FAILED to get supported channels" before the radio's
+		 * interface was there, none after); and the power event when the radio did come up changed nothing in its eyes, so
+		 * a network joined in an earlier boot was never joined again. Off, then on with that event: wifid sees the radio
+		 * power up, as an iPhone's does, and joins what it knows.
+		 */
+		struct {
 			uint32_t version, radios, state[4];
-		} answer = { .version = 1, .radios = 1, .state = { !hakios_sta_present() || hakios_sta_powered() } };
+		} answer = { .version = 1, .radios = 1 };
+		uint32_t early = 0;
 
+		(void)PE_parse_boot_argn("wifi_power_early", &early, sizeof(early));
+		answer.state[0] = hakios_sta_present() ? hakios_sta_powered() : early != 0;
 		return give(request, &answer, sizeof(answer));
 	}
 	case 15:                                /* the mode: a station (APPLE80211_M_STA) */

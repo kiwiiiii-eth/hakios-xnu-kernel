@@ -206,7 +206,8 @@ import sys
 # answer instead of a broken pipe -- Code=-8 "Device is not activated: Unactivated". That is as far as it
 # can go here: the daemon says "Failed to bump UIK: 0xe00002c7" because the activation chain wants a
 # Secure Enclave this phone has not got. It does NOT unblock the store: with it in, the bag is still
-# never fetched. It is worth keeping for the answer, not for the store.
+# never fetched. It is worth keeping for the answer, not for the store. (Back in the tuple on the 6T, where it traps at
+# every start and the requests it never answers hang apsd, amsaccountsd and Safari behind them: see the end of DENY.)
 # (nsurlsessiond is not among them either, for all that it belongs to the same family of Apple's own
 # services: it is the daemon that carries out background URLSession downloads,
 # and without it an application's download never starts and never fails -- Sileo sits on "Queued"
@@ -222,7 +223,14 @@ DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'loca
         # these start, crash and are asked for again, over and over. (aggregated, which was among them, is where
         # Darwin userland 16 keeps its power log -- com.apple.powerlog.plxpclogger.xpc and the rest -- that Settings > Battery
         # waits for; it now runs through a session.)
-        'homed', 'routined', 'duetexpertd', 'com.apple.dmd', 'syncdefaultsd', 'photoanalysisd', 'avconferenced')
+        'homed', 'routined', 'duetexpertd', 'com.apple.dmd', 'syncdefaultsd', 'photoanalysisd', 'avconferenced',
+        # on the 6T mobileactivationd traps (SIGTRAP) a moment after it starts, every time (r158: "crashed 95 times in a
+        # row"), and a request sent to it is handed to each new instance and never answered. apsd asks it while starting
+        # (MobileActivation, a synchronous XPC call from its main thread), amsaccountsd asks apsd while starting, and Safari's
+        # main thread waits on AppleMediaServices behind a dispatch_sync: Safari's pages loaded and were drawn, and the
+        # application never heard of it (r157). Denied, every one of them gets its error at once (r158: booted out by hand,
+        # Safari finished example.com in 0.4 s). ALLOW=mobileactivationd brings it back, for the day it stops trapping.
+        'mobileactivationd')
 
 # ALLOW="word ..." in the environment lets jobs through that DENY would stop: for trying one out
 DENY = tuple(word for word in DENY if word not in os.environ.get('ALLOW', '').split())

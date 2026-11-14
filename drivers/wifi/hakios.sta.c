@@ -235,8 +235,14 @@ hakios_sta_ask_power(bool on)
 {
 	lck_mtx_lock(&sta_lock);
 	if (sta_ops == NULL) {
+		/*
+		 * Before the radio is there, wifid asks for it to be powered at once (r158: "Unable to set power state (OFF) to ON
+		 * (err = -3903)", ENXIO here) and gives up its auto-join for good. Taken as said instead, as an iPhone's driver takes
+		 * it: the radio comes up powered (hakios_sta_attach), and the power event it posts then is the one wifid waits for.
+		 */
+		sta_on = on;
 		lck_mtx_unlock(&sta_lock);
-		return ENXIO;
+		return 0;
 	}
 	sta_on = on;
 	asked_power = true;
@@ -353,6 +359,15 @@ hakios_sta_channels(struct hakios_sta_channel *out, unsigned most)
 	unsigned count;
 
 	lck_mtx_lock(&sta_lock);
+	/*
+	 * Asked of the radio again every time, not only when it attached: the 6T's (ath10k through lx) had every channel
+	 * disabled at that moment, its regulatory domain not yet applied, and the count stayed 0 for good -- Apple80211's
+	 * SUPPORTED_CHANNELS answered ENXIO, and wifid's auto-join gave up at once ("WiFiDeviceManagerStartAutoJoinAndReply:
+	 * FAILED to get supported channels (err=-3903)", r156): a network joined before was never joined again by itself.
+	 */
+	if (sta_ops != NULL && sta_ops->channels != NULL) {
+		channel_count = sta_ops->channels(channels, CHANNELS_MOST);
+	}
 	count = channel_count < most ? channel_count : most;
 	memcpy(out, channels, count * sizeof(*out));
 	lck_mtx_unlock(&sta_lock);

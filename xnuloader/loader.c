@@ -4794,6 +4794,23 @@ efi_main(efi_handle image, efi_system_table *st)
 			run_kernel(0, 0);
 		}
 	}
+	if (PLAT == &platform_fajita && have_payload && !pi.usb_mode) {
+		/*
+		 * The end of a boot with no host (a one-shot payload: from `fastboot boot`, or the phone's own boot partition), or
+		 * no system image to boot: NOT back to U-Boot, whose fastboot after a kernel has run enumerates and then answers
+		 * nothing (one-shot test, 11-15: "could not clear input pipe"; the phone needed its buttons). The loader's own
+		 * reset instead, as `fastboot reboot` to the loader does after every run: EFI's ResetSystem, which this U-Boot
+		 * turns into a reset into ABL's fastboot (the PMIC's reboot reason), where a host can take the phone back.
+		 */
+		uint64_t n = log_len;
+
+		print("\n== LOADER LOG (all of it) ==\n");
+		for (uint64_t i = 0; i < n; i++) {
+			put_char(log_buf[i]);
+		}
+		print("\n== END OF LOADER LOG ==\nloader: the run is over: a reset into ABL's fastboot\n");
+		reboot();
+	}
 	if (PLAT == &platform_fajita) {
 		/* back to U-Boot (its fastboot): a reset would land in the phone's other boot slot */
 		uint64_t n = log_len;

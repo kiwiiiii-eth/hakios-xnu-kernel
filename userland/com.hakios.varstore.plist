@@ -13,7 +13,11 @@
 	<array>
 		<string>/redwood/bin/varsaver</string>
 	</array>
-	<!-- a save takes 50-60 s on the 6T: launchd waits this long after SIGTERM before it kills -->
+	<!-- At a system shutdown launchd sends SIGKILL, not SIGTERM, to a job that has no transaction open (r163:
+	     "signaled service: Killed: 9", nothing saved). varsaver keeps one open for as long as it runs
+	     (xpc_transaction_begin), so it is sent SIGTERM and waited for: a save takes 50-60 s on the 6T. -->
+	<key>EnableTransactions</key>
+	<true/>
 	<key>ExitTimeOut</key>
 	<integer>240</integer>
 	<key>RunAtLoad</key>

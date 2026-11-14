@@ -5,7 +5,8 @@
  * thing more: when the system itself goes down (Settings' Shut Down, Restart, launchctl reboot), launchd sends its jobs
  * SIGTERM before it calls reboot(), and var_store's own minimal libc has no signal handling. Here a SIGTERM is a
  * save, then the end. On a phone that boots by itself (no host to end the run) that is the only save there is, so
- * the plist gives launchd room to wait for it (ExitTimeOut: a save takes 50-60 s on the 6T).
+ * the plist gives launchd room to wait for it (ExitTimeOut: a save takes 50-60 s on the 6T), and a transaction is
+ * kept open, without which launchd sends SIGKILL at a shutdown instead of SIGTERM.
  *
  *   usage: varsaver [SECONDS]      SECONDS: also save of its own accord that often (default: never)
  *
@@ -21,6 +22,9 @@
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+/* libxpc's (in libSystem), which the iPhoneOS SDK here has no header for */
+void xpc_transaction_begin(void);
 
 #define VAR_SAVE_IDLE   1
 #define VAR_SAVE_WANTED 2
@@ -117,6 +121,11 @@ main(int argc, char **argv)
 	action.sa_handler = on_term;
 	sigemptyset(&action.sa_mask);
 	sigaction(SIGTERM, &action, NULL);
+	/*
+	 * Open for as long as this runs: launchd SIGKILLs at shutdown a job (EnableTransactions) with none open, and only
+	 * one with a transaction open is sent SIGTERM and given its ExitTimeOut (r163: killed at once, nothing saved).
+	 */
+	xpc_transaction_begin();
 	if (state_set(VAR_SAVE_IDLE) != 0) {
 		printf("varsaver: this kernel does not keep the data volume (%s)\n", strerror(errno));
 		return 0;

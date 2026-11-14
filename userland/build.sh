@@ -129,8 +129,10 @@ DARWIN_JOBS=${JOBS-"
 [ "${WIFID-1}" != 0 ] && DARWIN_JOBS="$DARWIN_JOBS com.apple.wifid"
 # Bluetooth (BT=1, the kernel's drivers/bluetooth/hakios.bt3990.c with bt=4): bluetoothd, BlueTool (which src/inject_bt.c
 # turns into an answer that the controller is up), and what bluetoothd asks for on its way (HakiOS's MediaTek branch:
-# tccd, securityd; and wifid, above, without which its antenna vendor command stalls)
-[ -n "$BT" ] && DARWIN_JOBS="$DARWIN_JOBS com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.securityd com.apple.mobile.keybagd"
+# tccd, securityd; and wifid, above, without which its antenna vendor command stalls); and BTLEServer (com.apple.BTServer.le,
+# which DENY's "BTServer" keeps out of --rest): the HID-over-GATT side of a BLE keyboard -- without it the phone connected to
+# one, read its Device Information and its name, and stopped there: no HID service read, no pairing (6T r124)
+[ -n "$BT" ] && DARWIN_JOBS="$DARWIN_JOBS com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.securityd com.apple.mobile.keybagd com.apple.BTServer.le"
 # The programs (file names) started with a library of ours inside them: "LIBRARY NAME..." per line
 # (src/inject.c is libhakios.dylib, src/inject_sb.c is libhakios.sb.dylib, src/inject_media.c is
 # libhakios.media.dylib).

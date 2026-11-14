@@ -7639,6 +7639,8 @@ link_health(const char *why)
 #define LOC_EVENT_POSITION_REPORT       0x0024
 #define LOC_EVENT_NMEA                  0x0026
 #define LOC_SET_OPERATION_MODE          0x004a
+#define LOC_SET_NMEA_TYPES              0x003e
+#define LOC_NMEA_TYPES                  0x0001ffffu     /* GGA, RMC, GSV, GSA, VTG and their GLONASS, Galileo, BeiDou kinds */
 #define LOC_EVENTS_WANTED               0x185ull        /* position report 0x1, NMEA 0x4, engine state 0x80, fix session state 0x100 */
 
 static struct hakios_qrtr_port *gnss_port;
@@ -7782,7 +7784,7 @@ gnss_receive(__unused void *context, __unused uint32_t node, __unused uint32_t p
 		}
 		sentence = (const char *)v;
 		gnss_sentences++;
-		if (gnss_said_sentences++ < 8) {
+		if (gnss_said_sentences++ < 8 || (size >= 6 && sentence[1] != 'P' && gnss_said_sentences < 40)) {
 			printf("mpss: gnss: NMEA %.*s\n", (int)(size < 90 ? size : 90), sentence);
 		}
 		if (size >= 6 && sentence[3] == 'G' && sentence[4] == 'S' && sentence[5] == 'V' && gnss_field(sentence, size, 2) == 1 &&
@@ -7854,6 +7856,8 @@ gnss_advance(unsigned rounds)
 		const uint8_t revision[] = { 0x01, 4, 0, 2, 0, 0, 0 };
 		const uint8_t events[] = { 0x01, 8, 0, (uint8_t)LOC_EVENTS_WANTED, (uint8_t)(LOC_EVENTS_WANTED >> 8), 0, 0, 0, 0, 0, 0 };
 		const uint8_t standalone[] = { 0x01, 4, 0, 4, 0, 0, 0 };
+		/* (r142: by default the modem said only its own $PQWM1, never which satellites it saw) */
+		const uint8_t nmea[] = { 0x01, 4, 0, (uint8_t)LOC_NMEA_TYPES, (uint8_t)(LOC_NMEA_TYPES >> 8), (uint8_t)(LOC_NMEA_TYPES >> 16), 0 };
 		const uint8_t start[] = { 0x01, 1, 0, 1,                       /* session 1 */
 			                  0x10, 4, 0, 1, 0, 0, 0,               /* periodic */
 			                  0x12, 4, 0, 1, 0, 0, 0,               /* intermediate reports on */
@@ -7865,6 +7869,7 @@ gnss_advance(unsigned rounds)
 		gnss_send(LOC_INFORM_CLIENT_REVISION, revision, sizeof(revision));
 		gnss_send(LOC_REGISTER_EVENTS, events, sizeof(events));
 		gnss_send(LOC_SET_OPERATION_MODE, standalone, sizeof(standalone));
+		gnss_send(LOC_SET_NMEA_TYPES, nmea, sizeof(nmea));
 		gnss_send(LOC_START, start, sizeof(start));
 	}
 	if (gnss_started && rounds % 15 == 0) {

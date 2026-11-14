@@ -7652,6 +7652,26 @@ static volatile uint32_t gnss_in_view_gps, gnss_in_view_glonass, gnss_in_view_ga
 static volatile int64_t gnss_latitude, gnss_longitude;  /* millionths of a degree */
 static uint32_t gnss_said_reports, gnss_said_sentences, gnss_said_other;
 
+/*
+ * The last position for user space (userland/src/gnssfeed.m hands it to locationd): kern.hakios.gnss_*. A report's session
+ * status 0 is a fix of its own; 1 (in progress) carries what the modem had before it (r142: 22.990002, 119.349997, a point
+ * in the Taiwan Strait it remembered, 90 km from the phone), which gnssfeed takes only when told to (gnss_feed_any=1).
+ */
+static int gnss_sys_reports, gnss_sys_latitude_e6, gnss_sys_longitude_e6, gnss_sys_accuracy_m, gnss_sys_status = -1, gnss_sys_in_view;
+SYSCTL_DECL(_kern_hakios);
+SYSCTL_INT(_kern_hakios, OID_AUTO, gnss_reports, CTLFLAG_RD | CTLFLAG_LOCKED, &gnss_sys_reports, 0,
+    "position reports from the modem with a position in them");
+SYSCTL_INT(_kern_hakios, OID_AUTO, gnss_latitude_e6, CTLFLAG_RD | CTLFLAG_LOCKED, &gnss_sys_latitude_e6, 0,
+    "the last position's latitude, millionths of a degree");
+SYSCTL_INT(_kern_hakios, OID_AUTO, gnss_longitude_e6, CTLFLAG_RD | CTLFLAG_LOCKED, &gnss_sys_longitude_e6, 0,
+    "the last position's longitude, millionths of a degree");
+SYSCTL_INT(_kern_hakios, OID_AUTO, gnss_accuracy_m, CTLFLAG_RD | CTLFLAG_LOCKED, &gnss_sys_accuracy_m, 0,
+    "the last position's horizontal uncertainty, meters (0: not said)");
+SYSCTL_INT(_kern_hakios, OID_AUTO, gnss_status, CTLFLAG_RD | CTLFLAG_LOCKED, &gnss_sys_status, 0,
+    "the last report's session status: 0 a fix, 1 in progress, 2 failed, 3 timed out; -1 none yet");
+SYSCTL_INT(_kern_hakios, OID_AUTO, gnss_in_view, CTLFLAG_RD | CTLFLAG_LOCKED, &gnss_sys_in_view, 0,
+    "satellites in view, every system together (NMEA GSV)");
+
 static void
 gnss_server(__unused void *context, bool arrived, uint32_t service, __unused uint32_t version, __unused uint32_t instance,
     uint32_t node, uint32_t port)
@@ -7764,6 +7784,13 @@ gnss_receive(__unused void *context, __unused uint32_t node, __unused uint32_t p
 		if ((v = qmi_tlv(m, length, 0x12, &size)) != NULL && size >= 4) {
 			gnss_uncertainty = gnss_whole(v);
 		}
+		if (gnss_fixes != 0) {
+			gnss_sys_latitude_e6 = (int)gnss_latitude;
+			gnss_sys_longitude_e6 = (int)gnss_longitude;
+			gnss_sys_accuracy_m = (int)gnss_uncertainty;
+			gnss_sys_reports = (int)gnss_fixes;
+		}
+		gnss_sys_status = (int)gnss_status;
 		if (gnss_said_reports++ < 5 || (gnss_fixes == 1 && gnss_status == 0)) {
 			printf("mpss: gnss: a position report: session status %u (0 done, 1 in progress, 2 failed, 3 timed out)", gnss_status);
 			if (gnss_fixes != 0) {
@@ -7805,6 +7832,8 @@ gnss_receive(__unused void *context, __unused uint32_t node, __unused uint32_t p
 			gnss_quality = (uint32_t)(gnss_field(sentence, size, 6) < 0 ? 0 : gnss_field(sentence, size, 6));
 			gnss_used = (uint32_t)(gnss_field(sentence, size, 7) < 0 ? 0 : gnss_field(sentence, size, 7));
 		}
+		gnss_sys_in_view = (int)(gnss_in_view_gps + gnss_in_view_glonass + gnss_in_view_galileo + gnss_in_view_beidou +
+		    gnss_in_view_other);
 		return;
 	}
 	if (gnss_said_other++ < 12) {

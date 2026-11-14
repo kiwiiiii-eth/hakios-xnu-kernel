@@ -223,6 +223,11 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -o obj/cputop src/cputop.c
 		# what works behind the screen (widgets' extensions, the daemons behind them) to the background (src/quietboot.c)
 		$DYN -o obj/quietboot src/quietboot.c
+		# the modem's positions to locationd, as Xcode's simulated ones (src/gnssfeed.m; the kernel's gnss=1), signed with the
+		# entitlement CLSimulationManager wants if ldid is there
+		$DYN -fobjc-arc -framework Foundation -framework CoreLocation -o obj/gnssfeed src/gnssfeed.m &&
+			{ ${LDID:-ldid} -Ssrc/gnssfeed.entitlements obj/gnssfeed 2>/dev/null ||
+			  echo "build.sh: no ldid: gnssfeed is unsigned, and locationd may not take its positions"; }
 		$DYN -framework CoreFoundation -framework IOSurface -o obj/cow_test src/cow_test.c
 		$DYN -framework CoreFoundation -framework CoreGraphics -framework IOSurface -o obj/cg_test src/cg_test.c
 		# what Darwin here believes about Metal, and what CoreImage does without it (src/metal_test.m);
@@ -369,6 +374,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
 	[ -f obj/cputop ] && cp obj/cputop root/bin/
 	[ -f obj/quietboot ] && cp obj/quietboot root/bin/
+	[ -f obj/gnssfeed ] && cp obj/gnssfeed root/bin/
 	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
 	[ -f obj/cg_test ] && cp obj/cg_test root/bin/
 	[ -f obj/shm_test ] && cp obj/shm_test root/bin/

@@ -5526,6 +5526,10 @@ mic_bus_up(void)
 	if (!mic_slimbus_power(true)) {
 		return false;
 	}
+	/* (mapped here: the steps before that mapped them on their way -- 22's reads -- are not run for Darwin's recording, r122's panic) */
+	need(&mic_ngd);
+	need(&mic_bam_top);
+	need(&mic_bam_pipes);
 	for (unsigned i = 0; i < 3; i++) {
 		mic_pins_old[i] = get(&mic_pins[2 + i].page, "control", 0);
 		if (((mic_pins_old[i] >> 2) & 0xf) != 1) {

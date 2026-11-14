@@ -2,13 +2,13 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **429 arguments**: 357 read by the kernel, 14 by the loader, 69 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **431 arguments**: 358 read by the kernel, 14 by the loader, 70 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (79)
+## GPU and display (80)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -46,6 +46,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `glcopy` | U | `eagl.c` | `CONFIG_GLCOPY` |  |
 | `glenv` | U | `eagl.c` | `CONFIG_GLENV` |  |
 | `glfetch` | U | `eagl.c` | `CONFIG_GLFETCH` |  |
+| `glfill` | U | `eagl.c` | `CONFIG_GLFILL` |  |
 | `glframes` | U | `eagl.c` | `CONFIG_GLFRAMES` |  |
 | `glgroup` | U | `eagl.c` | `CONFIG_GLGROUP` |  |
 | `glnumbers` | U | `eagl.c` | `CONFIG_GLNUMBERS` |  |
@@ -420,7 +421,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (87)
+## User space (88)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -458,6 +459,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `glno` | U | `inject.c` | `CONFIG_GLNO` |  |
 | `glsb3` | U | `inject.c` | `CONFIG_GLSB3` |  |
 | `glyes` | U | `inject.c` | `CONFIG_GLYES` |  |
+| `gnss` | K | `hakios.mpss845.c` | `CONFIG_GNSS` |  |
 | `gpu_dvfs` | K | `hakios.a630.c` | `CONFIG_GPU_DVFS` |  |
 | `haptic_ms` | K | `hakios.haptic8998.c` | `CONFIG_HAPTIC_MS` |  |
 | `haptic_strength` | K | `hakios.haptic8998.c` | `CONFIG_HAPTIC_STRENGTH` |  |

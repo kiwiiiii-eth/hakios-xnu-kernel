@@ -40,6 +40,22 @@ struct proc_taskinfo {
 	int32_t pti_numrunning;
 	int32_t pti_priority;
 };
+/* a thread's, for the kernel's own (pid 0): times in nanoseconds */
+#define PROC_PIDTHREADINFO      5
+#define PROC_PIDLISTTHREADS     6
+struct proc_threadinfo {
+	uint64_t pth_user_time;
+	uint64_t pth_system_time;
+	int32_t pth_cpu_usage;
+	int32_t pth_policy;
+	int32_t pth_run_state;
+	int32_t pth_flags;
+	int32_t pth_sleep_time;
+	int32_t pth_curpri;
+	int32_t pth_priority;
+	int32_t pth_maxpriority;
+	char pth_name[64];
+};
 int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
 int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize);
 int proc_name(int pid, void *buffer, uint32_t buffersize);
@@ -66,6 +82,78 @@ by_time(const void *a, const void *b)
 	const struct share *x = a, *y = b;
 
 	return x->time < y->time ? 1 : x->time > y->time ? -1 : 0;
+}
+
+/*
+ * The kernel's own threads, which no process's time holds (kernel_task, pid 0): the busiest of them since the last look, by
+ * name where a thread has one and by its id where not, with its priority. On the 6T the cores were 60-80% busy with the
+ * processes at 15% (r139, after the gestures): this says which of the kernel's threads that was.
+ */
+#define MAX_THREADS     2048
+static struct { uint64_t id, ns; } kernel_last[MAX_THREADS], kernel_now[MAX_THREADS];
+static int kernel_last_count;
+
+static void
+kernel_threads(double span_ns)
+{
+	static uint64_t ids[MAX_THREADS];
+	struct { uint64_t id, ns; int pri; char name[64]; } top[5];
+	int bytes = proc_pidinfo(0, PROC_PIDLISTTHREADS, 0, ids, sizeof(ids)), count = 0, kept = 0;
+
+	memset(top, 0, sizeof(top));
+	for (int i = 0; i < (bytes > 0 ? bytes / (int)sizeof(uint64_t) : 0) && count < MAX_THREADS; i++) {
+		struct proc_threadinfo info;
+		uint64_t ns, then = 0;
+
+		if (proc_pidinfo(0, PROC_PIDTHREADINFO, ids[i], &info, sizeof(info)) != sizeof(info)) {
+			continue;
+		}
+		ns = info.pth_user_time + info.pth_system_time;
+		kernel_now[count].id = ids[i];
+		kernel_now[count].ns = ns;
+		count++;
+		for (int k = 0; k < kernel_last_count; k++) {
+			if (kernel_last[k].id == ids[i]) {
+				then = kernel_last[k].ns;
+				break;
+			}
+		}
+		if (ns <= then || span_ns <= 0) {
+			continue;
+		}
+		/* into the five busiest, the busiest first */
+		for (int t = 0; t < 5; t++) {
+			if (ns - then > top[t].ns) {
+				memmove(&top[t + 1], &top[t], sizeof(top[0]) * (size_t)(4 - t));
+				top[t].id = ids[i];
+				top[t].ns = ns - then;
+				top[t].pri = info.pth_curpri;
+				memcpy(top[t].name, info.pth_name, sizeof(top[t].name));
+				top[t].name[sizeof(top[t].name) - 1] = 0;
+				break;
+			}
+		}
+	}
+	memcpy(kernel_last, kernel_now, sizeof(kernel_now[0]) * (size_t)count);
+	kernel_last_count = count;
+	for (int t = 0; t < 5; t++) {
+		double percent = span_ns > 0 ? 100.0 * (double)top[t].ns / span_ns : 0;
+
+		if (percent < 2) {
+			break;
+		}
+		if (kept++ == 0) {
+			printf("cputop: the kernel's busiest threads:");
+		}
+		if (top[t].name[0] != 0) {
+			printf(" %s/%d %.0f%%", top[t].name, top[t].pri, percent);
+		} else {
+			printf(" %#llx/%d %.0f%%", (unsigned long long)top[t].id, top[t].pri, percent);
+		}
+	}
+	if (kept > 0) {
+		printf("\n");
+	}
 }
 
 static uint64_t
@@ -102,7 +190,8 @@ main(int argc, char **argv)
 		for (int i = 0; i < bytes / (int)sizeof(int) && count < MAX_PROCS; i++) {
 			struct proc_taskinfo info;
 
-			if (pids[i] <= 0 || proc_pidinfo(pids[i], PROC_PIDTASKINFO, 0, &info, sizeof(info)) != sizeof(info)) {
+			/* (pid 0 too: the kernel's own threads, kernel_task) */
+			if (pids[i] < 0 || proc_pidinfo(pids[i], PROC_PIDTASKINFO, 0, &info, sizeof(info)) != sizeof(info)) {
 				continue;
 			}
 			now[count].pid = pids[i];
@@ -135,11 +224,16 @@ main(int argc, char **argv)
 				if (percent < 1) {
 					break;
 				}
-				proc_name(shares[i].pid, name, sizeof(name));
+				if (proc_name(shares[i].pid, name, sizeof(name)) <= 0 && shares[i].pid == 0) {
+					strlcpy(name, "kernel_task", sizeof(name));
+				}
 				printf(" %s[%d] %.0f%%", name, shares[i].pid, percent);
 				shown++;
 			}
 			printf("\n");
+			kernel_threads(span * (double)timebase.numer / (double)timebase.denom);
+		} else {
+			kernel_threads(0);
 		}
 		memcpy(last, now, sizeof(now[0]) * (size_t)count);
 		last_count = count;

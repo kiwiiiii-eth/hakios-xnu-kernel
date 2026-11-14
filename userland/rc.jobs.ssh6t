@@ -5,6 +5,8 @@
 # rc.jobs.ssh there are no taps: the 6T's touch is not the reference phone's, and nothing here needs the screen.
 # sshd is started at once and listens on every interface, so it answers as soon as an address is there; the
 # address is said in the log every few minutes (net_test show) for whoever reads it there.
+# the widgets' extensions and the daemons behind them in the background, so that the screen has the processors (src/quietboot.c)
+/redwood/bin/quietboot &
 /var/jb/usr/sbin/sshd -D -e -h /var/root/.ssh/ssh_host_ed25519_key -o UsePAM=no -o PasswordAuthentication=no -o PermitRootLogin=prohibit-password -o AuthorizedKeysFile=/var/root/.ssh/authorized_keys &
 /var/jb/usr/bin/sleep 60
 /redwood/bin/net_test show

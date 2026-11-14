@@ -150,6 +150,7 @@ glcompile	u
 glcopy	u
 glenv	u
 glfetch	u
+glfill	u
 glframes	u
 glgroup	u
 glno	u
@@ -179,6 +180,7 @@ gltrace_shaders	u
 gltrace_uniforms	u
 glwait	u
 glyes	u
+gnss	k
 gpu	k
 gpu_cached	k
 gpu_dvfs	k

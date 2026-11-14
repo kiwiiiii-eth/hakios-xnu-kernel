@@ -1,0 +1,25 @@
+# rc.jobs.smooth6t with its gestures 45 s after launchd instead of 210: in the first 90 s after SpringBoard, while every
+# widget's extension runs (r139), which is when a person first scrolls. (rc.jobs.storm6t-noq: the same without quietboot.)
+#
+# Commands run by the launchd job com.hakios.demo on the OnePlus 6T: the way in over Wi-Fi of rc.jobs.ssh6t, and then the
+# same gestures every run, made by rwtouch, for tools/frames.py to measure scrolling without a person (RC_JOBS=rc.jobs.smooth6t,
+# with touch_lat=1 cpuload=50 among the kernel's arguments). The home screen is not tapped: the applications are brought to the
+# front by inject_sb.c's notifications com.hakios.open.* (prefs, safari, notes), whatever the home screen looks like.
+#   home screen: six pages left and right       Settings: twelve flings, two slow drags, a zigzag
+#   Safari and Notes: opened, flung, closed      the home screen again: four pages
+# Each gesture is followed by a pause, so that frames.py sees it as a gesture of its own. A line of the job takes so many
+# words and no more (r137: the twelfth fling was cut off, "bad step"): the flings are two lines. The script starts some 3.5 minutes
+# after launchd (the lock screen is up by then and inject_sb.c has unlocked it) and takes about 2.5 minutes. cputop says every
+# 5 s who had the processors (r137: all cores 97-100% busy while the frames that came late waited for the application).
+/var/jb/usr/sbin/sshd -D -e -h /var/root/.ssh/ssh_host_ed25519_key -o UsePAM=no -o PasswordAuthentication=no -o PermitRootLogin=prohibit-password -o AuthorizedKeysFile=/var/root/.ssh/authorized_keys &
+/redwood/bin/cputop 5 90 &
+/var/jb/usr/bin/sleep 45
+/redwood/bin/rwtouch notify com.hakios.unlock wait 3 swipe 0.85 0.5 0.15 0.5 250 wait 1.5 swipe 0.85 0.5 0.15 0.5 250 wait 1.5 swipe 0.15 0.5 0.85 0.5 250 wait 1.5 swipe 0.15 0.5 0.85 0.5 250 wait 1.5 swipe 0.15 0.5 0.85 0.5 250 wait 1.5 swipe 0.85 0.5 0.15 0.5 250 wait 2
+/redwood/bin/rwtouch notify com.hakios.open.prefs wait 5 swipe 0.5 0.8 0.5 0.25 200 wait 1.2 swipe 0.5 0.8 0.5 0.25 200 wait 1.2 swipe 0.5 0.8 0.5 0.25 200 wait 1.2 swipe 0.5 0.8 0.5 0.25 200 wait 1.2 swipe 0.5 0.8 0.5 0.25 200 wait 1.2 swipe 0.5 0.8 0.5 0.25 200 wait 1.2
+/redwood/bin/rwtouch swipe 0.5 0.25 0.5 0.8 200 wait 1.2 swipe 0.5 0.25 0.5 0.8 200 wait 1.2 swipe 0.5 0.25 0.5 0.8 200 wait 1.2 swipe 0.5 0.25 0.5 0.8 200 wait 1.2 swipe 0.5 0.25 0.5 0.8 200 wait 1.2 swipe 0.5 0.25 0.5 0.8 200 wait 1.5
+/redwood/bin/rwtouch drag 0.5 0.8 0.5 0.3 1200 100 wait 1.2 drag 0.5 0.3 0.5 0.8 1200 100 wait 1.2 zigzag 0.5 0.75 0.4 400 6 wait 1.5 button home wait 3
+/redwood/bin/rwtouch notify com.hakios.open.safari wait 6 swipe 0.5 0.75 0.5 0.3 200 wait 1.2 swipe 0.5 0.75 0.5 0.3 200 wait 1.2 swipe 0.5 0.3 0.5 0.75 200 wait 1.2 swipe 0.5 0.3 0.5 0.75 200 wait 1.5 button home wait 3
+/redwood/bin/rwtouch notify com.hakios.open.notes wait 5 swipe 0.5 0.75 0.5 0.3 200 wait 1.2 swipe 0.5 0.3 0.5 0.75 200 wait 1.5 button home wait 3
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 250 wait 1.5 swipe 0.15 0.5 0.85 0.5 250 wait 1.5 swipe 0.15 0.5 0.85 0.5 250 wait 1.5 swipe 0.85 0.5 0.15 0.5 250 wait 2
+/redwood/bin/net_test show
+/var/jb/usr/bin/sleep 36000

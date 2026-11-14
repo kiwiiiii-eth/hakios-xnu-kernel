@@ -141,6 +141,7 @@ GLCOMPILE	arg	glcompile	User space	u	inject.c
 GLCOPY	arg	glcopy	GPU and display	u	eagl.c	
 GLENV	arg	glenv	GPU and display	u	eagl.c	
 GLFETCH	arg	glfetch	GPU and display	u	eagl.c	
+GLFILL	arg	glfill	GPU and display	u	eagl.c	
 GLFRAMES	arg	glframes	GPU and display	u	eagl.c	
 GLGROUP	arg	glgroup	GPU and display	u	eagl.c	
 GLNO	arg	glno	User space	u	inject.c	
@@ -170,6 +171,7 @@ GLTRACE_SHADERS	arg	gltrace_shaders	GPU and display	u	eagl.c	the text of the sha
 GLTRACE_UNIFORMS	arg	gltrace_uniforms	GPU and display	u	eagl.c	what the program of a traced draw was given, by the names its shaders use (coord_arg, texmat0, ...)
 GLWAIT	arg	glwait	GPU and display	u	eagl.c	
 GLYES	arg	glyes	User space	u	inject.c	the renderer is made to answer that it has those functions after all
+GNSS	arg	gnss	User space	k	hakios.mpss845.c	
 GPU_CACHED	arg	gpu_cached	GPU and display	k	hakios.gpu.cpp	
 GPU_DVFS	arg	gpu_dvfs	User space	k	hakios.a630.c	
 GPU_EXACT	arg	gpu_exact	GPU and display	k	hakios.a630.c,hakios.adreno.c	

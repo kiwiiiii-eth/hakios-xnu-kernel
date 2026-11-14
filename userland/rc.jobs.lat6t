@@ -1,0 +1,12 @@
+# How far behind the finger the screen is, on the OnePlus 6T, without a person (RC_JOBS=rc.jobs.lat6t; tools/latency.py): Settings
+# brought to the front, then a zigzag of rwtouch -- the finger up and down over its list ten times without letting go -- and then
+# nothing more, so that a screen recording that goes round (kernel arguments touch_lat=1 rec_secs=900 rec_ring=1 rec_step=6
+# rec_mb=256) holds the zigzag's frames at the end of the run. After it: fastboot oem recording; fastboot get_staged REC.raw;
+# tools/latency.py LOG... REC.raw. The way in over Wi-Fi and quietboot as in rc.jobs.ssh6t.
+# the widgets' extensions and the daemons behind them in the background, so that the screen has the processors (src/quietboot.c)
+/redwood/bin/quietboot &
+/var/jb/usr/sbin/sshd -D -e -h /var/root/.ssh/ssh_host_ed25519_key -o UsePAM=no -o PasswordAuthentication=no -o PermitRootLogin=prohibit-password -o AuthorizedKeysFile=/var/root/.ssh/authorized_keys &
+/var/jb/usr/bin/sleep 210
+/redwood/bin/rwtouch notify com.hakios.unlock wait 2 notify com.hakios.open.prefs wait 6 zigzag 0.5 0.75 0.4 400 10 wait 1
+/redwood/bin/net_test show
+/var/jb/usr/bin/sleep 36000

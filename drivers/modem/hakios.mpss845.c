@@ -7622,6 +7622,283 @@ link_health(const char *why)
 	}
 }
 
+/*
+ * ---- GNSS: the modem's location service (QMI LOC, service 16), gnss=1 (11-14) ------------------------------------------------
+ * The SDM845's GPS is the modem's: Android's location HAL asks it over QMI LOC. Here, once the modem's LOC server is there: the
+ * client's revision (2), the events wanted (position reports, NMEA, the engine's and the fix session's state), standalone
+ * operation (no network assistance: there is none here), and a periodic session of one fix a second with intermediate reports.
+ * What comes back is said in the log: the first reports and NMEA sentences as they come, then every 30 s the last position and
+ * how many satellites each system has in view (NMEA GSV) and how many the fix uses (GGA). Read only, toward iOS: nothing is
+ * handed to locationd yet. Message ids and TLVs as Linux's userspace has them (libqmi's qmi-service-loc.json).
+ */
+#define QMI_LOC                         16
+#define LOC_INFORM_CLIENT_REVISION      0x0020
+#define LOC_REGISTER_EVENTS             0x0021
+#define LOC_START                       0x0022
+#define LOC_STOP                        0x0023
+#define LOC_EVENT_POSITION_REPORT       0x0024
+#define LOC_EVENT_NMEA                  0x0026
+#define LOC_SET_OPERATION_MODE          0x004a
+#define LOC_EVENTS_WANTED               0x185ull        /* position report 0x1, NMEA 0x4, engine state 0x80, fix session state 0x100 */
+
+static struct hakios_qrtr_port *gnss_port;
+static volatile uint32_t gnss_node, gnss_port_number;
+static volatile bool gnss_started;
+static uint16_t gnss_transaction = 0x60;
+static volatile uint32_t gnss_reports, gnss_fixes, gnss_sentences, gnss_status, gnss_uncertainty, gnss_used, gnss_quality;
+static volatile uint32_t gnss_in_view_gps, gnss_in_view_glonass, gnss_in_view_galileo, gnss_in_view_beidou, gnss_in_view_other;
+static volatile int64_t gnss_latitude, gnss_longitude;  /* millionths of a degree */
+static uint32_t gnss_said_reports, gnss_said_sentences, gnss_said_other;
+
+static void
+gnss_server(__unused void *context, bool arrived, uint32_t service, __unused uint32_t version, __unused uint32_t instance,
+    uint32_t node, uint32_t port)
+{
+	if (service != QMI_LOC) {
+		return;
+	}
+	if (arrived) {
+		gnss_node = node;
+		gnss_port_number = port;
+		printf("mpss: gnss: the modem's location service is at node %u port %u\n", node, port);
+	} else if (node == gnss_node && port == gnss_port_number) {
+		gnss_node = gnss_port_number = 0;
+	}
+}
+
+/* An IEEE double (as it comes, little-endian) in millionths, without the processor's floating point (the kernel uses none) */
+static int64_t
+gnss_millionths(const uint8_t *v)
+{
+	uint64_t bits = (uint64_t)le32(v) | (uint64_t)le32(v + 4) << 32;
+	uint64_t mantissa = (bits & ((1ull << 52) - 1)) | 1ull << 52;
+	int exponent = (int)((bits >> 52) & 0x7ff), shift = 1075 - exponent;
+	int64_t r;
+
+	/* the value is mantissa * 2^-shift; a degree has shift 52 at least, so 10 of the mantissa's 53 bits can go first */
+	if (exponent == 0 || shift < 10 || shift - 10 >= 64) {
+		return 0;
+	}
+	r = (int64_t)(((mantissa >> 10) * 1000000ull) >> (shift - 10));
+	return (bits >> 63) ? -r : r;
+}
+
+/* An IEEE float in whole units */
+static uint32_t
+gnss_whole(const uint8_t *v)
+{
+	uint32_t bits = le32(v);
+	int exponent = (int)((bits >> 23) & 0xff), shift = 150 - exponent;
+	uint64_t mantissa = (bits & 0x7fffff) | 0x800000;
+
+	if (exponent == 0 || (bits >> 31)) {
+		return 0;
+	}
+	return shift >= 64 ? 0 : shift > 0 ? (uint32_t)(mantissa >> shift) : (uint32_t)(mantissa << (shift < -8 ? 8 : -shift));
+}
+
+/* field N (0: the sentence's name) of an NMEA sentence, as a number; -1 if it is not there or empty */
+static int
+gnss_field(const char *sentence, size_t length, unsigned n)
+{
+	unsigned field = 0;
+	int value = -1;
+
+	for (size_t i = 0; i < length && sentence[i] != 0 && sentence[i] != '*'; i++) {
+		if (sentence[i] == ',') {
+			if (field == n) {
+				break;
+			}
+			field++;
+			value = -1;
+			continue;
+		}
+		if (field == n && sentence[i] >= '0' && sentence[i] <= '9') {
+			value = (value < 0 ? 0 : value * 10) + (sentence[i] - '0');
+		}
+	}
+	return field == n ? value : -1;
+}
+
+static void
+gnss_print_degrees(const char *what, int64_t millionths)
+{
+	uint64_t magnitude = millionths < 0 ? (uint64_t)-millionths : (uint64_t)millionths;
+
+	printf(" %s %s%llu.%06llu", what, millionths < 0 ? "-" : "", magnitude / 1000000, magnitude % 1000000);
+}
+
+static void
+gnss_receive(__unused void *context, __unused uint32_t node, __unused uint32_t port, const void *data, size_t length)
+{
+	const uint8_t *m = data, *v;
+	uint16_t message, size = 0;
+
+	if (length < 7) {
+		return;
+	}
+	message = (uint16_t)(m[3] | m[4] << 8);
+	if (m[0] == 2) {                /* a response */
+		v = qmi_tlv(m, length, 0x02, &size);
+		printf("mpss: gnss: the answer to %#x: result %u, error %u\n", message, v != NULL && size >= 4 ? (v[0] | v[1] << 8) : 0xffff,
+		    v != NULL && size >= 4 ? (v[2] | v[3] << 8) : 0xffff);
+		return;
+	}
+	if (m[0] != 4) {
+		return;
+	}
+	if (message == LOC_EVENT_POSITION_REPORT) {
+		gnss_reports++;
+		if ((v = qmi_tlv(m, length, 0x01, &size)) != NULL && size >= 4) {
+			gnss_status = le32(v);
+		}
+		if ((v = qmi_tlv(m, length, 0x10, &size)) != NULL && size >= 8) {
+			gnss_latitude = gnss_millionths(v);
+			if ((v = qmi_tlv(m, length, 0x11, &size)) != NULL && size >= 8) {
+				gnss_longitude = gnss_millionths(v);
+				gnss_fixes++;
+			}
+		}
+		if ((v = qmi_tlv(m, length, 0x12, &size)) != NULL && size >= 4) {
+			gnss_uncertainty = gnss_whole(v);
+		}
+		if (gnss_said_reports++ < 5 || (gnss_fixes == 1 && gnss_status == 0)) {
+			printf("mpss: gnss: a position report: session status %u (0 done, 1 in progress, 2 failed, 3 timed out)", gnss_status);
+			if (gnss_fixes != 0) {
+				gnss_print_degrees("latitude", gnss_latitude);
+				gnss_print_degrees("longitude", gnss_longitude);
+				printf(", within %u m", gnss_uncertainty);
+			}
+			printf("\n");
+		}
+		return;
+	}
+	if (message == LOC_EVENT_NMEA) {
+		const char *sentence;
+		int count;
+
+		if ((v = qmi_tlv(m, length, 0x01, &size)) == NULL || size < 7) {
+			return;
+		}
+		sentence = (const char *)v;
+		gnss_sentences++;
+		if (gnss_said_sentences++ < 8) {
+			printf("mpss: gnss: NMEA %.*s\n", (int)(size < 90 ? size : 90), sentence);
+		}
+		if (size >= 6 && sentence[3] == 'G' && sentence[4] == 'S' && sentence[5] == 'V' && gnss_field(sentence, size, 2) == 1 &&
+		    (count = gnss_field(sentence, size, 3)) >= 0) {
+			if (sentence[1] == 'G' && sentence[2] == 'P') {
+				gnss_in_view_gps = (uint32_t)count;
+			} else if (sentence[1] == 'G' && sentence[2] == 'L') {
+				gnss_in_view_glonass = (uint32_t)count;
+			} else if (sentence[1] == 'G' && sentence[2] == 'A') {
+				gnss_in_view_galileo = (uint32_t)count;
+			} else if ((sentence[1] == 'B' && sentence[2] == 'D') || (sentence[1] == 'G' && sentence[2] == 'B') ||
+			    (sentence[1] == 'P' && sentence[2] == 'Q')) {
+				gnss_in_view_beidou = (uint32_t)count;
+			} else {
+				gnss_in_view_other = (uint32_t)count;
+			}
+		} else if (size >= 6 && sentence[3] == 'G' && sentence[4] == 'G' && sentence[5] == 'A') {
+			gnss_quality = (uint32_t)(gnss_field(sentence, size, 6) < 0 ? 0 : gnss_field(sentence, size, 6));
+			gnss_used = (uint32_t)(gnss_field(sentence, size, 7) < 0 ? 0 : gnss_field(sentence, size, 7));
+		}
+		return;
+	}
+	if (gnss_said_other++ < 12) {
+		printf("mpss: gnss: indication %#x, %u bytes\n", message, (unsigned)length);
+	}
+}
+
+/* A request to the location service: TLVs as they go */
+static void
+gnss_send(uint16_t message, const uint8_t *tlvs, uint16_t length)
+{
+	uint8_t m[64];
+
+	if (gnss_port == NULL || gnss_port_number == 0 || length > sizeof(m) - 7) {
+		return;
+	}
+	gnss_transaction++;
+	m[0] = 0;
+	m[1] = (uint8_t)gnss_transaction;
+	m[2] = (uint8_t)(gnss_transaction >> 8);
+	m[3] = (uint8_t)message;
+	m[4] = (uint8_t)(message >> 8);
+	m[5] = (uint8_t)length;
+	m[6] = (uint8_t)(length >> 8);
+	memcpy(m + 7, tlvs, length);
+	qrtr_send(gnss_port, gnss_node, gnss_port_number, m, 7u + length);
+}
+
+static void
+gnss_open(void)
+{
+	if (!option("gnss") || gnss_port != NULL) {
+		return;
+	}
+	gnss_port = qrtr_open(gnss_receive, gnss_server, NULL);
+	if (gnss_port == NULL || qrtr_lookup(gnss_port, QMI_LOC, 0, 0) != 0) {
+		printf("mpss: gnss: no port for the location service\n");
+	}
+}
+
+/* From the NAS thread, every two seconds: the session started once the service is there, and every 30 s what has come */
+static void
+gnss_advance(unsigned rounds)
+{
+	if (gnss_port == NULL) {
+		return;
+	}
+	if (!gnss_started && gnss_port_number != 0) {
+		const uint8_t revision[] = { 0x01, 4, 0, 2, 0, 0, 0 };
+		const uint8_t events[] = { 0x01, 8, 0, (uint8_t)LOC_EVENTS_WANTED, (uint8_t)(LOC_EVENTS_WANTED >> 8), 0, 0, 0, 0, 0, 0 };
+		const uint8_t standalone[] = { 0x01, 4, 0, 4, 0, 0, 0 };
+		const uint8_t start[] = { 0x01, 1, 0, 1,                       /* session 1 */
+			                  0x10, 4, 0, 1, 0, 0, 0,               /* periodic */
+			                  0x12, 4, 0, 1, 0, 0, 0,               /* intermediate reports on */
+			                  0x13, 4, 0, 0xe8, 0x03, 0, 0 };       /* a fix a second at most */
+
+		gnss_started = true;
+		printf("mpss: gnss: asking the modem for a position: client revision 2, events %#llx, standalone, a fix a second\n",
+		    LOC_EVENTS_WANTED);
+		gnss_send(LOC_INFORM_CLIENT_REVISION, revision, sizeof(revision));
+		gnss_send(LOC_REGISTER_EVENTS, events, sizeof(events));
+		gnss_send(LOC_SET_OPERATION_MODE, standalone, sizeof(standalone));
+		gnss_send(LOC_START, start, sizeof(start));
+	}
+	if (gnss_started && rounds % 15 == 0) {
+		printf("mpss: gnss: %u reports (%u with a position, last session status %u)", gnss_reports, gnss_fixes, gnss_status);
+		if (gnss_fixes != 0) {
+			gnss_print_degrees("latitude", gnss_latitude);
+			gnss_print_degrees("longitude", gnss_longitude);
+			printf(" within %u m", gnss_uncertainty);
+		}
+		printf("; in view: GPS %u, GLONASS %u, Galileo %u, BeiDou %u, other %u; the fix uses %u (GGA quality %u); %u NMEA sentences\n",
+		    gnss_in_view_gps, gnss_in_view_glonass, gnss_in_view_galileo, gnss_in_view_beidou, gnss_in_view_other, gnss_used,
+		    gnss_quality, gnss_sentences);
+	}
+}
+
+static void
+gnss_close(void)
+{
+	if (gnss_port == NULL) {
+		return;
+	}
+	if (gnss_started && gnss_port_number != 0) {
+		const uint8_t stop[] = { 0x01, 1, 0, 1 };
+
+		gnss_send(LOC_STOP, stop, sizeof(stop));
+		sleep_ms(200);
+		printf("mpss: gnss: the session stopped (%u reports, %u with a position)\n", gnss_reports, gnss_fixes);
+	}
+	qrtr_close(gnss_port);
+	gnss_port = NULL;
+	gnss_node = gnss_port_number = 0;
+	gnss_started = false;
+}
+
 /* With modem=1: NAS asked every two seconds while the modem runs, on a thread of its own. */
 static volatile bool nas_wanted, nas_runs;
 
@@ -7637,6 +7914,7 @@ nas_thread(__unused void *parameter, __unused wait_result_t result)
 		if (++rounds % 60 == 1) {
 			wlfw_rails_line(nas.state.registered ? "registered, now" : "not registered, now");     /* (every two minutes) */
 		}
+		gnss_advance(rounds);
 		{
 			struct smp2p words;
 			static bool fatal_said;
@@ -7660,6 +7938,7 @@ nas_start(void)
 {
 	thread_t thread;
 
+	gnss_open();
 	nas_wanted = nas_runs = true;
 	if (kernel_thread_start(nas_thread, NULL, &thread) != KERN_SUCCESS) {
 		nas_wanted = nas_runs = false;
@@ -7678,6 +7957,7 @@ nas_stop(void)
 			sleep_ms(1);
 		}
 	}
+	gnss_close();
 	if (nas_opened) {
 		hakios_nas_client_close(&nas);
 		nas_opened = false;

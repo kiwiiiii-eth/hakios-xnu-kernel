@@ -8,6 +8,8 @@
 # words and no more (r137: the twelfth fling was cut off, "bad step"): the flings are two lines. The script starts some 3.5 minutes
 # after launchd (the lock screen is up by then and inject_sb.c has unlocked it) and takes about 2.5 minutes. cputop says every
 # 5 s who had the processors (r137: all cores 97-100% busy while the frames that came late waited for the application).
+# the widgets' extensions and the daemons behind them in the background, so that the screen has the processors (src/quietboot.c)
+/redwood/bin/quietboot &
 /var/jb/usr/sbin/sshd -D -e -h /var/root/.ssh/ssh_host_ed25519_key -o UsePAM=no -o PasswordAuthentication=no -o PermitRootLogin=prohibit-password -o AuthorizedKeysFile=/var/root/.ssh/authorized_keys &
 /redwood/bin/cputop 5 90 &
 /var/jb/usr/bin/sleep 210

@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **426 arguments**: 354 read by the kernel, 14 by the loader, 69 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **428 arguments**: 356 read by the kernel, 14 by the loader, 69 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
@@ -363,7 +363,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `thermal_tm0` | K | `hakios.thermal.c` | `CONFIG_THERMAL_TM0` |  |
 | `thermal_tm1` | K | `hakios.thermal.c` | `CONFIG_THERMAL_TM1` |  |
 
-## CPU, memory and boot (28)
+## CPU, memory and boot (29)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -371,6 +371,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `applog_name` | K | `(patch)` | `CONFIG_APPLOG_NAME` |  |
 | `bootcpu` | KL | `loader.c`, `loader_return.c` | `CONFIG_BOOTCPU` |  |
 | `cpufreq` | K | `hakios.cpufreq.c` | `CONFIG_CPUFREQ` |  |
+| `cpufreq_boost` | K | `hakios.cpufreq.c` | `CONFIG_CPUFREQ_BOOST` |  |
 | `cpufreq_gov` | K | `hakios.cpufreq.c` | `CONFIG_CPUFREQ_GOV` |  |
 | `cpuload` | K | `hakios.cpufreq.c` | `CONFIG_CPULOAD` |  |
 | `ddr` | K | `hakios.cpufreq.c` | `CONFIG_DDR` |  |
@@ -418,7 +419,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (86)
+## User space (87)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -494,6 +495,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `modem_wlfw_wait` | K | `hakios.mpss845.c` | `CONFIG_MODEM_WLFW_WAIT` |  |
 | `rmi4` | K | `hakios.rmi4.c` | `CONFIG_RMI4` |  |
 | `rmi4_charger` | K | `hakios.rmi4.c` | `CONFIG_RMI4_CHARGER` |  |
+| `rmi4_hz` | K | `hakios.rmi4.c` | `CONFIG_RMI4_HZ` |  |
 | `rmi4_khz` | K | `hakios.rmi4.c` | `CONFIG_RMI4_KHZ` |  |
 | `rmi4_peek` | K | `hakios.rmi4.c` | `CONFIG_RMI4_PEEK` |  |
 | `rmi4_steps` | K | `hakios.rmi4.c` | `CONFIG_RMI4_STEPS` |  |

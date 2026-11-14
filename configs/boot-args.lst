@@ -108,6 +108,7 @@ cam_shutter	k
 cam_vblank	k
 cc_fade	u
 cpufreq	k
+cpufreq_boost	k
 cpufreq_gov	k
 cpuload	k
 cpumask	l
@@ -298,6 +299,7 @@ return_cpu	k
 return_panic	k
 rmi4	k
 rmi4_charger	k
+rmi4_hz	k
 rmi4_khz	k
 rmi4_peek	k
 rmi4_steps	k

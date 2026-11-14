@@ -405,23 +405,27 @@ static struct {
 /*
  * A finger on the screen (drivers/input/hakios.rmi4.c): the group that has the most of our cores at its top row at once,
  * and kept there while touches go on and BOOST_MS after the last -- a change of screen starts with a touch, and its
- * first frames came out black while the load-driven speed was still climbing (11-11).
+ * first frames came out black while the load-driven speed was still climbing (11-11). Since 11-14 every group, not the
+ * big cores' alone (cpufreq_boost=1: that one only, as before): the window server and the application drawing a scroll
+ * are as often on a small core, which the load had left as low as 300 MHz, and a scroll felt heavy.
  */
 #define BOOST_MS                1500
 static volatile uint64_t boost_until;
 static volatile uint32_t boost_group = ~0u;
+static uint32_t boost_every = 2;
 
 void
 hakios_cpufreq_boost(void)
 {
 	uint64_t now = mach_absolute_time(), span;
-	uint32_t d = boost_group;
 
 	nanoseconds_to_absolutetime(BOOST_MS * NSEC_PER_MSEC, &span);
 	boost_until = now + span;
-	if (d < EPSS_DOMAINS && gov[d].rows != 0 && gov[d].at != gov[d].rows - 1) {
-		gov[d].at = gov[d].rows - 1;
-		*(volatile uint32_t *)(gov[d].base + OSM_PERF_STATE) = gov[d].row[gov[d].at];
+	for (uint32_t d = 0; d < EPSS_DOMAINS; d++) {
+		if ((boost_every >= 2 || d == boost_group) && gov[d].rows != 0 && gov[d].at != gov[d].rows - 1) {
+			gov[d].at = gov[d].rows - 1;
+			*(volatile uint32_t *)(gov[d].base + OSM_PERF_STATE) = gov[d].row[gov[d].at];
+		}
 	}
 }
 
@@ -501,7 +505,7 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 			}
 			gov[d].time_at[gov[d].at] += now - then;
 			busy_sum[d] += busiest[d];
-			if (busiest[d] >= GOV_UP_BUSY || (d == boost_group && now < boost_until)) {
+			if (busiest[d] >= GOV_UP_BUSY || ((boost_every >= 2 || d == boost_group) && now < boost_until)) {
 				want = gov[d].rows - 1;
 			} else {
 				need = (uint32_t)((uint64_t)gov[d].khz[gov[d].at] * busiest[d] / GOV_TARGET_BUSY);
@@ -828,6 +832,8 @@ hakios_cpufreq_init(void)
 				boost_group = domain;           /* (the big cores' group, where there is a choice: the later one) */
 			}
 		}
+		PE_parse_boot_argn("cpufreq_boost", &boost_every, sizeof(boost_every));
+		tell("cpufreq: a finger on the screen raises %s to the top row\n", boost_every >= 2 ? "every group" : "the big cores' group");
 		if (any && kernel_thread_start(gov_thread, NULL, &thread) == KERN_SUCCESS) {
 			thread_deallocate(thread);
 		}

@@ -102,6 +102,7 @@
  * vendor kernel agrees on every offset used here, and is the only source for the frequency counter.
  */
 #include <kern/clock.h>
+#include <kern/sched_prim.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
 #include <mach/vm_param.h>
@@ -3977,13 +3978,15 @@ start_by_itself(void)
  * last 1.5 s (hakios_gpu_boost, from the touch screen's driver), and the fast speed at once; a second without either,
  * and the slow one. The home screen's clock alone (10 frames a second, 2 or 3 in 100 ms: with "more than two" the GPU was fast 97% of
  * a run) stays slow. Each change is the legacy DCVS
- * request (step 17), here without a word in the log but the summary every 10 s.
+ * request (step 17), here without a word in the log but the summary every 10 s. A finger on a slow GPU wakes the thread at
+ * once (11-14) instead of at its next look, up to 25 ms on: the first frames of a scroll were drawn at 257 MHz.
  */
 #define GPU_DVFS_EVERY_MS       25
 #define GPU_DVFS_SLOW           1               /* 257 MHz */
 #define GPU_DVFS_HOLD_MS        1000
 #define GPU_DVFS_BUSY           6               /* submissions in 100 ms above which it is an animation */
 static volatile uint64_t gpu_boost_until;
+static volatile bool gpu_dvfs_slow_now;
 
 void
 hakios_gpu_boost(void)
@@ -3992,6 +3995,10 @@ hakios_gpu_boost(void)
 
 	nanoseconds_to_absolutetime(1500 * NSEC_PER_MSEC, &span);
 	gpu_boost_until = mach_absolute_time() + span;
+	if (gpu_dvfs_slow_now) {
+		gpu_dvfs_slow_now = false;
+		thread_wakeup((event_t)&gpu_boost_until);
+	}
 }
 
 /* The DCVS request without the log (step 17 says it aloud): true if the GMU acknowledged and returned 0. */
@@ -4036,7 +4043,8 @@ gpu_dvfs_thread(__unused void *parameter, __unused wait_result_t result)
 		uint32_t now_count, sum, want;
 		uint64_t now;
 
-		sleep_ms(GPU_DVFS_EVERY_MS);
+		assert_wait_timeout((event_t)&gpu_boost_until, THREAD_UNINT, GPU_DVFS_EVERY_MS, NSEC_PER_MSEC);
+		(void)thread_block(THREAD_CONTINUE_NULL);
 		now = mach_absolute_time();
 		now_count = gpu_submits;
 		recent[looks++ % 4] = now_count - last;
@@ -4062,6 +4070,7 @@ gpu_dvfs_thread(__unused void *parameter, __unused wait_result_t result)
 				failures++;
 			}
 		}
+		gpu_dvfs_slow_now = at != fast;
 		if (now - last_log >= ten) {
 			uint64_t f, sl;
 

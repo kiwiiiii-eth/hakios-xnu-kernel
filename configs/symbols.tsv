@@ -101,6 +101,7 @@ CAM_SETTLE	arg	cam_settle	Cameras	k	hakios.camera.c
 CAM_SHUTTER	arg	cam_shutter	Cameras	k	hakios.camera.c	
 CAM_VBLANK	arg	cam_vblank	Cameras	k	hakios.camera.c	
 CC_FADE	arg	cc_fade	User space	u	inject_sb.c	
+CPUFREQ_BOOST	arg	cpufreq_boost	CPU, memory and boot	k	hakios.cpufreq.c	
 CPUFREQ_GOV	arg	cpufreq_gov	CPU, memory and boot	k	hakios.cpufreq.c	
 CPULOAD	arg	cpuload	CPU, memory and boot	k	hakios.cpufreq.c	every MS milliseconds, how busy each of our cores was meanwhile, in percent, to the loader's log (tools/frames.py shows it per gesture)
 CPUMASK	arg	cpumask	Loader	l	loader.c	
@@ -277,6 +278,7 @@ RETURN_CPU	arg	return_cpu	CPU, memory and boot	k	loader_return.c
 RETURN_PANIC	arg	return_panic	CPU, memory and boot	k	loader_return.c	
 RMI4	arg	rmi4	User space	k	hakios.rmi4.c	
 RMI4_CHARGER	arg	rmi4_charger	User space	k	hakios.rmi4.c	
+RMI4_HZ	arg	rmi4_hz	User space	k	hakios.rmi4.c	
 RMI4_KHZ	arg	rmi4_khz	User space	k	hakios.rmi4.c	
 RMI4_PEEK	arg	rmi4_peek	User space	k	hakios.rmi4.c	
 RMI4_STEPS	arg	rmi4_steps	User space	k	hakios.rmi4.c	

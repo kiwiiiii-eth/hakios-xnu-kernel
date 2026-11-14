@@ -14,12 +14,16 @@
  *   I2C     the engine ("GENI") in FIFO mode, polled; a register is read as a write of its number, then a read
  *   chip    the page description table; F01 (device control: reset, no sleep, the interrupt status); F12 (2D: ten
  *           objects of eight bytes: state, x, y)
- * No interrupt is taken: F01's interrupt status is read 100 times a second, and F12's objects when it says so.
+ * No interrupt is taken: F01's interrupt status is read rmi4_hz times a second, and F12's objects when it says so. 120 by
+ * default, two looks to every frame of the 60 Hz panel, on fixed deadlines (11-14): it was a 10 ms sleep after each look,
+ * which with the look's own transfers (80 bytes of objects at 400 kHz, some 2 ms) came to about 80 a second and never the
+ * same twice -- one frame two samples of a finger, the next one, and a scroll that went by fits and starts.
  *
  * The bring-up is made in steps, each said in the log before it is made; boot-arg rmi4_steps=N stops after the first N:
  *   1 power  2 pins and reset  3 clocks  4 the serial engine  5 the controller (PDT, F01)  6 watch (the default)
  *
- * Boot-args: rmi4=1; rmi4_steps=N; rmi4_khz=100|400 (the bus, 400); rmi4_charger=0|1|2 (F01's charger bit: off, on, as USB is (2));
+ * Boot-args: rmi4=1; rmi4_steps=N; rmi4_khz=100|400 (the bus, 400); rmi4_hz=30..250 (looks a second, 120);
+ * rmi4_charger=0|1|2 (F01's charger bit: off, on, as USB is (2));
  * rmi4_x=<max>, rmi4_y=<max> (the controller's
  * coordinate range: 1080 x 2340, the panel's own pixels on this phone); soc_rsc=, soc_cmd_db= (RPMh, the SDM845's by default).
  */
@@ -660,10 +664,15 @@ rmi4_thread(void *parameter, __unused wait_result_t result)
 	uint32_t last_attn = 2;
 	uint8_t last_raw[32];
 	uint32_t peek = 1;
-	uint64_t ticks = 0;
+	uint64_t ticks = 0, period = 0, next = 0, late = 0;
+	uint32_t hz = 120;
 	bool usb_known = false, said_no_usb = false;
 
 	PE_parse_boot_argn("rmi4_khz", &khz, sizeof(khz));
+	PE_parse_boot_argn("rmi4_hz", &hz, sizeof(hz));
+	if (hz < 30 || hz > 250) {
+		hz = 120;
+	}
 	PE_parse_boot_argn("rmi4_peek", &peek, sizeof(peek));
 	PE_parse_boot_argn("rmi4_charger", &charger_mode, sizeof(charger_mode));
 	charger_bit = charger_mode != 0;
@@ -756,7 +765,9 @@ rmi4_thread(void *parameter, __unused wait_result_t result)
 
 		(void)rmi_read(f12_data, flush, sizeof(flush));     /* the report waiting since the reset: read it, or no other comes */
 	}
-	say("rmi4: step 6: watching, every 10 ms (coordinates up to %u x %u)\n", span_x, span_y);
+	say("rmi4: step 6: watching, %u times a second (coordinates up to %u x %u)\n", hz, span_x, span_y);
+	nanoseconds_to_absolutetime(NSEC_PER_SEC / hz, &period);
+	next = mach_absolute_time() + period;
 	for (;;) {
 		uint8_t status[2], d[F12_OBJECTS * F12_OBJECT_SIZE];
 
@@ -850,9 +861,20 @@ rmi4_thread(void *parameter, __unused wait_result_t result)
 			}
 		}
 		if (++ticks % 6000 == 0) {
-			say("rmi4: %llu transfers, %llu failed; %u touches so far\n", bus.transfers, bus.failed, downs);
+			say("rmi4: %llu transfers, %llu failed; %u touches so far; %llu of %llu looks late\n", bus.transfers, bus.failed, downs,
+			    late, ticks);
 		}
-		sleep_ms(10);
+		/* the next look on its deadline, whatever this one took; one that is already past starts the count again from now */
+		{
+			uint64_t now = mach_absolute_time();
+
+			if (now >= next) {
+				late++;
+				next = now + period;
+			}
+			clock_delay_until(next);
+			next += period;
+		}
 	}
 out:
 	if (steps < 6) {

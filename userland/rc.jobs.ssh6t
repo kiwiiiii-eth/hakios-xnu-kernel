@@ -1,6 +1,6 @@
 # Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist) on the OnePlus 6T: a way in over Wi-Fi
-# (RC_JOBS=rc.jobs.ssh6t). The 6T's radio comes up by default (fajita.config: wifi=1 wifi_station=1) and is joined from
-# Settings by hand; once configd gives en0 an address, OpenSSH from the package manager's prefix (tools/mk-jb.sh) lets
+# (RC_JOBS=rc.jobs.ssh6t). The 6T's radio comes up by default (fajita.config: wifi=1 wifi_station=1); a network is joined
+# from Settings once and again by itself at every boot after (r161); once configd gives en0 an address, OpenSSH from the package manager's prefix (tools/mk-jb.sh) lets
 # root in with the key in ssh/authorized_keys, which build.sh puts on the data volume (never in the repository). Unlike
 # rc.jobs.ssh there are no taps: the 6T's touch is not the reference phone's, and nothing here needs the screen.
 # sshd is started at once and listens on every interface, so it answers as soon as an address is there; the
@@ -13,28 +13,9 @@
 # this one wrote, then this run's own line
 /var/jb/usr/bin/cat /private/var/root/hakios-runs.txt
 /redwood/bin/var_store stamp /private/var/root/hakios-runs.txt
-# what Wi-Fi knows from the boots before (com.apple.wifi.known-networks.plist: a network joined once should be joined again)
-/var/jb/usr/bin/ls -la /private/var/preferences
 /var/jb/usr/sbin/sshd -D -e -h /var/root/.ssh/ssh_host_ed25519_key -o UsePAM=no -o PasswordAuthentication=no -o PermitRootLogin=prohibit-password -o AuthorizedKeysFile=/var/root/.ssh/authorized_keys &
 /var/jb/usr/bin/sleep 60
-# the network as an application sees it, layer by layer, once the radios have had their time (Safari opened nothing, r156):
-# the name, a plain connection, HTTPS through CFNetwork (TLS, the trust store), and what reachability says
-/var/jb/usr/bin/sleep 150
-/redwood/bin/net_test store State:/Network/Global/.*
-/redwood/bin/net_test resolve www.apple.com
-/redwood/bin/net_test tcp www.apple.com 80
-/redwood/bin/net_test fetch https://www.apple.com/
-/redwood/bin/net_test reach www.apple.com
 /redwood/bin/net_test show
-# Safari itself (its pages never loaded, r156, while the fetch above did): a page opened as a link would be, then what its
-# processes have asked of the network, as lsof -i would show it (src/socks.c)
-/var/jb/usr/bin/uiopen https://example.com/
-/var/jb/usr/bin/sleep 20
-/redwood/bin/socks
-/var/jb/usr/bin/sleep 40
-/redwood/bin/socks
-# and what Safari and WebKit logged meanwhile (src/logdump.m), kept on the data volume: the kernel's log is full by now
-/redwood/bin/logdump 150 >> /private/var/root/safari-log.txt
 /var/jb/usr/bin/sleep 120
 /redwood/bin/net_test show
 /var/jb/usr/bin/sleep 180

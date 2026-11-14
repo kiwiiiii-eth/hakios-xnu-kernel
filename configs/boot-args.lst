@@ -19,6 +19,7 @@ adsp8_bb	k
 adsp8_cx	k
 adsp8_keep	k
 adsp8_listen	k
+adsp8_mic	k
 adsp8_pause	k
 adsp8_se4	k
 adsp8_wait	k

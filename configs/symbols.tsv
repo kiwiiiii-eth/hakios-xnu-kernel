@@ -18,6 +18,7 @@ ADSP8_BB	arg	adsp8_bb	Audio and battery	k	hakios.adsp845.c
 ADSP8_CX	arg	adsp8_cx	Audio and battery	k	hakios.adsp845.c	
 ADSP8_KEEP	arg	adsp8_keep	Audio and battery	k	hakios.adsp845.c	
 ADSP8_LISTEN	arg	adsp8_listen	Audio and battery	k	hakios.adsp845.c	
+ADSP8_MIC	arg	adsp8_mic	Audio and battery	k	hakios.adsp845.c	
 ADSP8_PAUSE	arg	adsp8_pause	Audio and battery	k	hakios.adsp845.c	
 ADSP8_SE4	arg	adsp8_se4	Audio and battery	k	hakios.adsp845.c	
 ADSP8_WAIT	arg	adsp8_wait	Audio and battery	k	hakios.adsp845.c	

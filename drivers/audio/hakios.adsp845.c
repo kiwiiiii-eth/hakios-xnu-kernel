@@ -119,6 +119,9 @@
 #include <vm/vm_kern.h>
 #include <sys/hakios.audio.h>
 #include <sys/hakios.input.h>
+#include <miscfs/devfs/devfs.h>
+#include <sys/conf.h>
+#include <sys/uio.h>
 
 #ifdef HAKIOS_ADSP
 #error "CONFIG_HAKIOS_ADSP845 and CONFIG_HAKIOS_ADSP both define hakios_adsp_init(): build one"
@@ -4067,6 +4070,7 @@ static struct {
 	vm_offset_t tables;
 } s5_space;
 static vm_offset_t s5_buffer;
+static vm_offset_t mic_cap;             /* the microphone's 8 periods for Darwin, after the speaker's in the same SMMU context */
 static uint64_t s5_address;
 static volatile uint32_t s5_returned, s5_done, s5_underflows, s5_errors;
 
@@ -4133,6 +4137,13 @@ s5_space_on(void)
 	second[AUDIO_ADDRESSES_6T >> 21 & 0x1ff] = kvtophys((vm_offset_t)third) | 3;
 	for (unsigned n = 0; n < S5_BYTES / 4096; n++) {
 		third[(AUDIO_ADDRESSES_6T >> 12 & 0x1ff) + n] = kvtophys(s5_buffer + 4096 * n) | AUDIO_PTE;
+	}
+	/* (and the microphone's, right after: Darwin's recording beside Darwin's playing, both through stream 0x1821) */
+	if (mic_cap == 0 && kmem_alloc(kernel_map, &mic_cap, S5_BYTES, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		mic_cap = 0;
+	}
+	for (unsigned n = 0; mic_cap != 0 && n < S5_BYTES / 4096; n++) {
+		third[(AUDIO_ADDRESSES_6T >> 12 & 0x1ff) + S5_BYTES / 4096 + n] = kvtophys(mic_cap + 4096 * n) | AUDIO_PTE;
 	}
 	for (vm_offset_t line = s5_space.tables; line < s5_space.tables + 3 * 4096; line += 64) {
 		__asm__ volatile ("dc civac, %0" : : "r" (line));
@@ -4499,6 +4510,8 @@ tfa_up(void)
 	return true;
 }
 
+static void mic_darwin_start(void);
+static volatile bool mic_darwin_stopping, mic_darwin_running;
 static bool stream_play(unsigned mode);       /* 0: the tone, the amplifier off (S5); 1: the tone's ladder, heard (S7); 2: Darwin's (S8) */
 
 static bool
@@ -4664,6 +4677,7 @@ step_darwin(void)
 	bool ok;
 
 	s8_running = true;
+	mic_darwin_start();             /* (the microphone's service for Darwin beside it: up only while Darwin records) */
 	ok = stream_play(2);
 	s8_running = false;
 	return ok;
@@ -5867,6 +5881,9 @@ step_mic_codec(void)
 static volatile uint32_t mic_returned, mic_reads, mic_read_errors;
 static volatile uint64_t mic_sum_squares, mic_frames_heard;
 static volatile uint32_t mic_peak, mic_nonzero;
+static volatile bool mic_for_darwin;    /* M8: the periods are mic_cap's and go into the ring of /dev/hakios-mic */
+static uint64_t mic_read_address;       /* the DSP's address of period 0 */
+static void mic_ring_put(const int16_t *samples, uint32_t count);
 static int16_t mic_first[8];
 static volatile bool mic_first_taken;
 /* one second of what is heard, kept to be said in the log (base64, "MICPCM" lines): tools turn it into a WAV on the Mac */
@@ -5888,16 +5905,23 @@ mic_events(uint8_t service, __unused uint16_t port, uint32_t opcode, uint32_t to
 			os_atomic_inc(&mic_read_errors, relaxed);
 		} else {
 			uint32_t bytes = payload[4] < 4096 ? payload[4] : 4096, peak = mic_peak;
-			const int16_t *samples = (const int16_t *)(s5_buffer + 4096 * period + (payload[5] < 4096 ? payload[5] : 0));
+			vm_offset_t base = mic_for_darwin ? mic_cap : s5_buffer;
+			const int16_t *samples = (const int16_t *)(base + 4096 * period + (payload[5] < 4096 ? payload[5] : 0));
 			uint64_t squares = 0;
 
-			for (vm_offset_t line = s5_buffer + 4096 * period; line < s5_buffer + 4096 * (period + 1); line += 64) {
+			if (bytes + (payload[5] < 4096 ? payload[5] : 0) > 4096) {
+				bytes = 4096 - (payload[5] < 4096 ? payload[5] : 0);
+			}
+			for (vm_offset_t line = base + 4096 * period; line < base + 4096 * (period + 1); line += 64) {
 				__asm__ volatile ("dc ivac, %0" : : "r" (line));
 			}
 			__asm__ volatile ("dsb sy");
 			if (!mic_first_taken && bytes >= 16) {
 				memcpy(mic_first, samples, 16);
 				mic_first_taken = true;
+			}
+			if (mic_for_darwin) {
+				mic_ring_put(samples, bytes / 2);
 			}
 			if (mic_keeping && mic_kept != NULL) {
 				uint32_t n = bytes / 2, room = MIC_KEEP_FRAMES - mic_kept_frames;
@@ -5927,7 +5951,7 @@ mic_events(uint8_t service, __unused uint16_t port, uint32_t opcode, uint32_t to
 static bool
 mic_read(unsigned period, uint32_t handle)
 {
-	uint32_t read[5] = { (uint32_t)(s5_address + 4096 * period), (uint32_t)((s5_address + 4096 * period) >> 32), handle,
+	uint32_t read[5] = { (uint32_t)(mic_read_address + 4096 * period), (uint32_t)((mic_read_address + 4096 * period) >> 32), handle,
 		             MIC_PERIOD_FRAMES * 2, period };
 
 	return apr_exchange(S_ASM, MIC_ASM_PORT, MIC_READ_TOKEN | period, false, ASM_DATA_CMD_READ_V2, read, sizeof(read), 0, NULL);
@@ -6168,6 +6192,7 @@ step_mic_capture(void)
 		goto out;
 	}
 	s5_address = s5_space.passed ? (kvtophys(s5_buffer) | AUDIO_STREAM_BITS_6T) : (AUDIO_ADDRESSES_6T | AUDIO_STREAM_BITS_6T);
+	mic_read_address = s5_address;
 	bzero(packet, sizeof(packet));
 	*(uint16_t *)packet = MIC_AFE_PORT;
 	*(uint16_t *)(packet + 2) = (uint16_t)(sizeof(*param) + sizeof(slim));
@@ -6342,6 +6367,374 @@ out:
 	return ok;
 }
 
+/* ---- M8: the microphone for Darwin, /dev/hakios-mic (as the reference phone's hakios.mic.c has it) --------------------------- */
+/*
+ * What the microphone hears goes into a ring, and /dev/hakios-mic gives it to Darwin's audio server (HakiosAudio.driver's input
+ * "Codec", userland/src/audio_plugin.c): 16-bit samples, one channel, 48 kHz. The path is up only while the device is open (the
+ * audio server opens it when its input starts and closes it when it stops): the bus, the codec (AMIC4, MIC BIAS1 2.7 V, gain 12:
+ * r120/r121, the fan heard), AFE 0x4001, channel 128, ADM, ASM session 2 into mic_cap. A read never waits. adsp8_mic=0: none of it.
+ */
+#define MIC_RING_FRAMES         16384u          /* 341 ms; a power of two */
+#define MIC_RING_KEEP           1920u           /* 40 ms: how far behind the DSP a reader is kept */
+#define MIC_RING_MOST           4800u           /* 100 ms: more than this waiting, and the oldest is skipped */
+static int16_t *mic_ring;
+static volatile uint64_t mic_ring_written;
+static uint64_t mic_ring_read, mic_ring_skipped, mic_ring_dry;
+static bool mic_ring_primed;
+static volatile uint32_t mic_darwin_wants;
+
+static void
+mic_ring_put(const int16_t *samples, uint32_t count)
+{
+	uint64_t at = mic_ring_written;
+
+	if (mic_ring == NULL) {
+		return;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		mic_ring[(at + i) % MIC_RING_FRAMES] = samples[i];
+	}
+	__atomic_store_n(&mic_ring_written, at + count, __ATOMIC_RELEASE);
+}
+
+static int
+mic_dev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+{
+	uint64_t written = __atomic_load_n(&mic_ring_written, __ATOMIC_ACQUIRE), avail, want;
+	int error = 0;
+
+	if (mic_ring == NULL || uio_resid(uio) < 2) {
+		return 0;
+	}
+	want = (uint64_t)uio_resid(uio) / 2;
+	avail = written - mic_ring_read;
+	if (avail > MIC_RING_MOST) {
+		mic_ring_skipped += avail - MIC_RING_KEEP;
+		mic_ring_read = written - MIC_RING_KEEP;
+		avail = MIC_RING_KEEP;
+	}
+	if (!mic_ring_primed) {
+		if (avail < MIC_RING_KEEP) {
+			return 0;
+		}
+		mic_ring_primed = true;
+	}
+	if (avail < want) {
+		mic_ring_dry++;
+		mic_ring_primed = false;
+	}
+	while (want > 0 && avail > 0 && error == 0) {
+		uint64_t at = mic_ring_read % MIC_RING_FRAMES, n = want < avail ? want : avail;
+
+		n = n < MIC_RING_FRAMES - at ? n : MIC_RING_FRAMES - at;
+		error = uiomove((caddr_t)&mic_ring[at], (int)(n * 2), uio);
+		mic_ring_read += n;
+		want -= n;
+		avail -= n;
+	}
+	return error;
+}
+
+static int
+mic_dev_open(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
+{
+	mic_darwin_wants = 1;
+	return 0;
+}
+
+static int
+mic_dev_close(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
+{
+	mic_darwin_wants = 0;
+	return 0;
+}
+
+static const struct cdevsw mic_cdevsw = {
+	.d_open = mic_dev_open, .d_close = mic_dev_close, .d_read = mic_dev_read, .d_write = eno_rdwrt,
+	.d_ioctl = eno_ioctl, .d_stop = eno_stop, .d_reset = eno_reset, .d_select = eno_select,
+	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_type = 0
+};
+
+static struct {
+	bool smmu_ours, started, channel, mapped, stream_open, copp_open;
+	uint32_t handle, copp;
+} md;
+
+static bool
+mic_darwin_up(void)
+{
+	struct {
+		uint32_t minor;
+		uint16_t device, bits, format, channels;
+		uint8_t map[8];
+		uint32_t rate;
+	} __attribute__((packed)) slim = { 1, 0, 16, 0, 1, { MIC_CHANNEL }, 48000 };
+	uint8_t packet[16 + sizeof(struct afe_param) + sizeof(slim)];
+	struct afe_param *param = (struct afe_param *)(packet + 16);
+	uint16_t port[2] = { MIC_AFE_PORT, 0 };
+	struct {
+		uint16_t pool, regions;
+		uint32_t property, low, high, size;
+	} __attribute__((packed)) map = { 3, 1, 0, 0, 0, 8 * 4096 };
+	struct {
+		uint32_t mode, endpoint, topology, format;
+		uint16_t bits, reserved;
+	} __attribute__((packed)) reading = { 0, 0, ASM_TOPOLOGY_NONE, ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V2, 16, 0 };
+	struct {
+		uint32_t param, size, frames_per_buffer, block_size;
+		uint16_t channels, bits;
+		uint32_t rate;
+		uint16_t is_signed, reserved;
+		uint8_t map[8];
+	} __attribute__((packed)) encoder = { ASM_PARAM_ID_ENC_CFG_BLK_V2, 28, 0, 20, 1, 16, 48000, 1, 0, { 3 } };
+	struct {
+		uint16_t flags, mode, endpoint1, endpoint2;
+		uint32_t topology;
+		uint16_t channels, bits;
+		uint32_t rate;
+		uint8_t map[8];
+	} __attribute__((packed)) open = { 0, 2, MIC_AFE_PORT, 0xffff, ADM_TOPOLOGY_NONE, 1, 16, 48000, { 3 } };
+	struct {
+		uint32_t matrix, sessions;
+		uint16_t session, copps;
+		uint16_t copp[2];
+	} __attribute__((packed)) route = { 1, 1, 2, 1, { 0, 0 } };
+	uint32_t run[3] = { 0, 0, 0 };
+	struct apr_reply reply;
+
+	bzero(&md, sizeof(md));
+	if (!mic_bus_up() || !mic_codec_up() || !mic_codec_capture_on()) {
+		return false;
+	}
+	/* AMIC4 with its bias, MIC BIAS1 at 2.7 V, gain 12 (MIC BIAS3, AMIC5's, off) */
+	if (!mic_codec_update(0x0727, 0x80, 0x00, "TX_NEW_AMIC_4_5_SEL: AMIC4") ||
+	    !mic_codec_update(0x0622, 0x3f, 0x22, "ANA_MICB1: 2700 mV") || !mic_codec_update(0x0622, 0xc0, 0x40, "ANA_MICB1: on") ||
+	    !mic_codec_update(0x0625, 0xc0, 0x00, "ANA_MICB3: off") || !mic_codec_update(0x0611, 0x1f, 12, "ANA_AMIC4: gain 12")) {
+		return false;
+	}
+	if (!s5_space.on) {
+		if (s5_buffer == 0 &&
+		    kmem_alloc(kernel_map, &s5_buffer, S5_BYTES, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+			s5_buffer = 0;
+			return false;
+		}
+		lck_mtx_lock(&hakios_smmu_lock);
+		md.smmu_ours = s5_space_on();
+		lck_mtx_unlock(&hakios_smmu_lock);
+		if (!md.smmu_ours) {
+			return false;
+		}
+	}
+	if (mic_cap == 0 || s5_space.passed) {
+		printf("adsp845: %u: the microphone's periods are not in the SMMU's tables\n", step);
+		return false;
+	}
+	mic_read_address = (AUDIO_ADDRESSES_6T + S5_BYTES) | AUDIO_STREAM_BITS_6T;
+	bzero(packet, sizeof(packet));
+	*(uint16_t *)packet = MIC_AFE_PORT;
+	*(uint16_t *)(packet + 2) = (uint16_t)(sizeof(*param) + sizeof(slim));
+	param->module = AFE_MODULE_AUDIO_DEV_INTERFACE;
+	param->param = AFE_PARAM_ID_SLIMBUS_CONFIG;
+	param->size = sizeof(slim);
+	memcpy(packet + 16 + sizeof(*param), &slim, sizeof(slim));
+	if (!afe_command("the port 0x4001: SLIMbus, channel 128, 16 bits, 1 channel, 48 kHz", AFE_PORT_CMD_SET_PARAM_V2, packet,
+	    sizeof(packet))) {
+		return false;
+	}
+	md.started = afe_command("the port 0x4001, started", AFE_PORT_CMD_DEVICE_START, port, sizeof(port));
+	if (!md.started) {
+		return false;
+	}
+	{
+		uint8_t tid = mic_tid++, connect[4] = { mic_la_codec, 0, MIC_CHANNEL, tid };
+		uint8_t tid2 = (uint8_t)(tid + 1), define[6] = { mic_la_codec, 0x24, 0x20, 0x83, tid2, MIC_CHANNEL };
+		uint8_t tid3 = (uint8_t)(tid + 2), now[2] = { tid3, mic_la_codec };
+
+		mic_tid += 2;
+		if (!mic_ngd_user(0x2c, connect, sizeof(connect), tid, "CONNECT_SRC (the codec's port 0 to channel 128)") ||
+		    !mic_ngd_user(0x21, define, sizeof(define), tid2, "DEF_ACT_CHAN (128: 16 bits, ISO, 48 kHz)") ||
+		    !mic_ngd_user(0x24, now, sizeof(now), tid3, "RECONFIG_NOW")) {
+			return false;
+		}
+	}
+	md.channel = true;
+	map.low = (uint32_t)mic_read_address;
+	map.high = (uint32_t)(mic_read_address >> 32);
+	if (!s5_command("the microphone's periods, mapped for the DSP", S_ASM, 0, ASM_CMD_SHARED_MEM_MAP_REGIONS, &map, sizeof(map),
+	    ASM_CMDRSP_SHARED_MEM_MAP_REGIONS, &reply)) {
+		return false;
+	}
+	md.mapped = true;
+	md.handle = reply.words[0];
+	if (!s5_command("a stream opened for reading (session 2)", S_ASM, MIC_ASM_PORT, ASM_STREAM_CMD_OPEN_READ_V3, &reading,
+	    sizeof(reading), 0, NULL)) {
+		return false;
+	}
+	md.stream_open = true;
+	if (!s5_command("the stream's format: 1 channel of 16 bits at 48 kHz", S_ASM, MIC_ASM_PORT, ASM_STREAM_CMD_SET_ENCDEC_PARAM, &encoder,
+	    sizeof(encoder), 0, NULL) ||
+	    !s5_command("a recording device path from port 0x4001", S_ADM, MIC_AFE_PORT, ADM_CMD_DEVICE_OPEN_V5, &open, sizeof(open),
+	    ADM_CMDRSP_DEVICE_OPEN_V5, &reply) || reply.words[0] != 0) {
+		return false;
+	}
+	md.copp_open = true;
+	md.copp = reply.words[1] & 0xffff;
+	route.copp[0] = (uint16_t)md.copp;
+	if (!s5_command("the device path routed to session 2", S_ADM, 0, ADM_CMD_MATRIX_MAP_ROUTINGS_V5, &route, sizeof(route), 0, NULL) ||
+	    !s5_command("the session (2), run", S_ASM, MIC_ASM_PORT, ASM_SESSION_CMD_RUN_V2, run, sizeof(run), 0, NULL)) {
+		return false;
+	}
+	mic_returned = 0;
+	mic_reads = mic_read_errors = 0;
+	mic_for_darwin = true;
+	hakios_adsp_apr_events_second(mic_events);
+	for (unsigned n = 0; n < 8; n++) {
+		mic_read(n, md.handle);
+	}
+	return true;
+}
+
+static void
+mic_darwin_down(void)
+{
+	hakios_adsp_apr_events_second(NULL);
+	mic_for_darwin = false;
+	if (md.stream_open) {
+		s5_command("the stream, closed", S_ASM, MIC_ASM_PORT, ASM_STREAM_CMD_CLOSE, NULL, 0, 0, NULL);
+	}
+	if (md.copp_open) {
+		s5_command("the device path, closed", S_ADM, (uint16_t)md.copp, ADM_CMD_DEVICE_CLOSE_V5, NULL, 0, 0, NULL);
+	}
+	if (md.mapped) {
+		s5_command("the microphone's periods, unmapped", S_ASM, 0, ASM_CMD_SHARED_MEM_UNMAP_REGIONS, &md.handle, sizeof(md.handle), 0,
+		    NULL);
+	}
+	if (md.channel) {
+		uint8_t tid = mic_tid++, disconnect[3] = { mic_la_codec, 0, tid };
+
+		(void)mic_ngd_user(0x2e, disconnect, sizeof(disconnect), tid, "DISCONNECT_PORT");
+	}
+	if (md.started) {
+		uint16_t port[2] = { MIC_AFE_PORT, 0 };
+
+		afe_command("the port 0x4001, stopped", AFE_PORT_CMD_DEVICE_STOP, port, sizeof(port));
+	}
+	if (mic_la_codec != 0) {
+		mic_codec_capture_off();
+	}
+	if (md.smmu_ours) {
+		lck_mtx_lock(&hakios_smmu_lock);
+		s5_space_off();
+		lck_mtx_unlock(&hakios_smmu_lock);
+	}
+	mic_codec_down();
+	mic_bus_down();
+	bzero(&md, sizeof(md));
+}
+
+static void
+mic_darwin_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	int major = cdevsw_add(-1, &mic_cdevsw);
+	unsigned recordings = 0, failures = 0;
+
+	mic_ring = kalloc_data(MIC_RING_FRAMES * sizeof(int16_t), Z_WAITOK | Z_ZERO);
+	if (mic_ring == NULL || major < 0 ||
+	    devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "hakios-mic") == NULL) {
+		tell("adsp845: /dev/hakios-mic cannot be made: the microphone is not Darwin's\n");
+		mic_darwin_running = false;
+		thread_terminate(current_thread());
+		return;
+	}
+	tell("adsp845: THE MICROPHONE IS DARWIN'S (/dev/hakios-mic) from here on: it listens only while Darwin records (AMIC4, gain 12)\n");
+	while (!mic_darwin_stopping) {
+		uint64_t began, last_done, last_say;
+		uint32_t seen;
+		bool up, broken = false;
+
+		if (!mic_darwin_wants || failures >= 3) {
+			sleep_ms(20);
+			continue;
+		}
+		recordings++;
+		mic_ring_primed = false;
+		mic_ring_skipped = mic_ring_dry = 0;
+		mic_ring_read = __atomic_load_n(&mic_ring_written, __ATOMIC_ACQUIRE);
+		began = now_us();
+		tell("adsp845: mic: Darwin records (%u): the path up\n", recordings);
+		up = mic_darwin_up();
+		tell("adsp845: mic: the path %s after %llu ms\n", up ? "IS UP" : "DID NOT COME UP", (now_us() - began) / 1000);
+		last_done = last_say = now_us();
+		seen = mic_reads;
+		mic_sum_squares = 0;
+		mic_frames_heard = 0;
+		mic_peak = 0;
+		while (up && mic_darwin_wants && !mic_darwin_stopping) {
+			uint32_t back = mic_returned;
+			uint64_t now = now_us();
+
+			if (back != 0) {
+				os_atomic_andnot(&mic_returned, back, relaxed);
+				for (unsigned n = 0; n < 8; n++) {
+					if (back & 1u << n) {
+						mic_read(n, md.handle);
+					}
+				}
+			}
+			if (mic_reads != seen) {
+				seen = mic_reads;
+				last_done = now;
+			} else if (now - last_done > 1000000ull) {
+				tell("adsp845: mic: THE DSP HAS GIVEN NO PERIOD BACK FOR 1 s: the recording breaks off\n");
+				broken = true;
+				break;
+			}
+			if (now - last_say >= 10000000ull) {
+				last_say = now;
+				tell("adsp845: mic: Darwin records: %llu frames in the last 10 s, RMS %u, peak %u; %u reads, %u errors\n", mic_frames_heard,
+				    mic_frames_heard ? isqrt64(mic_sum_squares / mic_frames_heard) : 0, mic_peak, mic_reads, mic_read_errors);
+				mic_sum_squares = 0;
+				mic_frames_heard = 0;
+				mic_peak = 0;
+			}
+			sleep_ms(2);
+		}
+		mic_darwin_down();
+		tell("adsp845: mic: Darwin's recording %u %s after %llu s; %llu frames skipped as too late, %llu reads found too little\n", recordings,
+		    !up || broken ? "BROKE OFF" : "ended", (now_us() - began) / 1000000, mic_ring_skipped, mic_ring_dry);
+		if (!up || broken) {
+			failures++;
+			if (failures >= 3) {
+				tell("adsp845: mic: three recordings broke off: the microphone is not brought up again in this run\n");
+			}
+			while (mic_darwin_wants && !mic_darwin_stopping) {
+				sleep_ms(20);        /* (not again while the device stays open after a failure) */
+			}
+		}
+	}
+	mic_darwin_running = false;
+	thread_terminate(current_thread());
+}
+
+static void
+mic_darwin_start(void)
+{
+	uint32_t on = 1;
+	thread_t thread;
+
+	PE_parse_boot_argn("adsp8_mic", &on, sizeof(on));
+	if (!on) {
+		return;
+	}
+	mic_darwin_stopping = false;
+	mic_darwin_running = true;
+	if (kernel_thread_start(mic_darwin_thread, NULL, &thread) != KERN_SUCCESS) {
+		mic_darwin_running = false;
+		return;
+	}
+	thread_deallocate(thread);
+}
+
 /* steps 18 to 20: none (the numbers are kept for the speaker's later steps) */
 static bool
 step_none(void)
@@ -6380,6 +6773,15 @@ steps_over(uint32_t done)
 void
 hakios_adsp_stop(void)
 {
+	mic_darwin_stopping = true;
+	if (mic_darwin_running) {
+		unsigned ms = 0;
+
+		for (; ms < 8000 && mic_darwin_running; ms += 10) {
+			sleep_ms(10);
+		}
+		tell("adsp845: the microphone's service %s after %u ms\n", mic_darwin_running ? "DID NOT STOP" : "stopped", ms);
+	}
 	s8_stopping = true;
 	if (s8_running) {
 		unsigned ms = 0;

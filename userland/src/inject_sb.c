@@ -28,6 +28,9 @@
  *       com.hakios.unlock      what the lock screen does after "swipe up to open"
  *       com.hakios.layers      write down the layers SpringBoard has on the screen: see layers()
  *       com.hakios.switcher    open the switcher of running applications: see switcher()
+ *       com.hakios.open.prefs, com.hakios.open.safari, com.hakios.open.notes
+ *                              bring Settings, Safari, Notes to the front: see open_app() (for scripts that measure
+ *                              scrolling without a person: userland/rc.jobs.smooth6t)
  *     In any other program given this library (INJECT in build.sh) only the last of them is
  *     answered, with that program's layers.
  */
@@ -1942,6 +1945,29 @@ layers(void)
 }
 
 /*
+ * An application brought to the front by its bundle identifier, as a tap on its icon would (LSApplicationWorkspace), on the
+ * notifications com.hakios.open.* (rwtouch notify): a script's way into an application whatever the home screen looks like.
+ * Asked off the main thread: the request goes round through lsd and FrontBoard back to SpringBoard's main thread.
+ */
+static void
+open_app(const char *bundle)
+{
+	Class workspace = objc_getClass("LSApplicationWorkspace");
+	id shared = workspace != NULL ? SEND(id, workspace, "defaultWorkspace") : NULL;
+	SEL open = sel_registerName("openApplicationWithBundleID:");
+	CFStringRef name = CFStringCreateWithCString(NULL, bundle, kCFStringEncodingUTF8);
+	BOOL done = NO;
+
+	if (shared != NULL && name != NULL && class_getInstanceMethod(object_getClass(shared), open) != NULL) {
+		done = ((BOOL (*)(id, SEL, id))objc_msgSend)(shared, open, (id)name);
+	}
+	say("hakios: open %s: %s\n", bundle, done ? "asked" : "NOT done");
+	if (name != NULL) {
+		CFRelease(name);
+	}
+}
+
+/*
  * The switcher of running applications, on the notification com.hakios.switcher (rwtouch notify).
  * A drag up from the bottom edge is the way to it on a phone, but the touches a script puts in do
  * not reach Darwin's system gestures -- nothing comes of such a drag, not even going home -- and two
@@ -2510,6 +2536,18 @@ hakios_springboard_init(void)
 	});
 	notify_register_dispatch("com.hakios.switcher", &token, dispatch_get_main_queue(), ^(__unused int t) {
 		switcher();
+	});
+	notify_register_dispatch("com.hakios.open.prefs", &token, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+	    ^(__unused int t) {
+		open_app("com.apple.Preferences");
+	});
+	notify_register_dispatch("com.hakios.open.safari", &token, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+	    ^(__unused int t) {
+		open_app("com.apple.mobilesafari");
+	});
+	notify_register_dispatch("com.hakios.open.notes", &token, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+	    ^(__unused int t) {
+		open_app("com.apple.mobilenotes");
 	});
 	/*
 	 * Belt-and-suspenders unlock. The user can always swipe up to open the home screen -- that

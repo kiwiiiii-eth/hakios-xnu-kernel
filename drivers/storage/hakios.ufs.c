@@ -1722,6 +1722,84 @@ SYSCTL_QUAD(_kern_hakios, OID_AUTO, ufs_native_fallbacks, CTLFLAG_RD | CTLFLAG_L
 
 /* ---- bringing it up ---- */
 
+/*
+ * ufs_gpt_dump=1, read only: logical unit 0's first eight blocks and its last eight -- the protective MBR, both GPT headers
+ * and both tables -- into the log as base64 lines, "UFSGPT head|tail N BASE64", 96 bytes a line, for a copy of the table
+ * to be kept on the computer before it is changed (the 6T, 11-15: the partition darwin cut off the end of userdata with
+ * tools/userdata-carve.py, which takes exactly these as gpt-head.bin and gpt-tail.bin; tools/ufsgpt2bin.py makes them).
+ */
+/* (into the loader's log: what this kernel prints this early is not in the log that comes back, which keeps its end) */
+extern void loader_log_putc(char c);
+
+static void
+ufs_gpt_say(const char *format, ...) __printflike(1, 2);
+
+static void
+ufs_gpt_say(const char *format, ...)
+{
+	char line[256];
+	va_list list;
+
+	va_start(list, format);
+	vsnprintf(line, sizeof(line), format, list);
+	va_end(list);
+	for (const char *c = line; *c != 0; c++) {
+		loader_log_putc(*c);
+	}
+}
+
+static void
+ufs_gpt_dump_one(uint32_t part, const char *which, uint64_t offset)
+{
+	static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	uint8_t *data = kalloc_data(8 * 4096, Z_WAITOK);
+	char line[4 * 96 / 3 + 1];
+	int error;
+
+	if (data == NULL) {
+		return;
+	}
+	error = ufs_read_mailbox(part, offset, data, 8 * 4096);
+	ufs_gpt_say("ufs: gpt dump: %s of LUN 0, bytes %llu..%llu: %s\n", which, offset, offset + 8 * 4096 - 1, error == 0 ? "read" : "NOT READ");
+	for (uint32_t at = 0; error == 0 && at < 8 * 4096; at += 96) {
+		uint32_t n = 0, end = at + 96 < 8 * 4096 ? at + 96 : 8 * 4096;  /* (the last line: 32 bytes) */
+
+		for (uint32_t i = at; i < end; i += 3) {
+			uint32_t left = end - i;
+			uint32_t v = (uint32_t)data[i] << 16 | (left > 1 ? (uint32_t)data[i + 1] << 8 : 0) | (left > 2 ? data[i + 2] : 0);
+
+			line[n++] = alphabet[(v >> 18) & 63];
+			line[n++] = alphabet[(v >> 12) & 63];
+			line[n++] = left > 1 ? alphabet[(v >> 6) & 63] : '=';
+			line[n++] = left > 2 ? alphabet[v & 63] : '=';
+		}
+		line[n] = 0;
+		ufs_gpt_say("UFSGPT %s %u %s\n", which, at / 96, line);
+	}
+	kfree_data(data, 8 * 4096);
+}
+
+static void
+ufs_gpt_dump(void)
+{
+	for (uint32_t i = 0; i < ufs_parts; i++) {
+		volatile struct loader_block_part *e = &ufs_page->part[i];
+
+		if ((e->flags & BLOCK_PART_UNIT) == 0 || e->unit != 0) {
+			continue;
+		}
+		if (e->block_size != 4096 || e->blocks < 16) {
+			ufs_gpt_say("ufs: gpt dump: LUN 0 is in blocks of %u (%llu of them): not dumped\n", e->block_size, e->blocks);
+			return;
+		}
+		ufs_gpt_say("ufs: gpt dump: LUN 0 is %s, %llu blocks of 4096\n", e->name, e->blocks);
+		ufs_gpt_dump_one(i, "head", 0);
+		ufs_gpt_dump_one(i, "tail", (e->blocks - 8) * 4096);
+		return;
+	}
+	ufs_gpt_say("ufs: gpt dump: the loader lists no logical unit 0\n");
+}
+
 void
 hakios_ufs_init(void)
 {
@@ -1774,6 +1852,10 @@ hakios_ufs_init(void)
 	ufs_ready = true;
 	printf("ufs: %u partitions of the phone's storage as /dev/ufs_NAME and /dev/rufs_NAME, read only, "
 	    "through the loader's page at %llx and its %u KB buffer\n", made, pa, ufs_buffer_size >> 10);
+	check = 0;
+	if (PE_parse_boot_argn("ufs_gpt_dump", &check, sizeof(check)) && check == 1) {
+		ufs_gpt_dump();
+	}
 
 	/*
 	 * ufs_write=1: /dev/rufs_darwin takes writes, past the Darwin volume and the cryptexes. darwin

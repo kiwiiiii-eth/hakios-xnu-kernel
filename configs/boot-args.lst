@@ -366,6 +366,7 @@ tu_debug	u
 ufs	l
 ufs_bench	k
 ufs_check	k
+ufs_gpt_dump	k
 ufs_native	kl
 ufs_native_bench	k
 ufs_native_buffer	k

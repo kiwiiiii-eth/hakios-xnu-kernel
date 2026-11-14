@@ -134,6 +134,8 @@ struct apple80211_scan_request {
 	uint32_t short_ssid, unused_3;
 };
 
+#define NOISE_FLOOR             (-95)   /* dBm: ath10k's default, the firmware gives none here */
+
 /* SCAN_RESULT (11) and CURRENT_NETWORK (103): 1164 bytes */
 struct apple80211_scan_result {
 	uint32_t version;
@@ -259,7 +261,15 @@ give_network(const struct apple80211req *request, const struct hakios_sta_bss *b
 	bzero(result, sizeof(*result));
 	result->version = 1;
 	channel_fill(&result->channel, bss->frequency, 0);
+	/*
+	 * The noise floor as ath10k itself takes it when the firmware does not say (ATH10K_DEFAULT_NOISE_FLOOR), and the
+	 * signal-to-noise ratio from it. Left 0, CoreWiFi's auto-join turned every known network away as "Below minimum RSSI
+	 * threshold" (r159: dilk2 at -68 dBm, a hotspot at -74), and a network joined before was never joined again.
+	 */
 	result->rssi = bss->rssi;
+	result->noise_known = 1;
+	result->noise = NOISE_FLOOR;
+	result->snr = bss->rssi > NOISE_FLOOR ? (int16_t)(bss->rssi - NOISE_FLOOR) : 0;
 	result->beacon_interval = bss->beacon_interval;
 	result->capability = bss->capability;
 	memcpy(result->bssid, bss->bssid, sizeof(result->bssid));
@@ -440,6 +450,16 @@ get(struct apple80211req *request)
 			int32_t each[4], all, each_ext[4], all_ext;
 		} answer = { .version = 1, .radios = 1, .each = { state->bss.rssi }, .all = state->bss.rssi,
 			     .each_ext = { state->bss.rssi }, .all_ext = state->bss.rssi };
+
+		error = state->phase != HAKIOS_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
+		break;
+	}
+	case 17: {                              /* the noise it is heard over: as RSSI's answer, the floor ath10k assumes */
+		struct {
+			uint32_t version, radios, unit;
+			int32_t each[4], all, each_ext[4], all_ext;
+		} answer = { .version = 1, .radios = 1, .each = { NOISE_FLOOR }, .all = NOISE_FLOOR,
+			     .each_ext = { NOISE_FLOOR }, .all_ext = NOISE_FLOOR };
 
 		error = state->phase != HAKIOS_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
 		break;
@@ -659,6 +679,8 @@ hakios_apple80211_event(enum hakios_sta_event event, int status)
 		if (state != NULL) {
 			hakios_sta_state(state);
 			link.rssi = status == 1 ? state->bss.rssi : 0;
+			link.noise = (uint16_t)NOISE_FLOOR;
+			link.snr = status == 1 && state->bss.rssi > NOISE_FLOOR ? (uint16_t)(state->bss.rssi - NOISE_FLOOR) : 0;
 			kfree_data(state, sizeof(*state));
 		}
 		post(EVENT_SSID_CHANGED, NULL, 0);

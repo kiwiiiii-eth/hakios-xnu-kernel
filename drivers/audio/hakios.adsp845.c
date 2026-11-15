@@ -1001,6 +1001,8 @@ rail_position(const char *name, uint32_t level, uint32_t *address)
 }
 
 
+extern uint32_t hakios_rpmh_shared(unsigned client, uint32_t address, uint32_t value);  /* drivers/core/hakios.platform.c */
+
 /* The one rail at that level (Linux's proxy request), or given back (level 0). True: RPMh has said done. Only with adsp8_cx=1. */
 static bool
 rails(uint32_t level)
@@ -1032,6 +1034,8 @@ rails(uint32_t level)
 		}
 		return false;
 	}
+	/* (cx.lvl is the modem's and the cameras' too: the highest of the wishes, ours just recorded) */
+	value = hakios_rpmh_shared(1, address, value);
 	printf("adsp845: %u: about to ask RPMh, through TCS %u, for cx.lvl (%#x) = %u (level %u%s)\n", step, RPMH_TCS, address, value,
 	    level, level == 0 ? ": given back" : "");
 	bb_say("%u: RPMh cx.lvl %#x = %u (level %u)\n", step, address, value, level);

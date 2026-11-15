@@ -32,6 +32,7 @@ power    bsd/dev/hakios.fg8998.c
 gpu      iokit/Kernel/hakios.gpu.cpp
 
 camera   bsd/dev/hakios.camera.c
+camera   bsd/dev/hakios.camera845.c
 camera   bsd/dev/hakios.torch.c
 camera   bsd/dev/hakios.torch8998.c
 

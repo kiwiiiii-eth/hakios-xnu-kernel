@@ -1033,6 +1033,8 @@ rail_position(const char *name, uint32_t level, uint32_t *address)
 	return -1;
 }
 
+extern uint32_t hakios_rpmh_shared(unsigned client, uint32_t address, uint32_t value);  /* drivers/core/hakios.platform.c */
+
 /* The two rails at that level (Linux's proxy request), or given back (level 0). True: RPMh has said done. */
 static bool
 rails(uint32_t level)
@@ -1062,6 +1064,9 @@ rails(uint32_t level)
 		lck_mtx_unlock(&hakios_rsc_lock);
 		return false;
 	}
+	/* (cx.lvl and mx.lvl are the cameras' and the audio DSP's too: the highest of the wishes, ours just recorded) */
+	values[0] = hakios_rpmh_shared(0, addresses[0], values[0]);
+	values[1] = hakios_rpmh_shared(0, addresses[1], values[1]);
 	printf("mpss: %u: about to ask RPMh, through TCS %u, for cx.lvl (%#x) = %u, mx.lvl (%#x) = %u and mss.lvl (%#x) = %u (level %u%s)\n",
 	    step, RPMH_TCS, addresses[0], values[0], addresses[1], values[1], addresses[2], values[2], level, level == 0 ? ": given back" : "");
 	snprintf(last_write, sizeof(last_write), "step %u asked RPMh for the modem's rails at level %u", step, level);

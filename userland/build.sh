@@ -564,6 +564,16 @@ for module in ../fw-camera/com.qti.sensormodule.hakios_*.bin; do
 	mkdir -p root/fw
 	../tools/camsensor.py "$module" "root/fw/camera-$sensor.tab" >/dev/null
 done
+# ... and the OnePlus 6T's (drivers/camera/hakios.camera845.c), whose module files are named com.qti.sensormodule.
+# <maker>_<sensor>[_<actuator>].bin (liteon_imx519_lc898217xc_actuator: the same sensor tables whichever lens motor the
+# module has): camera-<sensor>.tab
+for module in ../fw-camera/com.qti.sensormodule.*.bin; do
+	[ -f "$module" ] || continue
+	case "$(basename "$module")" in com.qti.sensormodule.hakios_*) continue ;; esac
+	sensor=$(basename "$module" .bin | sed 's/^com\.qti\.sensormodule\.[a-z]*_\([a-z0-9]*\).*/\1/')
+	mkdir -p root/fw
+	../tools/camsensor.py "$module" "root/fw/camera-$sensor.tab" >/dev/null
+done
 # ... and their colour tuning (libhakios.media's processor, src/camera_isp.c), made by tools/camtuning.py out of the
 # cameras' tuning files beside them, com.qti.tuned.hakios_<maker>_<sensor>_<camera>.bin: camera-<sensor>.isp
 for tuned in ../fw-camera/com.qti.tuned.hakios_*.bin; do

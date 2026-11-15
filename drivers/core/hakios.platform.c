@@ -60,6 +60,50 @@ LCK_MTX_DECLARE(hakios_smem_alloc_lock, &hakios_platform_lock_group);
 LCK_MTX_DECLARE(hakios_rsc_lock, &hakios_platform_lock_group);
 LCK_MTX_DECLARE(hakios_smmu_lock, &hakios_platform_lock_group);
 
+/*
+ * The levels of RPMh's rails that more than one driver votes for in DRV 2 (cx.lvl and mx.lvl: the modem's boot, the
+ * audio DSP's boot, the cameras): RPMh keeps one value per DRV and resource, the last written, so each of them writes
+ * what this gives -- the highest of every driver's own wish for that resource, its own just recorded -- and not its own
+ * alone: one giving its vote back (0) does not take another's away. Called with hakios_rsc_lock held (or on the way out
+ * of a panic, when nothing else runs). Clients: 0 the modem (hakios.mpss845.c), 1 the audio DSP (hakios.adsp845.c),
+ * 2 the cameras (hakios.camera845.c).
+ */
+#define HAKIOS_RPMH_CLIENTS     3
+#define RPMH_SHARED_SLOTS       4
+static struct {
+	uint32_t        address;
+	uint32_t        wish[HAKIOS_RPMH_CLIENTS];
+} rpmh_shared[RPMH_SHARED_SLOTS];
+
+uint32_t hakios_rpmh_shared(unsigned client, uint32_t address, uint32_t value);
+uint32_t
+hakios_rpmh_shared(unsigned client, uint32_t address, uint32_t value)
+{
+	unsigned s, free = RPMH_SHARED_SLOTS;
+	uint32_t top = 0;
+
+	if (client >= HAKIOS_RPMH_CLIENTS || address == 0) {
+		return value;
+	}
+	for (s = 0; s < RPMH_SHARED_SLOTS && rpmh_shared[s].address != address; s++) {
+		if (rpmh_shared[s].address == 0 && free == RPMH_SHARED_SLOTS) {
+			free = s;
+		}
+	}
+	if (s == RPMH_SHARED_SLOTS) {
+		if (free == RPMH_SHARED_SLOTS) {
+			return value;           /* (no room: the driver's own, as before there was this) */
+		}
+		s = free;
+		rpmh_shared[s].address = address;
+	}
+	rpmh_shared[s].wish[client] = value;
+	for (unsigned c = 0; c < HAKIOS_RPMH_CLIENTS; c++) {
+		top = rpmh_shared[s].wish[c] > top ? rpmh_shared[s].wish[c] : top;
+	}
+	return top;
+}
+
 static char hakios_drivers_string[] = HAKIOS_DRIVERS_LIST;
 
 SYSCTL_STRING(_kern_hakios, OID_AUTO, drivers, CTLFLAG_RD | CTLFLAG_LOCKED, hakios_drivers_string, 0,

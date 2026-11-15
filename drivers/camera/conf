@@ -7,6 +7,13 @@ driver CAMERA
 	help    the cameras (cam=N): the sensors on the CCI bus and the ISP's interface. The sensors, their tables
 	help    (fw-camera/) and the pins are the POCO X5 Pro's
 
+driver CAMERA845
+	file    bsd/dev/hakios.camera845.c
+	default n
+	help    the OnePlus 6T's cameras (cam=N): the IMX519, IMX376K and IMX371 on the CCI masters, Titan 170's CSIPHY, CSID-lite
+	help    and VFE-lite; CAMERA's copy with the same boot-args, entry points and /dev/hakios-camera, so not built together
+	help    with CAMERA
+
 driver TORCH
 	file    bsd/dev/hakios.torch.c
 	help    the flashlight: the flash LED module of the PM8350C (torch=1); it stays off while the battery is too warm

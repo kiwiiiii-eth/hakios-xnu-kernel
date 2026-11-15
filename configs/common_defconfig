@@ -46,6 +46,7 @@ CONFIG_HAKIOS_BT=y
 
 # the cameras (cam=N): the sensors on the CCI bus and the ISP's interface. The sensors, their tables (fw-camera/) and ... [hakios.camera.c]
 CONFIG_HAKIOS_CAMERA=y
+# CONFIG_HAKIOS_CAMERA845 is not set
 
 # the flashlight: the flash LED module of the PM8350C (torch=1); it stays off while the battery is too warm [hakios.torch.c]
 CONFIG_HAKIOS_TORCH=y

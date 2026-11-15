@@ -119,10 +119,10 @@ index 4b83160780c3..8997af1f0e1b 100644
  include $(MakeInc_rule)
  include $(MakeInc_dir)
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a4cf..6ba02a37aa04 100644
+index 44274016a4cf..c296bedfa248 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,64 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,65 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -148,6 +148,7 @@ index 44274016a4cf..6ba02a37aa04 100644
 +bsd/dev/hakios.bthci.c                   optional hakios_bt3990
 +bsd/dev/hakios.btsk.c                    optional hakios_bt3990
 +bsd/dev/hakios.camera.c                  optional hakios_camera
++bsd/dev/hakios.camera845.c               optional hakios_camera845
 +bsd/dev/hakios.torch.c                   optional hakios_torch
 +bsd/dev/hakios.torch8998.c               optional hakios_torch8998
 +bsd/dev/hakios.socinfo.c                 optional hakios_socinfo
@@ -187,7 +188,7 @@ index 44274016a4cf..6ba02a37aa04 100644
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +213,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +214,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -240,7 +241,7 @@ index 44274016a4cf..6ba02a37aa04 100644
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +465,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +466,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -248,7 +249,7 @@ index 44274016a4cf..6ba02a37aa04 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +488,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +489,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard

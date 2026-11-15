@@ -151,7 +151,7 @@ void hakios_torch_init(void) {}
 void hakios_torch_quiesce(void) {}
 #endif
 
-#ifndef HAKIOS_CAMERA
+#if !defined(HAKIOS_CAMERA) && !defined(HAKIOS_CAMERA845)
 void hakios_camera_init(void) {}
 void hakios_camera_quiesce(void) {}
 #endif

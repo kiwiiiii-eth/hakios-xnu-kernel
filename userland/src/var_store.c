@@ -1120,7 +1120,10 @@ unpack_one(int make)
 	}
 	if (out_fd >= 0) {
 		/* on the data volume (Beta 0.5) each file is on the flash before init counts the move done */
-		fsync(out_fd);
+		if (fsync(out_fd) != 0) {
+			printf("var_store: %s: fsync: %s\n", path, strerror(errno));
+			short_files++;
+		}
 		close(out_fd);
 	}
 	if (!ok || !in_pad()) {

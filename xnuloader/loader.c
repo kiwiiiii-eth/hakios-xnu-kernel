@@ -4340,6 +4340,284 @@ ab_info(void)
 	fb_reply("OKAY", "");
 }
 
+/* ------------------------------------------------------------------------ */
+/* The partition table of the unit that holds userdata: Beta 0.4's darwin   */
+/*
+ * Beta 0.4's install.sh carves the partition darwin (the system image, /private/var) off the end of Android's
+ * userdata, and uninstall.sh puts the phone's own table back. Both go through here, and nothing else writes a GPT of
+ * that unit:
+ *
+ *   "oem gptinfo"   what both copies hold, into the log; to the host (INFO lines) userdata's and darwin's blocks, and
+ *                   "unit U blocks N", for readunit (read only)
+ *   "oem gptcheck"  a table staged with "oem ramdisk" and a download (tools/gpt-plan.py: a primary header block and
+ *                   its entries' blocks) held to the rules of gpt.c against both copies on the flash, and what it
+ *                   would change; nothing written
+ *   "oem gptwrite"  the same, and then it is written: the primary (its entries, then its header), then the backup made
+ *                   from it (its entries, then its header), each write read back before the next; a table the phone
+ *                   has already is not written again
+ *
+ * A table written leaves UEFI's own list of partitions (ABL's, which find_darwin and readpart go by) the old one until
+ * the phone restarts, so after a write darwinput, ramdisk darwin, readpart, slot and run are refused until then: the
+ * host restarts it into ABL's fastboot (the USB image's U-Boot set the reboot reason before this loader started).
+ */
+#include "gpt.c"
+
+static uint8_t gpt_p_hdr[4096] __attribute__((aligned(4096)));
+static uint8_t gpt_b_hdr[4096] __attribute__((aligned(4096)));
+static uint8_t gpt_new_hdr[4096] __attribute__((aligned(4096)));
+static uint8_t gpt_new_backup[4096] __attribute__((aligned(4096)));
+static uint8_t gpt_back[4096] __attribute__((aligned(4096)));
+static int gpt_written;                 /* a table was written: the partitions UEFI knows are the old ones until a reset */
+
+struct gpt_unit {
+	efi_block_io *bio;
+	uint64_t unit, bs, last;
+	int p_ok, b_ok;
+};
+
+/* a copy's header at lba into hdr and its entries into entries, both checked: 1 */
+static int
+gpt_read_copy(efi_block_io *bio, uint64_t bs, uint64_t lba, uint8_t *hdr, uint8_t *entries)
+{
+	if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, lba, bs, hdr)) || !gpt_header_checks(hdr, bs) ||
+	    gpt_entries_blocks_bytes(hdr, bs) > AB_TABLE_MAX || gpt_entries_lba(hdr) > bio->media->last_block ||
+	    EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, gpt_entries_lba(hdr), gpt_entries_blocks_bytes(hdr, bs),
+	    entries))) {
+		return 0;
+	}
+	return gpt_table_checks(hdr, entries, bs);
+}
+
+/* the unit with a copy of its table that checks and has userdata: 1 (u filled; the copies in gpt_p_hdr/ab_entries
+ * and gpt_b_hdr/ab_backup_entries), else 0 */
+static int
+gpt_locate(struct gpt_unit *u)
+{
+	static const efi_guid blk_guid = EFI_BLOCK_IO_GUID;
+	efi_handle *handles;
+	uint64_t count, units = 0;
+	int found = 0;
+
+	if (EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &blk_guid, NULL, &count, &handles))) {
+		return 0;
+	}
+	for (uint64_t i = 0; i < count && !found; i++) {
+		efi_block_io *bio;
+		uint64_t bs;
+
+		if (EFI_ERROR(BS->handle_protocol(handles[i], &blk_guid, (void **)&bio)) || bio->media->logical) {
+			continue;
+		}
+		units++;
+		bs = bio->media->block_size;
+		if (bs < 512 || bs > sizeof(gpt_p_hdr)) {
+			continue;
+		}
+		u->bio = bio;
+		u->unit = units - 1;
+		u->bs = bs;
+		u->last = bio->media->last_block;
+		u->p_ok = gpt_read_copy(bio, bs, 1, gpt_p_hdr, ab_entries) && gpt_my_lba(gpt_p_hdr) == 1 &&
+		    gpt_alternate_lba(gpt_p_hdr) == u->last;
+		u->b_ok = gpt_read_copy(bio, bs, u->last, gpt_b_hdr, ab_backup_entries) && gpt_my_lba(gpt_b_hdr) == u->last &&
+		    gpt_alternate_lba(gpt_b_hdr) == 1;
+		found = (u->p_ok && gpt_index(gpt_p_hdr, ab_entries, "userdata") >= 0) ||
+		    (u->b_ok && gpt_index(gpt_b_hdr, ab_backup_entries, "userdata") >= 0);
+	}
+	BS->free_pool(handles);
+	return found;
+}
+
+static void
+gpt_say_range(const char *name, const struct gpt_range *r)
+{
+	if (r->present) {
+		print("%s %d..%d", name, r->first, r->last);
+	} else {
+		print("%s none", name);
+	}
+}
+
+/* the line printed since mark, sent to the host as an INFO line as well ("(bootloader) ..." on its side; fastboot
+ * shows no text of an OKAY to an oem command), and ended in the log */
+static void
+gpt_tell(uint32_t mark)
+{
+	log_buf[log_len] = 0;
+	fb_reply("INFO", log_buf + mark);
+	print("\n");
+}
+
+/* the table as one copy holds it, into the log */
+static void
+gpt_say_copy(const char *which, const uint8_t *hdr, const uint8_t *entries, int ok)
+{
+	struct gpt_range r;
+	int i;
+
+	print("gpt: %s: ", which);
+	if (!ok) {
+		print("does not check\n");
+		return;
+	}
+	print("lba %d, entries at %d (%d of %d bytes), usable %d..%d; ", gpt_my_lba(hdr), gpt_entries_lba(hdr),
+	    (uint64_t)gpt_count(hdr), (uint64_t)gpt_entry_size(hdr), gpt_get64(hdr, 40), gpt_last_usable(hdr));
+	r.present = 0;
+	if ((i = gpt_index(hdr, entries, "userdata")) >= 0) {
+		gpt_range_of(entries + (uint64_t)i * gpt_entry_size(hdr), &r);
+	}
+	gpt_say_range("userdata", &r);
+	r.present = 0;
+	if ((i = gpt_index(hdr, entries, "darwin")) >= 0) {
+		gpt_range_of(entries + (uint64_t)i * gpt_entry_size(hdr), &r);
+	}
+	print(", ");
+	gpt_say_range("darwin", &r);
+	print("\n");
+}
+
+static void
+gpt_info(void)
+{
+	struct gpt_unit u;
+	const uint8_t *h, *e;
+	struct gpt_range ud, dw;
+	uint32_t mark;
+	int i;
+
+	log_len = 0;
+	if (!gpt_locate(&u)) {
+		fb_reply("FAIL", "no unit has userdata in a table that checks");
+		return;
+	}
+	print("gpt: unit %d, %d blocks of %d bytes\n", u.unit, u.last + 1, u.bs);
+	gpt_say_copy("primary", gpt_p_hdr, ab_entries, u.p_ok);
+	gpt_say_copy("backup", gpt_b_hdr, ab_backup_entries, u.b_ok);
+	if (u.p_ok && u.b_ok) {
+		print("gpt: the two copies' entries are %s\n",
+		    memcmp(ab_entries, ab_backup_entries, gpt_entries_bytes(gpt_p_hdr)) == 0 ? "the same" : "NOT the same");
+	}
+	if (gpt_written) {
+		print("gpt: a table was written since this loader started: restart before anything else\n");
+	}
+	h = u.p_ok ? gpt_p_hdr : gpt_b_hdr;
+	e = u.p_ok ? ab_entries : ab_backup_entries;
+	ud.present = dw.present = 0;
+	if ((i = gpt_index(h, e, "userdata")) >= 0) gpt_range_of(e + (uint64_t)i * gpt_entry_size(h), &ud);
+	if ((i = gpt_index(h, e, "darwin")) >= 0) gpt_range_of(e + (uint64_t)i * gpt_entry_size(h), &dw);
+	mark = log_len;
+	gpt_say_range("userdata", &ud);
+	print(" ");
+	gpt_say_range("darwin", &dw);
+	gpt_tell(mark);
+	/* what a host needs to read the table's blocks with readunit (the first 8, and the last 8) */
+	mark = log_len;
+	print("unit %d blocks %d", u.unit, u.last + 1);
+	gpt_tell(mark);
+	fb_reply("OKAY", "");
+}
+
+/* one copy: its entries, then its header, each written and read back: NULL, or what did not read back */
+static const char *
+gpt_write_copy(const struct gpt_unit *u, uint64_t entries_lba, uint8_t *entries, uint64_t bytes, uint64_t hdr_lba,
+    uint8_t *hdr)
+{
+	efi_block_io *bio = u->bio;
+
+	if (EFI_ERROR(bio->write_blocks(bio, bio->media->media_id, entries_lba, bytes, entries)) ||
+	    EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, entries_lba, bytes, ab_check)) ||
+	    memcmp(ab_check, entries, bytes) != 0) {
+		return "its entries";
+	}
+	if (EFI_ERROR(bio->write_blocks(bio, bio->media->media_id, hdr_lba, u->bs, hdr)) ||
+	    EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, hdr_lba, u->bs, gpt_back)) ||
+	    memcmp(gpt_back, hdr, u->bs) != 0) {
+		return "its header";
+	}
+	return NULL;
+}
+
+/* "oem gptcheck" (write 0) and "oem gptwrite" (write 1) */
+static void
+gpt_put(int write)
+{
+	struct gpt_unit u;
+	struct gpt_change c;
+	uint8_t *st = (uint8_t *)(win_base + RESIDENT_RD_OFFSET), *entries;
+	uint64_t bs, blocks_bytes, backup_entries_lba;
+	const char *why;
+	uint32_t mark;
+
+	log_len = 0;
+	if (!gpt_locate(&u)) {
+		fb_reply("FAIL", "no unit has userdata in a table that checks");
+		return;
+	}
+	bs = u.bs;
+	if (win_base == 0 || resident_rd_size < 2 * bs || !gpt_header_checks(st, bs) ||
+	    resident_rd_size != bs + gpt_entries_blocks_bytes(st, bs) || gpt_entries_blocks_bytes(st, bs) > AB_TABLE_MAX) {
+		fb_reply("FAIL", "no table staged (oem ramdisk, then its download)");
+		return;
+	}
+	/* the staged header alone in its block, the entries with nothing after them in theirs */
+	memset(gpt_new_hdr, 0, sizeof(gpt_new_hdr));
+	memcpy(gpt_new_hdr, st, gpt_header_size(st));
+	entries = st + bs;
+	blocks_bytes = gpt_entries_blocks_bytes(gpt_new_hdr, bs);
+	memset(entries + gpt_entries_bytes(gpt_new_hdr), 0, blocks_bytes - gpt_entries_bytes(gpt_new_hdr));
+	print("gpt: unit %d; primary %s, backup %s\n", u.unit, u.p_ok ? "checks" : "DOES NOT CHECK",
+	    u.b_ok ? "checks" : "DOES NOT CHECK");
+	why = gpt_decide(gpt_p_hdr, ab_entries, u.p_ok, gpt_b_hdr, ab_backup_entries, u.b_ok, gpt_new_hdr, entries, bs, &c);
+	if (why != NULL) {
+		print("gpt: refused: %s\n", why);
+		fb_reply("FAIL", why);
+		return;
+	}
+	mark = log_len;
+	gpt_say_range("userdata", &c.userdata_was);
+	print(" ->");
+	gpt_say_range("", &c.userdata);
+	gpt_tell(mark);
+	mark = log_len;
+	gpt_say_range("darwin", &c.darwin_was);
+	print(" ->");
+	gpt_say_range("", &c.darwin);
+	gpt_tell(mark);
+	mark = log_len;
+	print("%s", c.same ? "the phone has this table already" : c.mend ? "allowed; the two copies are made one" : "allowed");
+	gpt_tell(mark);
+	if (!write || c.same) {
+		fb_reply("OKAY", "");
+		return;
+	}
+	/* where the backup goes: the backup's own place when it checks, else just before the last block */
+	backup_entries_lba = u.b_ok ? gpt_entries_lba(gpt_b_hdr) : u.last - blocks_bytes / bs;
+	if (gpt_entries_lba(gpt_new_hdr) < 2 || gpt_entries_lba(gpt_new_hdr) + blocks_bytes / bs > gpt_get64(gpt_new_hdr, 40) ||
+	    backup_entries_lba <= gpt_last_usable(gpt_new_hdr) || backup_entries_lba + blocks_bytes / bs > u.last) {
+		fb_reply("FAIL", "the entries would not lie outside the partitions");
+		return;
+	}
+	gpt_backup_header(gpt_new_hdr, gpt_new_backup, bs, u.last, backup_entries_lba);
+	if ((why = gpt_write_copy(&u, gpt_entries_lba(gpt_new_hdr), entries, blocks_bytes, 1, gpt_new_hdr)) != NULL) {
+		gpt_written = 1;
+		print("gpt: writing the primary: %s did not read back the same\n", why);
+		fb_reply("FAIL", "the primary did not read back the same (see oem log)");
+		return;
+	}
+	gpt_written = 1;
+	if ((why = gpt_write_copy(&u, backup_entries_lba, entries, blocks_bytes, u.last, gpt_new_backup)) != NULL) {
+		print("gpt: the primary is written; writing the backup: %s did not read back the same\n", why);
+		fb_reply("FAIL", "the backup did not read back the same (see oem log)");
+		return;
+	}
+	u.bio->flush_blocks(u.bio);
+	resident_rd_size = 0;
+	mark = log_len;
+	print("written, both copies read back: restart the phone now");
+	gpt_tell(mark);
+	fb_reply("OKAY", "");
+}
+
 /* "oem readunit UNIT LBA BLOCKS": a raw logical unit's blocks staged for get_staged (read only), for copies of its GPT */
 static void
 read_unit_staged(const char *arg)
@@ -4511,8 +4789,12 @@ fb_command(char *cmd)
 		    starts_with(cmd, "oem selftest") || starts_with(cmd, "oem hang") || starts_with(cmd, "oem recording") ||
 		    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap") ||
 		    starts_with(cmd, "oem readpart") || starts_with(cmd, "oem darwin") || starts_with(cmd, "oem slot") ||
-		    starts_with(cmd, "oem readunit"))) {
+		    starts_with(cmd, "oem readunit") || starts_with(cmd, "oem gpt"))) {
 			fb_reply("FAIL", "a kernel is running (oem stop ends it)");
+		} else if (gpt_written && (starts_with(cmd, "oem darwin") || starts_with(cmd, "oem ramdisk darwin") ||
+		    starts_with(cmd, "oem readpart") || starts_with(cmd, "oem slot") || starts_with(cmd, "oem run") ||
+		    starts_with(cmd, "oem selftest"))) {
+			fb_reply("FAIL", "the partition table was written: restart first");
 		} else if (starts_with(cmd, "oem stop")) {
 			/* the kernel looks at this once a second and comes back as it does when its time is up */
 			if (busy && running_live != NULL) {
@@ -4645,6 +4927,12 @@ fb_command(char *cmd)
 			ab_info();
 		} else if (starts_with(cmd, "oem slotok")) {
 			fb_reply(ab_mark_successful() ? "OKAY" : "FAIL", "");
+		} else if (starts_with(cmd, "oem gptinfo")) {
+			gpt_info();
+		} else if (starts_with(cmd, "oem gptcheck")) {
+			gpt_put(0);
+		} else if (starts_with(cmd, "oem gptwrite")) {
+			gpt_put(1);
 		} else if (starts_with(cmd, "oem readunit ")) {
 			read_unit_staged(cmd + 13);
 		} else if (starts_with(cmd, "oem darwinput")) {

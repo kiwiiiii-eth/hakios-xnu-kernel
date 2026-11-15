@@ -1679,6 +1679,7 @@ worker(void *context)
 	struct reader reader;
 	bool reading = false;
 	int taken = -1;
+	unsigned thermal_look = 0, thermal_every = 1, thermal_skip = 0;
 	/*
 	 * A photograph's frame: not the one right after the shutter's press, which the press itself shakes (r202: the preview
 	 * steady in the hand, the photograph blurred), but the sharpest of the four after the next, each one's focus window
@@ -1751,6 +1752,31 @@ worker(void *context)
 		}
 		buffer = reader.buf[taken];
 		failures = 0;
+		/*
+		 * Hot: fewer frames made. Nothing in the kernel slows the cores down (drivers/power/hakios.thermal.c: it stops the
+		 * phone at 105 degrees), and the camera open five minutes took them to 97 (r204): from 88 every other frame is
+		 * left, from 95 two of three -- a photograph still the next frames' (taken whatever the heat).
+		 */
+		if (++thermal_look >= 60) {
+			int mc = 0;
+			size_t n_mc = sizeof(mc);
+
+			thermal_look = 0;
+			if (sysctlbyname("kern.hakios.thermal_max_mc", &mc, &n_mc, NULL, 0) == 0) {
+				unsigned was = thermal_every;
+
+				thermal_every = mc >= 95000 ? 3 : mc >= 88000 ? 2 : mc < 84000 ? 1 : thermal_every;
+				if (thermal_every != was) {
+					say("hot: the hottest sensor at %.1f degrees: %s", mc / 1000.0, thermal_every == 1 ? "every frame again" :
+					    thermal_every == 2 ? "every other frame" : "one frame in three");
+				}
+			}
+		}
+		if (thermal_every > 1 && s->stills_wanted == 0 && ++thermal_skip % thermal_every != 0) {
+			reader_give_back(&reader, taken);
+			taken = -1;
+			continue;
+		}
 
 		const struct hakios_camera_frame *f = (const void *)buffer;
 		const uint8_t *raw = buffer + f->header_bytes;

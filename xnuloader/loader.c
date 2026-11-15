@@ -510,6 +510,16 @@ dt_prop_padded(struct dt_writer *w, const char *name, const char *value, uint32_
  * what the framebuffer is: sRGB.
  */
 static int gamut_p3;    /* boot-arg gamut=p3 (a test): the iPhone's own "P3" left in place */
+/*
+ * boot-arg island=1: the Dynamic Island. Darwin has no answer of its own for "this phone has one": SpringBoard, Spring-
+ * BoardServices and the frameworks that ask (MediaRemote, ReplayKit, PassKitUI, FocusUI...) each take MobileGestalt's
+ * ArtworkDeviceSubType, which MobileGestalt reads from /product's artwork-device-subtype, for 2556 or 2796 (the iPhone 14
+ * Pro and Pro Max) -- the iPhone X's 16.5 has all of the island's code (SystemAperture, SpringBoard's SBSystemAperture*):
+ * so 2556 instead of the X's 2436 (lanes/dynamic-island-research.md). init drops MobileGestalt's cache whenever this
+ * changes from one boot to the next (userland/src/init.c, island_cache()).
+ */
+static int island_requested;
+#define ISLAND_SUBTYPE          2556
 
 static void
 dt_identity(struct dt_writer *w, const struct identity_prop *props, uint32_t count, const unsigned char *data)
@@ -520,6 +530,12 @@ dt_identity(struct dt_writer *w, const struct identity_prop *props, uint32_t cou
 		}
 		if (str_eq(props[i].name, "artwork-display-gamut") && !gamut_p3) {
 			dt_prop(w, props[i].name, "sRGB", 5);
+			continue;
+		}
+		if (str_eq(props[i].name, "artwork-device-subtype") && island_requested && props[i].length == 4) {
+			uint32_t subtype = ISLAND_SUBTYPE;
+
+			dt_prop(w, props[i].name, &subtype, 4);
 			continue;
 		}
 		dt_prop(w, props[i].name, data + props[i].offset, props[i].length);
@@ -3032,6 +3048,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	int camera_requested = 0;
 	/* (the loader stays for run after run: what the last run's arguments said must not hold for this one) */
 	gamut_p3 = 0;
+	island_requested = 0;
 	/* a run that does not ask for writes does not get them, whatever an earlier run of this
 	 * loader asked for (the loader stays resident across runs) */
 	block_write_requested = 0;
@@ -3053,6 +3070,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		torch_requested |= starts_with(c, "torch=") && (c == pi.cmdline || c[-1] == ' ') && c[6] >= '1' && c[6] <= '9';
 		camera_requested |= starts_with(c, "cam=5") && (c == pi.cmdline || c[-1] == ' ') && (c[5] == 0 || c[5] == ' ');
 		gamut_p3 |= starts_with(c, "gamut=p3") && (c == pi.cmdline || c[-1] == ' ');
+		island_requested |= starts_with(c, "island=1") && (c == pi.cmdline || c[-1] == ' ') && (c[8] == 0 || c[8] == ' ');
 		if (starts_with(c, "ufs=") && (c == pi.cmdline || c[-1] == ' ') && c[4] >= '1' && c[4] <= '2' &&
 		    (c[5] == 0 || c[5] == ' ')) {
 			ufs_requested = c[4] - '0';

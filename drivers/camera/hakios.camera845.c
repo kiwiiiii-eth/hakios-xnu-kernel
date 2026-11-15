@@ -3930,11 +3930,9 @@ camdev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 	f.focus = af_position;
 	lck_mtx_unlock(&darwin_lock);
 	/*
-	 * Every group of cores at its top speed while frames are read, as with a finger on the screen: the program makes
-	 * each frame's picture on all the cores at once (libhakios.media's processor, in pieces), a burst the load-driven
-	 * speed did not climb for -- the main camera's preview took 57-69 ms a frame, 13-15 a second (r186).
+	 * (Not the cores at their top speed as well: r187 had them so and the preview was no faster, and r204, the camera
+	 * open five minutes with them so, took the hottest core to 97 degrees -- 105 stops the phone. The load drives them.)
 	 */
-	hakios_cpufreq_boost();
 	/*
 	 * And the GPU at its fast speed: gpu_dvfs (drivers/gpu/hakios.a630.c) counts submissions, more than six in 100 ms, and
 	 * the window server drawing the camera's preview at 20-30 frames a second stays at or under that -- r196's camera

@@ -59,6 +59,46 @@ join(const char *a, const char *b, const char *c)
 	return buf;
 }
 
+static const char *boot_arg(const char *name);
+
+/*
+ * The Dynamic Island (boot-arg island=1: the loader gives /product's artwork-device-subtype as an iPhone 14 Pro's, 2556):
+ * MobileGestalt keeps its answers, that one among them, in /private/var, which is kept between boots, and goes by them
+ * while the system's version is the same -- the island did not come with island=1, nor go without it. So when this
+ * boot's island differs from the last one's (/private/var/db/hakios-island), the cache is removed before anything asks.
+ */
+#define MG_CACHE "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/" \
+	"com.apple.MobileGestalt.plist"
+#define ISLAND_STATE "/private/var/db/hakios-island"
+static void
+island_cache(void)
+{
+	const char *arg = boot_arg("island");
+	char want = arg != NULL && strcmp(arg, "1") == 0 ? '1' : '0', last = '0';
+	int fd = open(ISLAND_STATE, O_RDONLY, 0);
+
+	if (fd >= 0) {
+		if (read(fd, &last, 1) != 1) {
+			last = '0';
+		}
+		close(fd);
+	}
+	if (want == last) {
+		return;
+	}
+	if (unlink(MG_CACHE) == 0 || errno == 2) {    /* (ENOENT: none to drop) */
+		printf("  the Dynamic Island %s: MobileGestalt's cache dropped\n", want == '1' ? "on (island=1)" : "off");
+	} else {
+		printf("  the Dynamic Island %s: MobileGestalt's cache NOT dropped: %s\n", want == '1' ? "on" : "off", strerror(errno));
+	}
+	mkdir("/private/var/db", 0755);
+	fd = open(ISLAND_STATE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd >= 0) {
+		(void)write(fd, &want, 1);
+		close(fd);
+	}
+}
+
 /* The value of boot-arg NAME on the kernel's command line, or NULL. */
 static const char *
 boot_arg(const char *name)
@@ -1099,6 +1139,9 @@ mount_writable(void)
 			printf("  unmount /private/var: %s: the memory filesystem goes over it\n", strerror(errno));
 		}
 		var_kept = 0;
+	}
+	if (var_kept) {
+		island_cache();
 	}
 	if (var_kept) {
 		/* the root reports this volume's space, as an iPhone's / reports its container's (Settings > iPhone Storage) */

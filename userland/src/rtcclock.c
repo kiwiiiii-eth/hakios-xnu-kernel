@@ -13,6 +13,16 @@
  *              written to the file if it has moved by more than two seconds: when iOS has set the clock from the
  *              network, or by hand in Settings, the next boot starts from that.
  *
+ * The count has been seen to start again from zero: twice on 2026-11-15, at 12:31:30 and at 15:13:50, both times the
+ * phone was got out of a stuck loader with Power and Volume Up held (a restart from iOS, ABL or the loader does not, nor
+ * did the same buttons held in iOS at 15:52; what does is not known). The count plus the old offset is then a time long
+ * past -- the boot after the second was set back from the image's 14:47 to 12:38 until iOS had the network's time. So the file keeps the count it was written at as well
+ * ("offset count"; a file of the offset alone is taken without it), and the clock is left as it is when
+ *
+ *   - the count is lower than that: it was started again;
+ *   - the count and the offset would set the clock back: the image was built before the boot, so the time it starts
+ *     with is never later than the true one.
+ *
  * It never sets the clock but once, at start; iOS's own time service corrects it afterwards as on any iPhone.
  *
  *   usage: rtcclock            (from a launchd job's rc.jobs line, in the background)
@@ -41,8 +51,9 @@ rtc_now(long long *seconds)
 	return 1;
 }
 
+/* the offset kept, and the count it was written at (-1: a file from before the count was kept) */
 static int
-offset_read(long long *offset)
+offset_read(long long *offset, long long *count)
 {
 	FILE *f = fopen(OFFSET_FILE, "r");
 	int got;
@@ -50,13 +61,14 @@ offset_read(long long *offset)
 	if (f == NULL) {
 		return 0;
 	}
-	got = fscanf(f, "%lld", offset) == 1;
+	*count = -1;
+	got = fscanf(f, "%lld %lld", offset, count) >= 1;
 	fclose(f);
 	return got;
 }
 
 static int
-offset_write(long long offset)
+offset_write(long long offset, long long count)
 {
 	char temporary[] = OFFSET_FILE ".new";
 	FILE *f = fopen(temporary, "w");
@@ -64,7 +76,7 @@ offset_write(long long offset)
 	if (f == NULL) {
 		return 0;
 	}
-	fprintf(f, "%lld\n", offset);
+	fprintf(f, "%lld %lld\n", offset, count);
 	if (fclose(f) != 0 || rename(temporary, OFFSET_FILE) != 0) {
 		unlink(temporary);
 		return 0;
@@ -75,7 +87,7 @@ offset_write(long long offset)
 int
 main(void)
 {
-	long long rtc = 0, offset = 0;
+	long long rtc = 0, offset = 0, count = -1;
 	int have = 0, waited = 0;
 	struct timeval now;
 
@@ -89,8 +101,17 @@ main(void)
 		return 0;
 	}
 	gettimeofday(&now, NULL);
-	have = offset_read(&offset);
-	if (have) {
+	have = offset_read(&offset, &count);
+	if (have && count >= 0 && rtc + SLACK < count) {
+		printf("rtcclock: the real-time clock counts %lld, less than the %lld the offset was kept at: it was started "
+		    "again: the clock is left as it is, and the offset kept again\n", rtc, count);
+		have = 0;
+	} else if (have && rtc + offset + SLACK < (long long)now.tv_sec) {
+		printf("rtcclock: the real-time clock and the kept offset would set the clock back %lld s, before the time "
+		    "this image starts with: the count was started again: the clock is left as it is, and the offset kept again\n",
+		    (long long)now.tv_sec - (rtc + offset));
+		have = 0;
+	} else if (have) {
 		long long target = rtc + offset;
 
 		if (llabs(target - (long long)now.tv_sec) > SLACK) {
@@ -118,7 +139,7 @@ main(void)
 		long long current = (long long)now.tv_sec - rtc;
 
 		if (!have || llabs(current - offset) > SLACK) {
-			if (offset_write(current)) {
+			if (offset_write(current, rtc)) {
 				if (have) {
 					printf("rtcclock: the offset kept moves by %+lld s\n", current - offset);
 				}

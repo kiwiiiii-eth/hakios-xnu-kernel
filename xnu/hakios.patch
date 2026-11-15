@@ -1216,6 +1216,28 @@ index 74a2036cf69e..a68b79ce48fa 100644
  
  #define UIO_IS_USER_SPACE32( a_uio_t )  \
  	( (a_uio_t)->uio_segflg == UIO_USERSPACE32 || (a_uio_t)->uio_segflg == UIO_PHYS_USERSPACE32 || \
+diff --git a/bsd/vfs/kpi_vfs.c b/bsd/vfs/kpi_vfs.c
+index 6bf58c3215f7..1c9fcfcc2101 100644
+--- a/bsd/vfs/kpi_vfs.c
++++ b/bsd/vfs/kpi_vfs.c
+@@ -739,6 +739,8 @@ vfs_statfs(mount_t mp)
+ 	return &mp->mnt_vfsstat;
+ }
+ 
++extern void hakios_space_for_root(mount_t, struct vfs_attr *, vfs_context_t);   /* drivers/storage/hakios.ufs.c */
++
+ int
+ vfs_getattr(mount_t mp, struct vfs_attr *vfa, vfs_context_t ctx)
+ {
+@@ -747,6 +749,8 @@ vfs_getattr(mount_t mp, struct vfs_attr *vfa, vfs_context_t ctx)
+ 	if ((error = VFS_GETATTR(mp, vfa, ctx)) != 0) {
+ 		return error;
+ 	}
++	/* HakiOS: the root (the read-only system image) reports the data volume's space, as an iPhone's / shares its container's */
++	hakios_space_for_root(mp, vfa, ctx);
+ 
+ 	/*
+ 	 * If we have a filesystem create time, use it to default some others.
 diff --git a/bsd/vfs/vfs_attrlist.c b/bsd/vfs/vfs_attrlist.c
 index cbaa0b221894..78315a2d54cf 100644
 --- a/bsd/vfs/vfs_attrlist.c

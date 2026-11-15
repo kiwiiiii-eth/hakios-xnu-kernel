@@ -276,6 +276,20 @@ unmount(const char *dir, int flags)
 }
 
 int
+fs_fsid(const char *path, int32_t fsid[2])
+{
+	/* struct statfs64: f_fsid, two 32-bit words, at 48 */
+	static uint64_t sfs[2176 / 8];
+
+	if (SC(SYS_statfs64, path, sfs, 0, 0, 0, 0) != 0) {
+		return -1;
+	}
+	fsid[0] = ((int32_t *)sfs)[12];
+	fsid[1] = ((int32_t *)sfs)[13];
+	return 0;
+}
+
+int
 fs_type(const char *path, char *name, size_t size)
 {
 	/* struct statfs64 (sys/mount.h): f_fstypename, 16 bytes, at 72; the whole is 2168 */

@@ -52,6 +52,7 @@
 #include <sys/buf.h>
 #include <sys/conf.h>
 #include <sys/disk.h>
+#include <sys/mount.h>
 #include <sys/errno.h>
 #include <sys/systm.h>
 #include <sys/proc.h>
@@ -678,6 +679,88 @@ ufs_write_restore(void)
 }
 
 /* ---- the data volume: darwin from ufs_data_first on ---- */
+
+/*
+ * The space the root reports (statfs, getattrlist: what Settings > General > iPhone Storage counts with). On an
+ * iPhone / and /private/var are volumes of one APFS container and report its space; here / is the read-only system
+ * image (2.6 GB, nothing free) and the data volume is HFS Plus in darwin. Once init has the volume mounted it names it
+ * (kern.hakios.space_from, its fsid), and from then on the root reports that volume's blocks, in its own block size.
+ * bsd/vfs/kpi_vfs.c's vfs_getattr calls this after every file system's own answer.
+ */
+static int32_t ufs_space_fsid[2];
+static bool ufs_space_set;
+
+void hakios_space_for_root(mount_t mp, struct vfs_attr *vfa, vfs_context_t ctx);
+
+void
+hakios_space_for_root(mount_t mp, struct vfs_attr *vfa, vfs_context_t ctx)
+{
+	struct vfs_attr da;
+	fsid_t fsid;
+	mount_t dm;
+	uint64_t rbs;
+
+	if (!ufs_space_set || mp == NULL || !(vfs_flags(mp) & MNT_ROOTFS) ||
+	    !(VFSATTR_IS_ACTIVE(vfa, f_blocks) || VFSATTR_IS_ACTIVE(vfa, f_bfree) || VFSATTR_IS_ACTIVE(vfa, f_bavail) ||
+	    VFSATTR_IS_ACTIVE(vfa, f_bused))) {
+		return;
+	}
+	fsid.val[0] = ufs_space_fsid[0];
+	fsid.val[1] = ufs_space_fsid[1];
+	dm = vfs_getvfs(&fsid);
+	if (dm == NULL || dm == mp) {
+		return;
+	}
+	VFSATTR_INIT(&da);
+	VFSATTR_WANTED(&da, f_bsize);
+	VFSATTR_WANTED(&da, f_blocks);
+	VFSATTR_WANTED(&da, f_bfree);
+	VFSATTR_WANTED(&da, f_bavail);
+	VFSATTR_WANTED(&da, f_bused);
+	if (VFS_GETATTR(dm, &da, ctx) != 0 || !VFSATTR_IS_SUPPORTED(&da, f_bsize) || !VFSATTR_IS_SUPPORTED(&da, f_blocks) ||
+	    da.f_bsize == 0) {
+		return;
+	}
+	rbs = VFSATTR_IS_SUPPORTED(vfa, f_bsize) && vfa->f_bsize != 0 ? vfa->f_bsize : da.f_bsize;
+	if (!VFSATTR_IS_SUPPORTED(vfa, f_bsize) && VFSATTR_IS_ACTIVE(vfa, f_bsize)) {
+		VFSATTR_RETURN(vfa, f_bsize, (uint32_t)rbs);
+	}
+	if (VFSATTR_IS_ACTIVE(vfa, f_blocks)) {
+		VFSATTR_RETURN(vfa, f_blocks, da.f_blocks * da.f_bsize / rbs);
+	}
+	if (VFSATTR_IS_ACTIVE(vfa, f_bfree) && VFSATTR_IS_SUPPORTED(&da, f_bfree)) {
+		VFSATTR_RETURN(vfa, f_bfree, da.f_bfree * da.f_bsize / rbs);
+	}
+	if (VFSATTR_IS_ACTIVE(vfa, f_bavail) && VFSATTR_IS_SUPPORTED(&da, f_bavail)) {
+		VFSATTR_RETURN(vfa, f_bavail, da.f_bavail * da.f_bsize / rbs);
+	}
+	if (VFSATTR_IS_ACTIVE(vfa, f_bused) && VFSATTR_IS_SUPPORTED(&da, f_bused)) {
+		VFSATTR_RETURN(vfa, f_bused, da.f_bused * da.f_bsize / rbs);
+	}
+}
+
+/* kern.hakios.space_from: the fsid (two 32-bit words) of the volume whose space the root reports; init sets it */
+static int
+ufs_sysctl_space_from(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int32_t value[2] = { ufs_space_fsid[0], ufs_space_fsid[1] };
+	int error = SYSCTL_OUT(req, value, sizeof(value));
+
+	if (error != 0 || req->newptr == USER_ADDR_NULL) {
+		return error;
+	}
+	if (req->newlen != sizeof(value) || (error = SYSCTL_IN(req, value, sizeof(value))) != 0) {
+		return error != 0 ? error : EINVAL;
+	}
+	ufs_space_fsid[0] = value[0];
+	ufs_space_fsid[1] = value[1];
+	ufs_space_set = value[0] != 0 || value[1] != 0;
+	printf("ufs: the root reports the space of the volume %08x:%08x\n", (uint32_t)value[0], (uint32_t)value[1]);
+	return 0;
+}
+
+SYSCTL_PROC(_kern_hakios, OID_AUTO, space_from, CTLTYPE_OPAQUE | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0,
+    ufs_sysctl_space_from, "S", "the fsid of the volume whose space the root reports (init: the data volume)");
 
 /*
  * Where the data volume begins in darwin, in blocks of 4096: UFS_WRITE_FIRST, past the Darwin volume and the cryptexes,

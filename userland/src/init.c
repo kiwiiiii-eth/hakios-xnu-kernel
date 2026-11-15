@@ -1081,6 +1081,15 @@ mount_writable(void)
 		var_kept = 0;
 	}
 	if (var_kept) {
+		/* the root reports this volume's space, as an iPhone's / reports its container's (Settings > iPhone Storage) */
+		int32_t fsid[2];
+
+		if (fs_fsid("/private/var", fsid) == 0 &&
+		    sysctlbyname("kern.hakios.space_from", NULL, NULL, fsid, sizeof(fsid)) == 0) {
+			printf("  / reports the data volume's space\n");
+		}
+	}
+	if (var_kept) {
 		static const char *const own[] = { "/private/var/tmp", "/private/var/run", "/private/var/vm" };
 
 		for (unsigned i = 0; i < sizeof(own) / sizeof(own[0]); i++) {

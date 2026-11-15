@@ -170,6 +170,8 @@ int     sync(void);
 int     unmount(const char *dir, int flags);
 /* the type of the file system PATH is on ("hfs", "ramfs", ...), from statfs64's f_fstypename: 0, or -1 */
 int     fs_type(const char *path, char *name, size_t size);
+/* the fsid of the file system PATH is on (statfs64's f_fsid): 0, or -1 */
+int     fs_fsid(const char *path, int32_t fsid[2]);
 ssize_t pread(int fd, void *buf, size_t count, off_t offset);
 ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
 int     socket(int domain, int type, int protocol);

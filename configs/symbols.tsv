@@ -88,18 +88,22 @@ CA_METALLIB	arg	ca_metallib	User space	u	inject.c
 CA_PROF	arg	ca_prof	User space	u	HakiosMetalCA.m	
 CA_VBL	arg	ca_vbl	User space	u	inject.c	CoreAnimation's frame clock from the display driver's refresh notifications
 CAENV	arg	caenv	User space	u	inject.c,inject_sb.c	CoreAnimation's switches here as in the window server (inject.c), set before QuartzCore reads them
-CAM_AFTER	arg	cam_after	Cameras	k	hakios.camera.c	
-CAM_FAKE	arg	cam_fake	Cameras	k	hakios.camera.c	
-CAM_FAKE_FPS	arg	cam_fake_fps	Cameras	k	hakios.camera.c	
-CAM_FRAMES	arg	cam_frames	Cameras	k	hakios.camera.c	
-CAM_GAIN	arg	cam_gain	Cameras	k	hakios.camera.c	
-CAM_KEEP_MB	arg	cam_keep_mb	Cameras	k	hakios.camera.c	
-CAM_MODE	arg	cam_mode	Cameras	k	hakios.camera.c	
-CAM_PATTERN	arg	cam_pattern	Cameras	k	hakios.camera.c	
-CAM_SENSOR	arg	cam_sensor	Cameras	k	hakios.camera.c	
-CAM_SETTLE	arg	cam_settle	Cameras	k	hakios.camera.c	
-CAM_SHUTTER	arg	cam_shutter	Cameras	k	hakios.camera.c	
-CAM_VBLANK	arg	cam_vblank	Cameras	k	hakios.camera.c	
+CAM_AFTER	arg	cam_after	Cameras	k	hakios.camera.c,hakios.camera845.c	
+CAM_EEPROM	arg	cam_eeprom	User space	k	hakios.camera845.c	
+CAM_FAKE	arg	cam_fake	Cameras	k	hakios.camera.c,hakios.camera845.c	
+CAM_FAKE_FPS	arg	cam_fake_fps	Cameras	k	hakios.camera.c,hakios.camera845.c	
+CAM_FRAMES	arg	cam_frames	Cameras	k	hakios.camera.c,hakios.camera845.c	
+CAM_FULL	arg	cam_full	User space	k	hakios.camera845.c	the sensor's whole array (the IMX519's 4656x3496, the IMX371's 4608x3456), at 30 frames a second at
+CAM_GAIN	arg	cam_gain	Cameras	k	hakios.camera.c,hakios.camera845.c	
+CAM_KEEP	arg	cam_keep	User space	u	camera_device.c	the 90th frame of the front camera's stream, as the sensor gave it (RAW10), its middle 1024 lines
+CAM_KEEP_MB	arg	cam_keep_mb	Cameras	k	hakios.camera.c,hakios.camera845.c	
+CAM_MODE	arg	cam_mode	Cameras	k	hakios.camera.c,hakios.camera845.c	
+CAM_OIS	arg	cam_ois	User space	k	hakios.camera845.c	
+CAM_PATTERN	arg	cam_pattern	Cameras	k	hakios.camera.c,hakios.camera845.c	
+CAM_SENSOR	arg	cam_sensor	Cameras	k	hakios.camera.c,hakios.camera845.c	
+CAM_SETTLE	arg	cam_settle	Cameras	k	hakios.camera.c,hakios.camera845.c	
+CAM_SHUTTER	arg	cam_shutter	Cameras	k	hakios.camera.c,hakios.camera845.c	
+CAM_VBLANK	arg	cam_vblank	Cameras	k	hakios.camera.c,hakios.camera845.c	
 CC_FADE	arg	cc_fade	User space	u	inject_sb.c	
 CPUFREQ_BOOST	arg	cpufreq_boost	CPU, memory and boot	k	hakios.cpufreq.c	
 CPUFREQ_GOV	arg	cpufreq_gov	CPU, memory and boot	k	hakios.cpufreq.c	
@@ -185,6 +189,7 @@ HID_RESOURCE	arg	hid_resource	User space	k	hakios.hidres.c	neither (the default 
 IPA8	arg	ipa8	User space	k	hakios.mpss845.c	the IPA 3.5.1 is set up before the modem (its firmware, memory, hardware, our data path): the entry
 IPA_GSI_LOOK	arg	ipa_gsi_look	User space	k	hakios.mpss845.c	
 IPA_IRAM_LOOK	arg	ipa_iram_look	User space	k	hakios.mpss845.c	
+ISLAND	arg	island	Loader	lu	init.c,loader.c	the Dynamic Island. Darwin has no answer of its own for "this phone has one": SpringBoard, Spring
 M2V_UTRACE	arg	m2v_utrace	User space	u	HakiosMetalCA.m	Turnip's GPU trace of every render pass (u_trace) into a file, printed during the run
 MACHINE_NAME	arg	machine_name	CPU, memory and boot	k	GenericARMPE.cpp	
 MEMBENCH	arg	membench	CPU, memory and boot	k	hakios.cpufreq.c	

@@ -95,12 +95,16 @@ ca_vbl	u
 caenv	u
 cam	kl
 cam_after	k
+cam_eeprom	k
 cam_fake	k
 cam_fake_fps	k
 cam_frames	k
+cam_full	k
 cam_gain	k
+cam_keep	u
 cam_keep_mb	k
 cam_mode	k
+cam_ois	k
 cam_pattern	k
 cam_sensor	k
 cam_settle	k
@@ -198,6 +202,7 @@ hv_wdt_pet	k
 ipa8	k
 ipa_gsi_look	k
 ipa_iram_look	k
+island	lu
 loader_return_after	kl
 m2v_utrace	u
 machine_name	k

@@ -314,6 +314,7 @@ rmi4_steps	k
 rmi4_x	k
 rmi4_y	k
 root_apfs	u
+rpmh_shared	k
 sb_delay	u
 serial	l
 small_cores	k
@@ -352,6 +353,7 @@ switcher_wallpaper	u
 syssleep	k
 systrace	k
 systrace_name	k
+tel	k
 thermal	k
 thermal_log	k
 thermal_poll	k

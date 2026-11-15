@@ -8001,10 +8001,13 @@ nas_start(void)
 	thread_deallocate(thread);
 }
 
+static void tel_stop(void);
+
 /* The questions end before the link does. */
 static void
 nas_stop(void)
 {
+	tel_stop();
 	if (nas_runs) {
 		nas_wanted = false;
 		for (unsigned ms = 0; ms < 3000 && nas_runs; ms++) {
@@ -8828,6 +8831,361 @@ step_start845(void)
 	return ready_at != 0 && !(state & DSP_FATAL);
 }
 
+/* ---- calls and SMS: what the modem offers, asked and never changed (tel=1) ------------------------------ */
+
+/*
+ * Whether this phone could make calls and get SMS, asked of the modem without doing either: nothing is sent to the
+ * network, no call is made, no message is written or deleted. Taiwan's 3G networks are gone, so a call is VoLTE,
+ * which needs the modem's IMS registered (IMSA, 0x21); an SMS comes over LTE either through IMS or through the
+ * circuit-switched side of a combined attach (SMS over SGs: NAS's LTE domain "CS and PS"). Asked at once once the
+ * modem is registered, again after 30 s, 2 and 5 minutes, then every 10 minutes:
+ *   NAS Get System Info (0x4d)          the LTE system's domain, and every TLV's type and size
+ *   IMSA Get Registration Status (0x20) and Get Services Status (0x21): their TLVs as they come
+ *   WMS Get Routes (0x33), Get SMSC Address (0x34), List Messages (0x31) in the SIM (0) and the modem (1), each
+ *   listed message read (Raw Read, 0x22) and its text said (the sender's last three digits only); and once, Set
+ *   Event Report (0x01) for new messages, whose indications are read the same way.
+ */
+#define QMI_WMS                 0x05
+#define QMI_VOICE               0x09
+#define QMI_IMSA                0x21
+#define WMS_SET_EVENT_REPORT    0x0001
+#define WMS_RAW_READ            0x0022
+#define WMS_LIST_MESSAGES       0x0031
+#define WMS_GET_ROUTES          0x0033
+#define WMS_GET_SMSC_ADDRESS    0x0034
+#define IMSA_GET_REGISTRATION   0x0020
+#define IMSA_GET_SERVICES       0x0021
+
+static struct tel_port {
+	const char              *name;
+	uint32_t                service;
+	struct hakios_qrtr_port *port;
+	uint32_t                node, number;
+} tel_ports[4] = { { "wms", QMI_WMS, NULL, 0, 0 }, { "imsa", QMI_IMSA, NULL, 0, 0 }, { "nas", QMI_NAS, NULL, 0, 0 },
+	{ "voice", QMI_VOICE, NULL, 0, 0 } };
+static volatile bool tel_wanted, tel_runs;
+static uint16_t tel_transaction = 0x100;
+static unsigned tel_reads;
+
+static void
+tel_send(struct tel_port *t, uint16_t message, const uint8_t *tlvs, uint16_t size, uint16_t transaction)
+{
+	uint8_t m[64];
+
+	if (t->port == NULL || t->number == 0 || size > sizeof(m) - 7) {
+		return;
+	}
+	m[0] = QMI_REQUEST;
+	m[1] = (uint8_t)transaction;
+	m[2] = (uint8_t)(transaction >> 8);
+	m[3] = (uint8_t)message;
+	m[4] = (uint8_t)(message >> 8);
+	m[5] = (uint8_t)size;
+	m[6] = (uint8_t)(size >> 8);
+	if (size != 0) {
+		memcpy(m + 7, tlvs, size);
+	}
+	qrtr_send(t->port, t->node, t->number, m, (size_t)7 + size);
+}
+
+/* the next transaction number; its last bit is free for the asker (List Messages: which storage) */
+static uint16_t
+tel_next(unsigned bit)
+{
+	tel_transaction = (uint16_t)((tel_transaction + 2) & ~1u);
+	if (tel_transaction < 0x100) {
+		tel_transaction = 0x100;
+	}
+	return (uint16_t)(tel_transaction | (bit & 1));
+}
+
+/* every TLV of an answer: its type, its size and its first bytes */
+static void
+tel_tlvs(const char *who, const uint8_t *m, size_t length)
+{
+	char line[380];
+	size_t at = 0;
+
+	at += (size_t)snprintf(line, sizeof(line), "mpss: tel: %s < %s %#x:", who, m[0] == 4 ? "indication" : "answer", m[3] | m[4] << 8);
+	for (size_t i = 7; i + 3 <= length && at < sizeof(line) - 40;) {
+		uint16_t n = (uint16_t)(m[i + 1] | m[i + 2] << 8);
+
+		if (i + 3 + n > length) {
+			break;
+		}
+		at += (size_t)snprintf(line + at, sizeof(line) - at, " [%02x/%u", m[i], n);
+		for (uint16_t k = 0; k < n && k < 12 && at < sizeof(line) - 8; k++) {
+			at += (size_t)snprintf(line + at, sizeof(line) - at, " %02x", m[i + 3 + k]);
+		}
+		at += (size_t)snprintf(line + at, sizeof(line) - at, "%s]", n > 12 ? " .." : "");
+		i += 3 + n;
+	}
+	tell("%s\n", line);
+}
+
+/* one UTF-8 character of a UCS-2 one */
+static size_t
+tel_utf8(char *out, uint16_t c)
+{
+	if (c < 0x80) {
+		out[0] = (char)(c >= 0x20 || c == '\n' ? c : '?');
+		return 1;
+	} else if (c < 0x800) {
+		out[0] = (char)(0xc0 | c >> 6);
+		out[1] = (char)(0x80 | (c & 0x3f));
+		return 2;
+	}
+	out[0] = (char)(0xe0 | c >> 12);
+	out[1] = (char)(0x80 | ((c >> 6) & 0x3f));
+	out[2] = (char)(0x80 | (c & 0x3f));
+	return 3;
+}
+
+/* An SMS-DELIVER (3GPP 23.040) as it comes from the modem, with the SMSC's address in front: who, and what it says. */
+static void
+tel_sms(const char *where, const uint8_t *p, size_t n)
+{
+	char from[24] = "", text[220];
+	size_t at, t = 0, digits, oa_bytes, udl, header = 0;
+	uint8_t first, toa, dcs;
+
+	if (n < 1 || (size_t)1 + p[0] >= n) {
+		return;
+	}
+	at = (size_t)1 + p[0];                  /* past the SMSC */
+	first = p[at++];
+	if ((first & 3) != 0) {
+		tell("mpss: tel: %s: not a message delivered to us (TP-MTI %u), %u bytes\n", where, first & 3, (unsigned)n);
+		return;
+	}
+	if (at + 2 > n) {
+		return;
+	}
+	digits = p[at++];
+	toa = p[at++];
+	oa_bytes = (digits + 1) / 2;
+	if (at + oa_bytes + 10 > n) {
+		return;
+	}
+	if ((toa & 0x70) == 0x50) {
+		strlcpy(from, "(a name)", sizeof(from));
+	} else {
+		size_t f = 0;
+
+		for (size_t d = 0; d < digits && f < sizeof(from) - 1; d++) {
+			uint8_t v = d & 1 ? p[at + d / 2] >> 4 : p[at + d / 2] & 15;
+
+			from[f++] = (char)(v < 10 ? '0' + v : '*');
+		}
+		from[f] = 0;
+		if (f > 3) {                    /* only the last three digits */
+			memmove(from, from + f - 3, 4);
+		}
+	}
+	at += oa_bytes;
+	at++;                                   /* TP-PID */
+	dcs = p[at++];
+	at += 7;                                /* the time stamp */
+	udl = p[at++];
+	if ((first & 0x40) != 0 && at < n) {
+		header = (size_t)1 + p[at];
+	}
+	if ((dcs & 0xcc) == 0x08) {             /* UCS-2 */
+		for (size_t i = at + header; i + 1 < n && i < at + udl && t < sizeof(text) - 4; i += 2) {
+			t += tel_utf8(text + t, (uint16_t)(p[i] << 8 | p[i + 1]));
+		}
+	} else if ((dcs & 0xcc) == 0x00) {      /* the GSM alphabet, seven bits a character */
+		size_t skip = header ? (header * 8 + 6) / 7 : 0;
+
+		for (size_t c = skip; c < udl && t < sizeof(text) - 2; c++) {
+			size_t bit = c * 7, byte = at + bit / 8;
+			unsigned v;
+
+			if (byte >= n) {
+				break;
+			}
+			v = p[byte] >> (bit % 8);
+			if (bit % 8 > 1 && byte + 1 < n) {
+				v |= (unsigned)p[byte + 1] << (8 - bit % 8);
+			}
+			v &= 0x7f;
+			text[t++] = (char)(v == 0 ? '@' : v == 2 ? '$' : v == 0x11 ? '_' : v >= 0x20 && v < 0x7f ? v : '?');
+		}
+	} else {
+		t = (size_t)snprintf(text, sizeof(text), "(8-bit data, %u bytes)", (unsigned)udl);
+	}
+	text[t] = 0;
+	tell("mpss: tel: AN SMS (%s): from ...%s, coding %#x, %u characters: %s\n", where, from, dcs, (unsigned)udl, text);
+}
+
+static void
+tel_read(uint8_t storage, uint32_t index)
+{
+	uint8_t r[12] = { 0x01, 5, 0, storage, (uint8_t)index, (uint8_t)(index >> 8), (uint8_t)(index >> 16), (uint8_t)(index >> 24),
+	    0x10, 1, 0, 1 };
+
+	if (tel_reads++ < 24) {
+		tel_send(&tel_ports[0], WMS_RAW_READ, r, sizeof(r), tel_next(0));
+	}
+}
+
+static void
+tel_receive(void *context, __unused uint32_t node, __unused uint32_t port, const void *data, size_t length)
+{
+	struct tel_port *t = context;
+	const uint8_t *m = data, *v;
+	uint16_t message, size = 0;
+
+	if (length < 7) {
+		return;
+	}
+	message = (uint16_t)(m[3] | m[4] << 8);
+	tel_tlvs(t->name, m, length);
+	if (t->service == QMI_NAS && message == NAS_GET_SYSTEM_INFO && (v = qmi_tlv(m, length, 0x19, &size)) != NULL && size >= 2) {
+		tell("mpss: tel: LTE: domain %u%s (0 none, 1 CS, 2 PS, 3 CS and PS: SMS over SGs possible, 4 camped)\n", v[1],
+		    v[0] ? "" : " (not valid)");
+	} else if (t->service == QMI_WMS && message == WMS_LIST_MESSAGES && (v = qmi_tlv(m, length, 0x01, &size)) != NULL && size >= 4) {
+		uint32_t count = le32(v);
+		uint8_t storage = (uint8_t)(m[1] & 1);  /* (the transaction's last bit: tel_ask) */
+
+		tell("mpss: tel: %u messages kept in the %s\n", count, storage ? "modem" : "SIM");
+		for (uint32_t i = 0; i < count && i < 8 && (size_t)4 + i * 5 + 5 <= size; i++) {
+			tel_read(storage, le32(v + 4 + i * 5));
+		}
+	} else if (t->service == QMI_WMS && message == WMS_RAW_READ && (v = qmi_tlv(m, length, 0x01, &size)) != NULL && size >= 4) {
+		uint16_t n = (uint16_t)(v[2] | v[3] << 8);
+
+		if ((size_t)4 + n <= size) {
+			tel_sms(v[0] == 0 ? "kept, read" : v[0] == 1 ? "kept, not read yet" : "kept, one of ours", v + 4, n);
+		}
+	} else if (t->service == QMI_WMS && message == WMS_SET_EVENT_REPORT && m[0] == QMI_INDICATION) {
+		if ((v = qmi_tlv(m, length, 0x10, &size)) != NULL && size >= 5) {
+			tell("mpss: tel: A NEW SMS, kept in the %s at %u\n", v[0] ? "modem" : "SIM", le32(v + 1));
+			tel_read(v[0], le32(v + 1));
+		}
+		if ((v = qmi_tlv(m, length, 0x11, &size)) != NULL && size >= 8) {
+			uint16_t n = (uint16_t)(v[6] | v[7] << 8);
+
+			if ((size_t)8 + n <= size) {
+				tel_sms("handed over, not kept", v + 8, n);
+			}
+		}
+	}
+}
+
+static void
+tel_server(void *context, bool arrived, uint32_t service, __unused uint32_t version, __unused uint32_t instance, uint32_t node,
+    uint32_t port)
+{
+	struct tel_port *t = context;
+
+	if (service != t->service) {
+		return;
+	}
+	if (arrived && t->number == 0) {
+		t->node = node;
+		t->number = port;
+	} else if (!arrived && node == t->node && port == t->number) {
+		t->node = t->number = 0;
+	}
+}
+
+static void
+tel_ask(void)
+{
+	uint8_t list[8] = { 0x01, 1, 0, 0, 0x11, 1, 0, 1 };      /* storage (0 the SIM, 1 the modem); the mode GSM/WCDMA/LTE */
+
+	tel_send(&tel_ports[2], NAS_GET_SYSTEM_INFO, NULL, 0, tel_next(0));
+	tel_send(&tel_ports[1], IMSA_GET_REGISTRATION, NULL, 0, tel_next(0));
+	tel_send(&tel_ports[1], IMSA_GET_SERVICES, NULL, 0, tel_next(0));
+	for (uint8_t storage = 0; storage < 2; storage++) {
+		list[3] = storage;
+		tel_send(&tel_ports[0], WMS_LIST_MESSAGES, list, sizeof(list), tel_next(storage));
+	}
+}
+
+static void
+tel_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	static const uint32_t at[] = { 0, 30, 120, 300 };
+	uint64_t began = now_us(), registered_at = 0;
+	unsigned round = 0;
+	bool reported = false, said = false;
+	uint8_t report[4] = { 0x10, 1, 0, 1 };                  /* new MT messages: tell */
+
+	for (unsigned i = 0; i < 4; i++) {
+		tel_ports[i].port = qrtr_open(tel_receive, tel_server, &tel_ports[i]);
+		if (tel_ports[i].port != NULL) {
+			qrtr_lookup(tel_ports[i].port, tel_ports[i].service, 0, 0);
+		}
+	}
+	while (tel_wanted) {
+		uint64_t now = now_us();
+
+		if (!reported && tel_ports[0].number != 0) {
+			/* as soon as WMS is there: new messages told, and how they are routed (once) */
+			reported = true;
+			tel_send(&tel_ports[0], WMS_SET_EVENT_REPORT, report, sizeof(report), tel_next(0));
+			tel_send(&tel_ports[0], WMS_GET_ROUTES, NULL, 0, tel_next(0));
+			tel_send(&tel_ports[0], WMS_GET_SMSC_ADDRESS, NULL, 0, tel_next(0));
+		}
+		if (registered_at == 0 && nas.state.registered) {
+			registered_at = now;
+		}
+		if (!said && registered_at != 0 && now - registered_at > 10000000ull) {
+			said = true;
+			tell("mpss: tel: registered 10 s ago; services: WMS %s, IMSA %s, NAS %s, VOICE %s\n",
+			    tel_ports[0].number ? "there" : "NOT THERE", tel_ports[1].number ? "there" : "NOT THERE",
+			    tel_ports[2].number ? "there" : "NOT THERE", tel_ports[3].number ? "there" : "NOT THERE");
+		}
+		if (registered_at == 0 && now - began > 120000000ull) {
+			registered_at = now;
+			tell("mpss: tel: not registered after two minutes; asked all the same\n");
+		}
+		if (registered_at != 0 && (now - registered_at) / 1000000ull >= (round < 4 ? at[round] : 300 + (uint64_t)(round - 3) * 600)) {
+			tel_ask();
+			round++;
+		}
+		for (unsigned ms = 0; ms < 1000 && tel_wanted; ms += 100) {
+			sleep_ms(100);
+		}
+	}
+	for (unsigned i = 0; i < 4; i++) {
+		if (tel_ports[i].port != NULL) {
+			qrtr_close(tel_ports[i].port);
+			tel_ports[i].port = NULL;
+			tel_ports[i].node = tel_ports[i].number = 0;
+		}
+	}
+	tel_runs = false;
+	thread_terminate(current_thread());
+}
+
+static void
+tel_start(void)
+{
+	thread_t thread;
+
+	if (!option("tel") || tel_runs) {
+		return;
+	}
+	tel_wanted = tel_runs = true;
+	if (kernel_thread_start(tel_thread, NULL, &thread) != KERN_SUCCESS) {
+		tel_wanted = tel_runs = false;
+		return;
+	}
+	thread_deallocate(thread);
+}
+
+static void
+tel_stop(void)
+{
+	tel_wanted = false;
+	for (unsigned ms = 0; ms < 3000 && tel_runs; ms++) {
+		sleep_ms(1);
+	}
+}
+
 /* ---- the steps, and their end ----------------------------------------------------------------------- */
 
 /*
@@ -8943,6 +9301,7 @@ steps_thread(__unused void *parameter, __unused wait_result_t result)
 			    nas.state.registered ? "REGISTERED" : "not registered", nas.state.bars, nas.state.has_signal ? nas.state.dbm : 0,
 			    radio_name(nas.state.radio_interface));
 			nas_start();
+			tel_start();
 		}
 	}
 	if (option("modem_return")) {
@@ -8972,6 +9331,7 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 		    services, nas.connected ? "there" : "NOT THERE", nas.state.registered ? "REGISTERED" : "not registered", nas.state.bars,
 		    nas.state.has_signal ? nas.state.dbm : 0, radio_name(nas.state.radio_interface));
 		nas_start();
+		tel_start();
 	} else {
 		tell("mpss: THE MODEM DID NOT COME UP: step %u failed (%s); see the kernel's own log for the steps\n", step + 1,
 		    last_write);

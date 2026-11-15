@@ -293,6 +293,7 @@ RMI4_STEPS	arg	rmi4_steps	User space	k	hakios.rmi4.c
 RMI4_X	arg	rmi4_x	User space	k	hakios.rmi4.c	
 RMI4_Y	arg	rmi4_y	User space	k	hakios.rmi4.c	
 ROOT_APFS	arg	root_apfs	User space	u	init.c	the root is to be the Darwin root volume on /dev/DEV -- the phone's flash, read only
+RPMH_SHARED	arg	rpmh_shared	User space	k	hakios.platform.c	each driver's own value as before there was this (for telling what it changes)
 SERIAL	arg	serial	Loader	l	loader.c	
 SMALL_CORES	arg	small_cores	CPU, memory and boot	k	(patch)	
 SMALL_CORES_AFTER	arg	small_cores_after	CPU, memory and boot	k	GenericARMPE.cpp	
@@ -328,6 +329,7 @@ SWITCHER_WALLPAPER	arg	switcher_wallpaper	User space	u	inject_sb.c
 SYSSLEEP	arg	syssleep	CPU, memory and boot	k	(patch)	
 SYSTRACE	arg	systrace	CPU, memory and boot	k	(patch),user_exception_trace.c	
 SYSTRACE_NAME	arg	systrace_name	CPU, memory and boot	k	(patch)	
+TEL	arg	tel	User space	k	hakios.mpss845.c	
 THERMAL_LOG	arg	thermal_log	Chip, thermal and PMIC	k	hakios.thermal.c	a summary line this often (0: only on a rise; 60)
 THERMAL_SOC	arg	thermal_soc	Chip, thermal and PMIC	k	hakios.thermal.c	the SDM845's table of sensors (21) instead of the reference phone's (27)
 THERMAL_TM0	arg	thermal_tm0	Chip, thermal and PMIC	k	hakios.thermal.c	

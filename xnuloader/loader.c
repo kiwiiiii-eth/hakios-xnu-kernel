@@ -3808,6 +3808,11 @@ fb_reply(const char *code, const char *text)
 	usb_tx(usb_tx_buf, n);
 }
 
+/* the boot screen of a phone that boots by itself (bootscreen.c): wanted on the one-shot path, with its command line */
+#include "bootscreen.c"
+static int bs_wanted;
+static const char *bs_cmdline;
+
 /* ------------------------------------------------------------------------ */
 /* The system image in darwin: a boot with no host                          */
 /*
@@ -4054,26 +4059,44 @@ sysimg_load(void)
 	img = (uint8_t *)(win_base + RESIDENT_RD_OFFSET);
 	padded = (h.bytes + 4095) & ~4095ULL;
 	resident_rd_size = 0;
+	if (bs_wanted) {
+		print("sysimg: reading %d bytes from darwin\n", h.bytes);
+		bootscreen_begin(bs_cmdline, h.bytes);
+	}
 	for (uint64_t done = 0; done < padded; done += SYSIMG_PIECE) {
 		uint64_t len = padded - done < SYSIMG_PIECE ? padded - done : SYSIMG_PIECE;
 
 		if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, (h.offset + done) / 4096, len, img + done))) {
 			print("sysimg: reading at byte %d of the image failed\n", done);
+			bootscreen_end(0);
 			return 0;
 		}
 		if (wdt_armed) {
 			wdt_pet();
 		}
+		bootscreen_progress(0, done + len > h.bytes ? h.bytes : done + len, h.bytes);
 	}
 	read_ms = (READ_SYSREG(CNTVCT_EL0) - started) * 1000 / READ_SYSREG(CNTFRQ_EL0);
-	fnv = ufs_fnv(0xcbf29ce484222325ULL, img, h.bytes);
+	if (bs_wanted) {
+		print("sysimg: read in %d ms; checking\n", read_ms);
+	}
+	/* in pieces, so that the boot screen can say how far */
+	fnv = 0xcbf29ce484222325ULL;
+	for (uint64_t at = 0; at < h.bytes; at += SYSIMG_PIECE) {
+		uint64_t len = h.bytes - at < SYSIMG_PIECE ? h.bytes - at : SYSIMG_PIECE;
+
+		fnv = ufs_fnv(fnv, img + at, len);
+		bootscreen_progress(1, at + len, h.bytes);
+	}
 	if (fnv != h.fnv) {
 		print("sysimg: the image read back is not the one written (fnv %x, the header says %x)\n", fnv, h.fnv);
+		bootscreen_end(0);
 		return 0;
 	}
 	resident_rd_size = h.bytes;
 	print("sysimg: the root image from darwin: %d bytes, read in %d ms, checked in %d ms (written at %d)\n", h.bytes,
 	    read_ms, (READ_SYSREG(CNTVCT_EL0) - started) * 1000 / READ_SYSREG(CNTFRQ_EL0) - read_ms, h.written_epoch);
+	bootscreen_end(1);
 	return 1;
 }
 
@@ -5380,6 +5403,10 @@ efi_main(efi_handle image, efi_system_table *st)
 	 * if there is none whole, the kernel is not started (it would have no root) and the way back below is taken.
 	 */
 	if (have_payload) {
+		if (pi.rdsrc != NULL && str_eq(pi.rdsrc, "darwin")) {
+			bs_wanted = 1;                      /* the boot screen while it is read (bootscreen.c) */
+			bs_cmdline = pi.cmdline;
+		}
 		if (pi.rdsrc != NULL && str_eq(pi.rdsrc, "darwin") && !sysimg_load()) {
 			print("loader: rdsrc=darwin, and no system image could be read from darwin: the kernel is not started\n");
 		} else {

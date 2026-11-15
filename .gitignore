@@ -48,6 +48,8 @@ __pycache__/
 !/xnuloader/build.sh
 !/xnuloader/efi.h
 !/xnuloader/gpt.c
+!/xnuloader/bootscreen.c
+!/xnuloader/bootscreen_assets.h
 !/xnuloader/loader.c
 !/xnuloader/mkidentity.py
 !/xnuloader/mkpayload.py

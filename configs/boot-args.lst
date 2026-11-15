@@ -388,6 +388,7 @@ ustacks_ms	k
 ustacks_threads	k
 ustacks_tname	k
 var_hfs	u
+var_migrate_fail	u
 var_save_ms	k
 var_store	u
 vblur	u

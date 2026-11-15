@@ -29,7 +29,7 @@
  * and the part of it an answer covers is invalidated here before it is copied out.
  *
  * The data volume of Darwin (HFS Plus, built into this kernel: bsd/hfs) is /dev/ufs_darwin_data: darwin from
- * UFS_WRITE_FIRST to its end, a block device of its own that reads and writes, there with ufs_write=1 only. Its
+ * UFS_WRITE_FIRST (or ufs_data_first) to its end, a block device of its own that reads and writes, there with ufs_write=1 only. Its
  * writes go the same way as /dev/rufs_darwin's -- through the loader, which flushes and reads every one back before it
  * answers -- so a write that has come back is on the flash, which is what the file system's journal counts on. The
  * one and the other are not used in the same run: once the data volume has been opened for writing, the packed store
@@ -677,7 +677,15 @@ ufs_write_restore(void)
 	lck_mtx_unlock(&ufs_write_mtx);
 }
 
-/* ---- the data volume: darwin from UFS_WRITE_FIRST on ---- */
+/* ---- the data volume: darwin from ufs_data_first on ---- */
+
+/*
+ * Where the data volume begins in darwin, in blocks of 4096: UFS_WRITE_FIRST, past the Darwin volume and the cryptexes,
+ * unless boot-arg ufs_data_first=<blocks> says later (from UFS_WRITE_FIRST to the partition's end). The 6T keeps
+ * /private/var's two var_store slots at darwin's 8-12 GiB and its volume after them (fajita.config: 3145728, 12 GiB),
+ * so that the volume can be made and the store moved into it with the store left whole.
+ */
+static uint64_t ufs_data_first = UFS_WRITE_FIRST;
 
 static bool
 ufs_is_data(dev_t dev)
@@ -688,7 +696,7 @@ ufs_is_data(dev_t dev)
 static uint64_t
 ufs_data_bytes(void)
 {
-	return ufs_part_bytes((uint32_t)ufs_write_part) - UFS_WRITE_FIRST * 4096;
+	return ufs_part_bytes((uint32_t)ufs_write_part) - ufs_data_first * 4096;
 }
 
 /*
@@ -713,7 +721,7 @@ ufs_data_flush(void)
 	lck_mtx_lock(&ufs_write_mtx);
 	lck_mtx_lock(&ufs_lock);
 	/* one block in bounds, for the loader's checks; nothing of it is touched */
-	error = ufshc_list_in() ? EIO : ufs_request(BLOCK_OP_FLUSH, (uint32_t)ufs_write_part, UFS_WRITE_FIRST, 1, NULL, NULL);
+	error = ufshc_list_in() ? EIO : ufs_request(BLOCK_OP_FLUSH, (uint32_t)ufs_write_part, ufs_data_first, 1, NULL, NULL);
 	lck_mtx_unlock(&ufs_lock);
 	lck_mtx_unlock(&ufs_write_mtx);
 	return error;
@@ -727,7 +735,7 @@ ufs_data_flush(void)
 static int
 ufs_data_io(bool write, uint64_t offset, uint8_t *p, uint64_t len)
 {
-	uint64_t base = UFS_WRITE_FIRST * 4096, size = ufs_data_bytes();
+	uint64_t base = ufs_data_first * 4096, size = ufs_data_bytes();
 	uint8_t *bounce;
 	int error = 0;
 
@@ -1900,10 +1908,21 @@ hakios_ufs_init(void)
 			printf("ufs: /dev/rufs_darwin takes writes, whole blocks from %llu on (%llu MB of it); "
 			    "everything else of the storage is read only\n", UFS_WRITE_FIRST,
 			    (ufs_page->part[ufs_write_part].blocks - UFS_WRITE_FIRST) * 4096 >> 20);
+			uint64_t first = 0;
+
+			if (PE_parse_boot_argn("ufs_data_first", &first, sizeof(first)) && first != 0) {
+				if (first < UFS_WRITE_FIRST || first >= ufs_page->part[ufs_write_part].blocks) {
+					printf("ufs: ufs_data_first=%llu is not between %llu and darwin's end (%llu blocks): the data "
+					    "volume from %llu\n", first, UFS_WRITE_FIRST, (unsigned long long)ufs_page->part[ufs_write_part].blocks,
+					    UFS_WRITE_FIRST);
+				} else {
+					ufs_data_first = first;
+				}
+			}
 			if (devfs_make_node(makedev(ufs_bmajor, UFS_DATA_MINOR), DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640,
 			    "ufs_darwin_data") != NULL) {
-				printf("ufs: /dev/ufs_darwin_data: the same %llu MB as a block device, for the data volume; "
-				    "%s\n", ufs_data_bytes() >> 20, ufs_data_op() == BLOCK_OP_WRITE_FAST ?
+				printf("ufs: /dev/ufs_darwin_data: darwin from block %llu, %llu MB, as a block device for the data "
+				    "volume; %s\n", ufs_data_first, ufs_data_bytes() >> 20, ufs_data_op() == BLOCK_OP_WRITE_FAST ?
 				    "writes flushed when the file system asks" : "every write flushed and read back (an older loader)");
 			}
 		} else {

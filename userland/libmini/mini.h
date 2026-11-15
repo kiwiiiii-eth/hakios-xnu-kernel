@@ -27,7 +27,8 @@ enum {
 	SYS_rename = 128, SYS_mkdir = 136, SYS_rmdir = 137, SYS_utimes = 138, SYS_pread = 153, SYS_pwrite = 154,
 	SYS_mount = 167, SYS_mmap = 197, SYS_lseek = 199, SYS_ftruncate = 201, SYS_getxattr = 234,
 	SYS_setxattr = 236, SYS_listxattr = 240, SYS_sysctlbyname = 274, SYS_stat64 = 338, SYS_fstat64 = 339,
-	SYS_lstat64 = 340, SYS_getdirentries64 = 344, SYS_lchown = 364,
+	SYS_lstat64 = 340, SYS_getdirentries64 = 344, SYS_lchown = 364, SYS_sync = 36, SYS_unmount = 159,
+	SYS_statfs64 = 345,
 };
 
 /*
@@ -165,6 +166,10 @@ ssize_t getxattr(const char *path, const char *name, void *value, size_t size, u
 int     setxattr(const char *path, const char *name, const void *value, size_t size, uint32_t position, int options);
 int     ftruncate(int fd, off_t length);
 int     fsync(int fd);
+int     sync(void);
+int     unmount(const char *dir, int flags);
+/* the type of the file system PATH is on ("hfs", "ramfs", ...), from statfs64's f_fstypename: 0, or -1 */
+int     fs_type(const char *path, char *name, size_t size);
 ssize_t pread(int fd, void *buf, size_t count, off_t offset);
 ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
 int     socket(int domain, int type, int protocol);

@@ -845,6 +845,9 @@ mount_data_volume(void)
 		int flags, journal_tbuffer_size, journal_flags, journal_disable;
 	} args;
 
+	if (name != NULL && strcmp(name, "1") == 0) {
+		name = "ufs_darwin_data";       /* var_hfs=1: the 6T's (fajita.config): darwin from 12 GiB, past var_store's slots */
+	}
 	if (name == NULL || strlen(name) + 6 > sizeof(dev)) {
 		return 0;
 	}
@@ -857,6 +860,163 @@ mount_data_volume(void)
 		return 0;
 	}
 	printf("  /private/var: HFS Plus from %s, kept between boots\n", dev);
+	return 1;
+}
+
+/*
+ * Beta 0.5: the data volume's first use. Until then /private/var was a memory filesystem that var_store kept in two
+ * slots of darwin (8-12 GiB, before the volume). The first boot that mounts the volume moves the newest slot into it,
+ * once: `var_store load` into the volume, and only when that brings the store back whole (status 0) or finds there has
+ * never been one (2, a darwin no save wrote) is the marker written -- the source generation and the time, flushed --
+ * and the volume used. Anything else (a slot that does not check out, a read that fails or differs, files that did not
+ * fit) leaves no marker, and this boot goes on as Beta 0.4 did: the volume unmounted, the memory filesystem, the store
+ * loaded into it and saved again as the boot ends. Nothing of the user's is written to the volume before the marker, so
+ * the next try, over what this one left, loses nothing. var_store save writes nothing once /private/var is the volume,
+ * so the slots stay as they were moved: a boot of Beta 0.4 afterwards (which loads them, and saves newer generations)
+ * is noted at the next boot here (VAR_NEWER), not taken.
+ */
+#define VAR_MIGRATED    "/private/var/db/hakios-var-migrated"
+#define VAR_NEWER       "/private/var/db/hakios-var-newer-store"
+#define MNT_FORCE_      0x00080000
+
+/* var_store CMD, its exit status (-1: it did not run); its first line of output into out when out is given */
+static int
+run_var_store(const char *cmd, char *out, size_t size)
+{
+	static const char capture[] = "/private/var/.hakios-var-store-out";
+	char *argv[3];
+	int status = 0, fd = -1;
+	pid_t pid;
+
+	argv[0] = (char *)in_image("/bin/var_store");
+	argv[1] = (char *)cmd;
+	argv[2] = NULL;
+	if (out != NULL && size > 0) {
+		out[0] = 0;
+		fd = open(capture, O_CREAT | O_TRUNC | O_RDWR, 0600);
+	}
+	pid = fork();
+	if (pid == 0) {
+		if (fd >= 0) {
+			dup2(fd, 1);
+		}
+		execve(argv[0], argv, environ);
+		printf("  %s: %s\n", argv[0], strerror(errno));
+		_exit(127);
+	}
+	if (pid < 0 || wait4(pid, &status, 0, NULL) != pid || !WIFEXITED(status)) {
+		status = -1;
+	} else {
+		status = WEXITSTATUS(status);
+	}
+	if (fd >= 0) {
+		ssize_t n = pread(fd, out, size - 1, 0);
+
+		out[n > 0 ? n : 0] = 0;
+		for (char *c = out; *c; c++) {
+			if (*c == '\n') {
+				*c = 0;
+				break;
+			}
+		}
+		close(fd);
+		unlink(capture);
+	}
+	return status;
+}
+
+static uint64_t
+number_of(const char *text, int *ok)
+{
+	uint64_t v = 0;
+
+	*ok = *text >= '0' && *text <= '9';
+	for (; *text >= '0' && *text <= '9'; text++) {
+		v = v * 10 + (uint64_t)(*text - '0');
+	}
+	return v;
+}
+
+/* 1: the volume is /private/var from here on; 0: it is not to be used this boot (the caller puts the memory
+ * filesystem over it) */
+static int
+move_store_into_volume(void)
+{
+	char gen[32], line[160], had[160];
+	const char *store = boot_arg("var_store"), *fail = boot_arg("var_migrate_fail");
+	struct stat st;
+	int status, fd, n, ok;
+
+	if (stat(VAR_MIGRATED, &st) == 0) {
+		/* moved before; a newer generation in the slots means Beta 0.4 ran since: noted, not taken */
+		if (store != NULL && strcmp(store, "1") == 0 && run_var_store("generation", gen, sizeof(gen)) == 0) {
+			uint64_t now = number_of(gen, &ok), moved;
+			int ok2 = 0;
+
+			fd = open(VAR_MIGRATED, O_RDONLY, 0);
+			n = fd >= 0 ? (int)read(fd, had, sizeof(had) - 1) : 0;
+			if (fd >= 0) {
+				close(fd);
+			}
+			had[n > 0 ? n : 0] = 0;
+			moved = strncmp(had, "generation ", 11) == 0 ? number_of(had + 11, &ok2) : 0;
+			if (ok && (!ok2 || now > moved)) {
+				printf("  the store has generation %s, newer than the one moved into the data volume: a boot of Beta 0.4 "
+				    "since; not taken (%s)\n", gen, VAR_NEWER);
+				fd = open(VAR_NEWER, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+				if (fd >= 0) {
+					write(fd, gen, strlen(gen));
+					write(fd, "\n", 1);
+					close(fd);
+				}
+			}
+		}
+		return 1;
+	}
+	if (store == NULL || strcmp(store, "1") != 0) {
+		printf("  the data volume has had nothing moved into it yet, and this boot has no var_store=1 to move: not used\n");
+		return 0;
+	}
+	printf("\n-- the data volume's first use: /private/var's store moved into it --\n");
+	if (run_var_store("generation", gen, sizeof(gen)) != 0 || gen[0] == 0) {
+		strcpy(gen, "unknown");
+	}
+	status = run_var_store("load", NULL, 0);
+	if (fail != NULL && strcmp(fail, "1") == 0) {
+		printf("  var_migrate_fail=1: taken as a load that failed (it said %d)\n", status);
+		status = 3;
+	}
+	if (status != 0 && status != 2) {
+		printf("  the store did not come back whole (var_store load: %d): the data volume is not used this boot; the next "
+		    "one tries again\n", status);
+		return 0;
+	}
+	mkdir("/private/var/db", 0755);
+	n = 0;
+	strcpy(line, "generation ");
+	n = (int)strlen(line);
+	for (const char *c = status == 2 ? "none" : gen; *c && n < (int)sizeof(line) - 2; c++) {
+		line[n++] = *c;
+	}
+	line[n++] = '\n';
+	line[n] = 0;
+	fd = open(VAR_MIGRATED, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+	ok = fd >= 0 && write(fd, line, (size_t)n) == n && fsync(fd) == 0;
+	if (fd >= 0) {
+		close(fd);
+	}
+	fd = open("/private/var/db", O_RDONLY, 0);
+	if (fd >= 0) {
+		fsync(fd);
+		close(fd);
+	}
+	sync();
+	if (!ok) {
+		printf("  %s could not be written (%s): the data volume is not used this boot\n", VAR_MIGRATED, strerror(errno));
+		unlink(VAR_MIGRATED);
+		return 0;
+	}
+	printf("  moved: %s %s", VAR_MIGRATED, line);
 	return 1;
 }
 
@@ -913,6 +1073,13 @@ mount_writable(void)
 
 	printf("\n-- writable filesystem --\n");
 	var_kept = mount_data_volume();
+	if (var_kept && !move_store_into_volume()) {
+		/* not used this boot: unmounted, or, should that fail, covered by the memory filesystem mounted over it */
+		if (unmount("/private/var", MNT_FORCE_) != 0) {
+			printf("  unmount /private/var: %s: the memory filesystem goes over it\n", strerror(errno));
+		}
+		var_kept = 0;
+	}
 	if (var_kept) {
 		static const char *const own[] = { "/private/var/tmp", "/private/var/run", "/private/var/vm" };
 
@@ -1088,7 +1255,8 @@ restore_var(void)
 	int status = 0;
 	pid_t pid;
 
-	if (wanted == NULL || strcmp(wanted, "1") != 0) {
+	/* the data volume keeps /private/var itself (its store was moved into it once: move_store_into_volume) */
+	if (var_kept || wanted == NULL || strcmp(wanted, "1") != 0) {
 		return;
 	}
 	printf("\n-- the data volume of the last boot --\n");

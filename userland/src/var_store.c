@@ -53,6 +53,24 @@
 #define SLOTS           2
 #define DEVICE          "/dev/rufs_darwin"
 #define ROOT            "/private/var"
+
+/*
+ * The store and the tree it is of: the partition darwin and /private/var. For a test, VAR_STORE_FILE (a plain file, the
+ * slots from its start, no claim) and VAR_STORE_ROOT (a directory instead of /private/var), both set or neither used.
+ */
+static const char *device = DEVICE;
+static char root[512] = ROOT;
+static size_t root_len = sizeof(ROOT) - 1;
+static off_t store_at = STORE_AT;
+static uint64_t slot_bytes = SLOT_BYTES;        /* a test's file: 16 MiB a slot */
+static int test_files;
+
+/* What load answers (its exit status): the newest good slot is back whole; there is no store (both headers read, and
+ * neither is one: a darwin no save ever wrote); anything else -- an error reading, a slot that does not check out, a
+ * second pass that differs, files that did not fit. init moves a store into the data volume on the first two alone. */
+#define LOAD_WHOLE      0
+#define LOAD_NONE       2
+#define LOAD_BAD        3
 #define MAX_PATH        1024
 #define MAX_DEPTH       32
 #define MAX_XATTR       (256u << 10)            /* one attribute's value; Darwin keeps small ones */
@@ -168,6 +186,9 @@ sysctl_set_int(const char *name, int value)
 static int
 claim(void)
 {
+	if (test_files) {
+		return 1;
+	}
 	if (sysctl_set_int("kern.hakios.var_busy", 1) != 0) {
 		printf("var_store: the store is claimed by another saver (%s)\n", strerror(errno));
 		return 0;
@@ -178,6 +199,9 @@ claim(void)
 static void
 release(void)
 {
+	if (test_files) {
+		return;
+	}
 	(void)sysctl_set_int("kern.hakios.var_busy", 0);
 }
 
@@ -236,7 +260,7 @@ static uint64_t entries;
 static off_t
 slot_at(int slot)
 {
-	return STORE_AT + (off_t)slot * SLOT_BYTES;
+	return store_at + (off_t)slot * (off_t)slot_bytes;
 }
 
 static int
@@ -427,7 +451,7 @@ static void
 stream_start(int slot, uint64_t bytes)
 {
 	at = slot_at(slot) + BLOCK;
-	stream_limit = slot_at(slot) + SLOT_BYTES;
+	stream_limit = slot_at(slot) + (off_t)slot_bytes;
 	buffered = taken = 0;
 	stream_bytes = 0;
 	stream_left = bytes;
@@ -437,6 +461,7 @@ stream_start(int slot, uint64_t bytes)
 /* ---- the slots ---- */
 
 /* The slot's header, if it is one of ours and says of itself what it should. */
+/* A slot's header: 1 it checks out (into *into), 0 no store's header there, 2 one that does not check out, -1 unread */
 static int
 read_head(int slot, struct head *into)
 {
@@ -444,16 +469,21 @@ read_head(int slot, struct head *into)
 	struct head *h = (struct head *)block;
 
 	if (!device_read(slot_at(slot), block, BLOCK)) {
+		return -1;
+	}
+	if (memcmp(h->magic, HEAD_MAGIC, sizeof(h->magic)) != 0) {
 		return 0;
 	}
-	if (memcmp(h->magic, HEAD_MAGIC, sizeof(h->magic)) != 0 || h->version != HEAD_VERSION ||
-	    h->slot != (uint32_t)slot || h->bytes > (uint64_t)SLOT_BYTES - BLOCK ||
+	if (h->version != HEAD_VERSION || h->slot != (uint32_t)slot || h->bytes > slot_bytes - BLOCK ||
 	    h->head_crc != head_checksum(h)) {
-		return 0;
+		return 2;
 	}
 	*into = *h;
 	return 1;
 }
+
+/* Set by newest(): a slot's header could not be read, or is a store's that does not check out */
+static int head_trouble;
 
 /* The newest slot whose header checks out, or -1. */
 static int
@@ -461,10 +491,13 @@ newest(struct head *out_head)
 {
 	int best = -1;
 
+	head_trouble = 0;
 	for (int slot = 0; slot < SLOTS; slot++) {
 		struct head h;
+		int got = read_head(slot, &h);
 
-		if (!read_head(slot, &h)) {
+		if (got != 1) {
+			head_trouble |= got != 0;
 			continue;
 		}
 		if (best < 0 || h.generation > out_head->generation) {
@@ -842,7 +875,7 @@ save(void)
 	/* a watcher saves more than once: nothing of the save before is carried into this one */
 	memset(links, 0, LINKS * sizeof(*links));
 	skipped_kinds = skipped_big = 0;
-	strcpy(path, ROOT);
+	strcpy(path, root);
 	if (!pack_tree("") || !out_flush(1)) {
 		return 0;
 	}
@@ -861,9 +894,9 @@ save(void)
 	}
 	h.crc = stream_crc ^ 0xffffffffu;
 	h.head_crc = head_checksum(&h);
-	if (h.bytes > (uint64_t)SLOT_BYTES - BLOCK) {
+	if (h.bytes > slot_bytes - BLOCK) {
 		printf("var_store: the archive is %llu bytes, more than a slot holds (%llu): nothing saved\n",
-		    (unsigned long long)h.bytes, (unsigned long long)(SLOT_BYTES - BLOCK));
+		    (unsigned long long)h.bytes, (unsigned long long)((off_t)slot_bytes - BLOCK));
 		return 0;
 	}
 	memset(block, 0, sizeof(block));
@@ -903,7 +936,7 @@ static uint64_t retry_ms_left = RETRY_MS;
 static int
 whole_path(const char *relative, uint32_t len)
 {
-	if (len == 0 || len >= MAX_PATH - sizeof(ROOT) - 1 || relative[0] == '/') {
+	if (len == 0 || len >= MAX_PATH - root_len - 2 || relative[0] == '/') {
 		return 0;
 	}
 	for (uint32_t i = 0; i + 1 < len; i++) {
@@ -912,10 +945,10 @@ whole_path(const char *relative, uint32_t len)
 			return 0;       /* nothing of this archive is unpacked outside ROOT */
 		}
 	}
-	strcpy(path, ROOT);
-	path[sizeof(ROOT) - 1] = '/';
-	memcpy(path + sizeof(ROOT), relative, len);
-	path[sizeof(ROOT) + len] = 0;
+	strcpy(path, root);
+	path[root_len] = '/';
+	memcpy(path + root_len + 1, relative, len);
+	path[root_len + 1 + len] = 0;
 	return 1;
 }
 
@@ -1156,8 +1189,12 @@ load(void)
 	memset(&h, 0, sizeof(h));
 	best = newest(&h);
 	if (best < 0) {
+		if (head_trouble) {
+			printf("var_store: no slot's header could be read or checks out: /private/var stays as init made it\n");
+			return LOAD_BAD;
+		}
 		printf("var_store: no store yet: /private/var stays as init made it\n");
-		return 1;
+		return LOAD_NONE;
 	}
 	printf("var_store: slot %d: generation %llu of %llu seconds, %llu entries, %llu bytes\n", best,
 	    (unsigned long long)h.generation, (unsigned long long)h.seconds,
@@ -1169,14 +1206,14 @@ load(void)
 
 		/* the newest is torn: the one before it, which a save never touches, may still be whole */
 		for (int slot = 0; slot < SLOTS; slot++) {
-			if (slot != best && read_head(slot, &other) && pass(&other, 0)) {
+			if (slot != best && read_head(slot, &other) == 1 && pass(&other, 0)) {
 				left = slot;
 				break;
 			}
 		}
 		if (left < 0) {
 			printf("var_store: nothing good in the store: /private/var stays as init made it\n");
-			return 1;
+			return LOAD_BAD;
 		}
 		h = other;
 		printf("var_store: slot %d is good after all: generation %llu\n", left,
@@ -1184,7 +1221,7 @@ load(void)
 	}
 	if (!pass(&h, 1)) {
 		printf("var_store: the archive read differently the second time: what was made stays\n");
-		return 0;
+		return LOAD_BAD;
 	}
 	printf("var_store: %llu directories, %llu files (%llu bytes), %llu links back in /private/var\n",
 	    (unsigned long long)made_dirs, (unsigned long long)made_files, (unsigned long long)made_bytes,
@@ -1192,8 +1229,10 @@ load(void)
 	if (short_files != 0) {
 		printf("var_store: %llu files did not fit: %llu bytes of them are not there\n",
 		    (unsigned long long)short_files, (unsigned long long)lost_bytes);
+		return LOAD_BAD;
 	}
-	return 1;
+	printf("var_store: generation %llu back whole\n", (unsigned long long)h.generation);
+	return LOAD_WHOLE;
 }
 
 static void
@@ -1249,9 +1288,9 @@ save_once(void)
 	 * device is closed (drivers/storage/hakios.ufs.c, ufs_cclose). A watcher that kept the device open
 	 * would leave Darwin reading the flash through the loader for the rest of the run.
 	 */
-	fd = open(DEVICE, O_RDWR, 0);
+	fd = open(device, O_RDWR, 0);
 	if (fd < 0) {
-		printf("var_store: %s: %s\n", DEVICE, strerror(errno));
+		printf("var_store: %s: %s\n", device, strerror(errno));
 		return 0;
 	}
 	ok = claim() && save();
@@ -1267,9 +1306,9 @@ watch(int seconds)
 	uint64_t last = 0;
 	int asked = 0;
 
-	fd = open(DEVICE, O_RDWR, 0);
+	fd = open(device, O_RDWR, 0);
 	if (fd < 0) {
-		printf("var_store: %s cannot be written (%s): nothing would be saved\n", DEVICE,
+		printf("var_store: %s cannot be written (%s): nothing would be saved\n", device,
 		    strerror(errno));
 		return 0;
 	}
@@ -1360,8 +1399,24 @@ main(int argc, char **argv, char **envp)
 	const char *what = argc > 1 ? argv[1] : "show";
 	int ok;
 
-	(void)envp;
 	crc_init();
+	{
+		const char *file = NULL, *dir = NULL;
+
+		for (char **e = envp; e != NULL && *e != NULL; e++) {
+			if (strncmp(*e, "VAR_STORE_FILE=", 15) == 0) file = *e + 15;
+			if (strncmp(*e, "VAR_STORE_ROOT=", 15) == 0) dir = *e + 15;
+		}
+		if (file != NULL && dir != NULL && strlen(dir) + 1 < sizeof(root)) {
+			device = file;
+			strcpy(root, dir);
+			root_len = strlen(root);
+			store_at = 0;
+			slot_bytes = 16 << 20;
+			test_files = 1;
+			printf("var_store: test: the store in %s, the tree %s\n", device, root);
+		}
+	}
 	if (strcmp(what, "stamp") == 0) {
 		return stamp(argc > 2 ? argv[2] : "/private/var/hakios-stamp") ? 0 : 1;
 	}
@@ -1383,11 +1438,40 @@ main(int argc, char **argv, char **envp)
 		}
 		return watch(argc > 2 ? (int)parse_number(argv[2]) : 0) ? 0 : 1;
 	}
-	fd = open(DEVICE, strcmp(what, "load") == 0 || strcmp(what, "show") == 0 ? O_RDONLY : O_RDWR, 0);
+	if (strcmp(what, "save") == 0) {
+		char type[20];
+
+		/* Beta 0.5: /private/var on the data volume keeps itself; the slots are left as the move into it found them */
+		if (fs_type(root, type, sizeof(type)) == 0 && strcmp(type, "hfs") == 0) {
+			printf("var_store: %s is the data volume on the flash (hfs): nothing to save\n", root);
+			return 0;
+		}
+	}
+	fd = open(device, strcmp(what, "load") == 0 || strcmp(what, "show") == 0 || strcmp(what, "generation") == 0 ?
+	    O_RDONLY : O_RDWR, 0);
 	if (fd < 0) {
-		printf("var_store: %s: %s (the kernel takes writes with ufs_write=1)\n", DEVICE,
+		printf("var_store: %s: %s (the kernel takes writes with ufs_write=1)\n", device,
 		    strerror(errno));
-		return 1;
+		return strcmp(what, "load") == 0 ? LOAD_BAD : 1;
+	}
+	if (strcmp(what, "generation") == 0) {
+		struct head h;
+
+		/* the newest slot's generation, on its own line, for init: "none" when there is no store */
+		memset(&h, 0, sizeof(h));
+		if (newest(&h) < 0) {
+			printf("%s\n", head_trouble ? "unread" : "none");
+		} else {
+			printf("%llu\n", (unsigned long long)h.generation);
+		}
+		close(fd);
+		return 0;
+	}
+	if (strcmp(what, "load") == 0) {
+		int got = load();
+
+		close(fd);
+		return got;
 	}
 	if (strcmp(what, "save") == 0) {
 		ok = claim() && save();

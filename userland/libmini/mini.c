@@ -263,6 +263,37 @@ fsync(int fd)
 	return (int)SC(SYS_fsync, fd, 0, 0, 0, 0, 0);
 }
 
+int
+sync(void)
+{
+	return (int)SC(SYS_sync, 0, 0, 0, 0, 0, 0);
+}
+
+int
+unmount(const char *dir, int flags)
+{
+	return (int)SC(SYS_unmount, dir, flags, 0, 0, 0, 0);
+}
+
+int
+fs_type(const char *path, char *name, size_t size)
+{
+	/* struct statfs64 (sys/mount.h): f_fstypename, 16 bytes, at 72; the whole is 2168 */
+	static uint64_t sfs[2176 / 8];
+	const char *type = (const char *)sfs + 72;
+	size_t n = 0;
+
+	if (SC(SYS_statfs64, path, sfs, 0, 0, 0, 0) != 0 || size == 0) {
+		return -1;
+	}
+	while (n + 1 < size && n < 16 && type[n] != 0) {
+		name[n] = type[n];
+		n++;
+	}
+	name[n] = 0;
+	return 0;
+}
+
 ssize_t
 pread(int fd, void *buf, size_t count, off_t offset)
 {

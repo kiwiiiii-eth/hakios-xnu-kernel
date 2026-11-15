@@ -561,7 +561,8 @@ def check(config):
         if arg in seen:
             problems.append("CONFIG_BOOTARGS: %s twice" % arg)
         seen.add(arg)
-    length = len(" ".join(args))
+    # what takes room on the kernel's command line: with CONFIG_ARGS_BUILTIN the words kept inside the kernel do not
+    length = len(" ".join([a for a in args if a.split("=", 1)[0] not in BUILTIN_ARGS] if "ARGS_BUILTIN" in parsed else args))
     if length > KERNEL_LINE - RUN_OVERHEAD:
         problems.append("the boot-arguments take %d characters; a run adds about %d of its own and the kernel's command line holds %d: "
                         "the end of it would be lost" % (length, RUN_OVERHEAD, KERNEL_LINE))
@@ -654,7 +655,7 @@ def report(problems):
 # space (kern.bootargs: wifi, ca_vbl, gpu, haptic, ...) read the boot line itself, so those stay on it. An argument not named here
 # stays on the boot line, whoever reads it: a doubt is settled that way.
 BUILTIN_ARGS = frozenset("""cpufreq socinfo thermal buttons cpufreq_gov ddr dsibl fg_charge gic_vtimer modem_keep modem_step
-rmi4 wifi_ba wifi_mac wifi_station wifi_wide""".split())
+rmi4 wifi_ba wifi_mac wifi_station wifi_wide ufs_data_first""".split())
 
 
 def builtin_on(config):

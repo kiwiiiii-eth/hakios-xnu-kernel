@@ -2845,7 +2845,7 @@ eeprom_dump(void)
 
 /*
  * The main camera's OIS, a ROHM BU24218GWL on CCI master 0 (boot-arg cam_ois=1: the servo on, the lens held in the
- * middle of its travel instead of loose on its springs; cam_ois=2: stabilised as for a still; 0, the default: not
+ * middle of its travel instead of loose on its springs; cam_ois=2, the default: stabilised as for a still; 0: not
  * touched). As CamX drives it from the module file (tools/camsensor.py's ois* tables): powered by the PM8998's L21 at
  * 2.85 V through RPMh (the dtbo's ois_rear_0: cam_vaf-supply, 500 mA) and GPIO 40 high (CAM_OIS_PWD_0); its program
  * written into its RAM (oisinit: 0xF010 = 0, then 2580 bytes from 0x0000); its calibration from the module's EEPROM
@@ -2978,6 +2978,9 @@ static void
 ois_down(void)
 {
 	if (ois_on) {
+		/* the lens brought to the middle and held a moment before the servo lets go: less of a knock (r202: a sound at every switch) */
+		(void)ois_table("oiscent", true);
+		wait_ms(20);
 		(void)ois_table("oisstby", true);
 		ois_on = false;
 	}
@@ -2999,7 +3002,10 @@ ois_up(void)
 	const struct ctab_entry *slave, *cal;
 	int l21;
 
-	if (hw != &sensors[1] || !PE_parse_boot_argn("cam_ois", &wanted, sizeof(wanted)) || wanted == 0) {
+	/* (on unless cam_ois=0: r202, the developer's 6T held in the hand, steadier and sharper) */
+	wanted = 2;
+	(void)PE_parse_boot_argn("cam_ois", &wanted, sizeof(wanted));
+	if (hw != &sensors[1] || wanted == 0) {
 		return;
 	}
 	if ((slave = ctab_find("oisslave", &count)) == NULL || count != 1 || (cal = ctab_find("oiscal", &count)) == NULL) {
@@ -3450,8 +3456,8 @@ darwin_stop(const char *why)
 	if (!broken && darwin_source != SOURCE_CSID_TPG) {
 		(void)sensor_table("off");
 	}
+	af_down();                      /* (the focus lens back to its stop slowly, the OIS still holding it, then the OIS) */
 	ois_down();
-	af_down();
 	/* (only when the paths were set up: a start that failed before them -- a PMIC that did not answer -- has no CSID mapped) */
 	if (csid_running || ife_running) {
 		show_paths("at the end");

@@ -1679,6 +1679,12 @@ worker(void *context)
 	struct reader reader;
 	bool reading = false;
 	int taken = -1;
+	/*
+	 * A photograph's frame: not the one right after the shutter's press, which the press itself shakes (r202: the preview
+	 * steady in the hand, the photograph blurred), but the sharpest of the four after the next, each one's focus window
+	 * measured as the focus is, the sharpest kept (a copy of the frame) -- some 170 ms more at 30 frames a second.
+	 */
+	struct { int left; float best; uint8_t *buf; int which; } pick = { 0, -1, NULL, 0 };
 	uint32_t tuned_for = ~0u;
 	bool switched = false;
 	float lux = -1, cct = -1;
@@ -1793,6 +1799,30 @@ worker(void *context)
 		}
 		af_frame(device, &af, f, raw, s->af_window, s->af_locked);
 		t_af += mach_absolute_time() - t_mark;
+
+		bool still_ready = false;
+
+		if (s->stills_wanted > 0 && pick.buf == NULL) {
+			pick.buf = malloc(bytes);
+		}
+		if (s->stills_wanted > 0 && pick.buf != NULL) {
+			if (pick.left == 0) {
+				pick.left = 5;
+				pick.best = -1;
+				pick.which = 0;
+			}
+			if (pick.left <= 4) {           /* (the first after the press left out) */
+				float level, sharp = isp_sharpness(f, raw, s->af_window[0], s->af_window[1], s->af_window[2], s->af_window[3],
+				    &level);
+
+				if (sharp > pick.best) {
+					pick.best = sharp;
+					pick.which = 5 - pick.left;
+					memcpy(pick.buf, buffer, bytes);
+				}
+			}
+			still_ready = --pick.left == 0;
+		}
 		s->frames++;
 		keep_raw(device, s, f, raw);
 
@@ -1828,13 +1858,21 @@ worker(void *context)
 			if (out->handler == NULL || out->config == NULL || !(out->enabled || i == 0)) {
 				continue;
 			}
-			if (still && s->stills_wanted == 0) {
+			if (still && (s->stills_wanted == 0 || (pick.buf != NULL && !still_ready))) {
 				continue;
 			}
-			deliver(s, out, &isp, f, raw, metadata);
+			if (still && pick.buf != NULL) {
+				const struct hakios_camera_frame *kept = (const void *)pick.buf;
+
+				deliver(s, out, &isp, kept, pick.buf + kept->header_bytes, metadata);
+			} else {
+				deliver(s, out, &isp, f, raw, metadata);
+			}
 			if (still) {
 				s->stills_wanted--;
-				say("the photograph is given (%llu so far)", (unsigned long long)++s->stills_given);
+				say("the photograph is given (%llu so far): the sharpest of four, the %d%s after the press's next (sharpness %.3f)",
+				    (unsigned long long)++s->stills_given, pick.which, pick.which == 1 ? "st" : pick.which == 2 ? "nd" :
+				    pick.which == 3 ? "rd" : "th", pick.best);
 			}
 		}
 		pthread_mutex_unlock(&s->lock);
@@ -1862,6 +1900,7 @@ worker(void *context)
 	if (buffer != NULL) {
 		reader_stop(&reader, reading);
 	}
+	free(pick.buf);
 	close(device);
 	say("the frames stopped (%llu)", s->frames);
 	return NULL;

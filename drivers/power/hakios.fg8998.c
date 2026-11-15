@@ -24,9 +24,11 @@
 #include <kern/clock.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
+#include <mach/mach_time.h>
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
 #include <sys/hakios.input.h>
+#include <sys/sysctl.h>
 #include <sys/systm.h>
 
 extern void loader_log_putc(char c);
@@ -295,6 +297,67 @@ fg_soc(void)
 	return -1;
 }
 
+/*
+ * The PMIC's real-time clock (PM8998, slave 0, peripheral 0x60, RTC_RW; RTC_READ0..3 at 0x48: seconds, little-endian, as
+ * Linux's rtc-pm8xxx reads them, read again from the low byte until a read does not straddle a tick). It goes on while
+ * the phone is off, and it is a count, not the date (Android keeps its own offset to it; it read 60110539 on the
+ * reference phone, which as a date is 1971): userland/src/rtcclock.c keeps the offset in /private/var and sets the clock
+ * from it at boot, so that a phone that boots with no host to give it the time (Beta 0.4) has it all the same. Read here,
+ * in this thread, with the battery's registers every POLL_SECONDS (the shared reader takes one caller at a time), and
+ * given as kern.hakios.rtc_now: the count now, from the last read and the time since (mach_continuous_time, which goes
+ * on through sleep); -1 when it was never read. Nothing is written to the clock.
+ */
+#define RTC_RW                  0x060           /* slave 0, peripheral 0x60 */
+#define RTC_TYPE                0x07
+#define RTC_REG_TYPE            0x04
+#define RTC_READ0               0x48
+
+static uint32_t rtc_last;
+static uint64_t rtc_last_at;                    /* mach_continuous_time() of the read; 0: never read */
+static bool rtc_checked, rtc_ok;
+
+static void
+rtc_poll(void)
+{
+	uint8_t b[4], again = 0, type = 0;
+
+	if (!rtc_checked) {
+		rtc_checked = true;
+		rtc_ok = fg_read(RTC_RW, RTC_REG_TYPE, &type, 1) && type == RTC_TYPE;
+		printf("fg8998: the real-time clock (PM8998 0x6000): %s (type %#x)\n", rtc_ok ? "read for kern.hakios.rtc_now" :
+		    "NOT the clock, not read", type);
+	}
+	for (int tries = 0; rtc_ok && tries < 3; tries++) {
+		if (!fg_read(RTC_RW, RTC_READ0, b, 4) || !fg_read(RTC_RW, RTC_READ0, &again, 1)) {
+			return;
+		}
+		if (again == b[0]) {
+			rtc_last = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+			rtc_last_at = mach_continuous_time();
+			return;
+		}
+	}
+}
+
+static int
+fg_sysctl_rtc_now SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int64_t value = -1;
+
+	if (rtc_last_at != 0) {
+		uint64_t ns;
+
+		absolutetime_to_nanoseconds(mach_continuous_time() - rtc_last_at, &ns);
+		value = (int64_t)rtc_last + (int64_t)(ns / NSEC_PER_SEC);
+	}
+	return SYSCTL_OUT(req, &value, sizeof(value));
+}
+
+SYSCTL_DECL(_kern_hakios);
+SYSCTL_PROC(_kern_hakios, OID_AUTO, rtc_now, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, fg_sysctl_rtc_now, "Q",
+    "the PMIC's real-time clock now, in its seconds (a count, not the date: userland/src/rtcclock.c); -1: never read");
+
 static void
 fg_thread(__unused void *parameter, __unused wait_result_t result)
 {
@@ -329,6 +392,8 @@ fg_thread(__unused void *parameter, __unused wait_result_t result)
 
 	for (unsigned tick = 0;; tick++) {
 		struct hakios_battery_state state = { .size = sizeof(state) };
+
+		rtc_poll();
 		uint8_t v[2] = { 0, 0 }, i[2] = { 0, 0 }, t[2] = { 0, 0 }, usb = 0, chg = 0;
 		int32_t soc = fg_soc(), ibatt_ua, temp_k4;
 		bool plugged, ok;

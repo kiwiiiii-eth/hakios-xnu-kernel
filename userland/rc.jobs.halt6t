@@ -8,6 +8,8 @@
 # address is said in the log every few minutes (net_test show) for whoever reads it there.
 # the widgets' extensions and the daemons behind them in the background, so that the screen has the processors (src/quietboot.c)
 /redwood/bin/quietboot &
+# the date from the PMIC's real-time clock and the offset kept in /private/var, for a boot with no host to give it (src/rtcclock.c)
+/redwood/bin/rtcclock &
 # the modem's positions to locationd once the kernel has any (with gnss=1 among the kernel's arguments; src/gnssfeed.m)
 /redwood/bin/gnssfeed &
 # the data volume across boots, seen at every boot (var_store keeps /private/var in the partition darwin): what the runs before

@@ -231,6 +231,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			install -m 644 "$MACSDK"/usr/include/net/route.h obj/macinc/net/
 			$DYN -idirafter obj/macinc -o obj/socks src/socks.c
 		fi
+		# the date from the PMIC's real-time clock and an offset kept in /private/var (src/rtcclock.c; rc.jobs.ssh6t)
+		$DYN -o obj/rtcclock src/rtcclock.c
 		# the launchd job that keeps /private/var (com.hakios.varstore.plist; src/varsaver.c): var_store save on SIGTERM too
 		$DYN -o obj/varsaver src/varsaver.c
 		# where a process's threads are, from outside it (src/stacks.c), signed for task_for_pid
@@ -396,6 +398,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/logdump ] && cp obj/logdump root/bin/
 	[ -f obj/stacks ] && cp obj/stacks root/bin/
 	[ -f obj/varsaver ] && cp obj/varsaver root/bin/
+	[ -f obj/rtcclock ] && cp obj/rtcclock root/bin/
 	[ -f obj/gnssfeed ] && cp obj/gnssfeed root/bin/
 	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
 	[ -f obj/cg_test ] && cp obj/cg_test root/bin/

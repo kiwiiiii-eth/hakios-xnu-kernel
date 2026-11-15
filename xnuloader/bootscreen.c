@@ -2,11 +2,12 @@
  * bootscreen.c: what a phone that boots HakiOS by itself shows while the loader reads the system image from darwin
  * (about 17 seconds on the 6T) -- before, U-Boot's console over what ABL had left on the screen, cut by the corners.
  *
- *   the clean screen (the default): black, "HakiOS", a progress bar, and one line: "Loading the system · 1.2 / 2.7 GB",
+ *   the screen (the default): black, "HakiOS", a progress bar, one line under it: "Loading the system · 1.2 / 2.5 GB",
  *   then "Checking the system" while the image's FNV-1a is taken, "Starting HakiOS" as the kernel is started (and
- *   stays until Darwin draws), or "The system could not be loaded" (and the way back to ABL's fastboot)
- *   bootscreen=log (the payload's command line; mk-installimg.sh DEBUG=1): the same, and the loader's last lines of log
- *   at the bottom, dim, as they come
+ *   stays until Darwin draws), or "The system could not be loaded" (and the way back to ABL's fastboot); and at the
+ *   bottom, dim and monospaced, the boot's facts as they come (the phone and slot, the storage, the system image, the
+ *   kernel, the slot marked started: bs_info, set by the loader)
+ *   bootscreen=log (the payload's command line; mk-installimg.sh DEBUG=1): the loader's own last lines instead
  *   bootscreen=0: nothing drawn
  *
  * Only on the one-shot path that reads the system image from darwin (an installed phone, or a one-shot test): a run from
@@ -21,7 +22,10 @@
  */
 #include "bootscreen_assets.h"
 
-static int bs_mode;                     /* 0: off; 1: the clean screen; 2: and the log */
+static int bs_mode;                     /* 0: off; 1: the screen and the boot's facts; 2: and the loader's log instead */
+static uint64_t bs_total;               /* the system image's bytes */
+enum { BS_INFO_LINES = 5, BS_INFO_PHONE = 0, BS_INFO_STORAGE, BS_INFO_DARWIN, BS_INFO_KERNEL, BS_INFO_SLOT };
+static char bs_info[BS_INFO_LINES][100];
 static uint32_t bs_shown = 0xffffffff;  /* the progress last drawn, in thousandths; and the phase */
 static int bs_phase;
 
@@ -106,6 +110,73 @@ bs_string(const char *s, int32_t x, int32_t y, uint32_t level)
 	return x;
 }
 
+/* the boot's facts: a line made of pieces (ASCII; 0x7f is the middle dot) */
+static void
+bs_info_add(int line, const char *text)
+{
+	size_t n = str_len(bs_info[line]);
+
+	for (; *text && n + 1 < sizeof(bs_info[line]); text++) {
+		bs_info[line][n++] = *text;
+	}
+	bs_info[line][n] = 0;
+}
+
+static void
+bs_info_num(int line, uint64_t v)
+{
+	char digits[24];
+	int m = 0;
+
+	do {
+		digits[m++] = (char)('0' + v % 10);
+		v /= 10;
+	} while (v > 0);
+	while (m > 0) {
+		char one[2] = { digits[--m], 0 };
+
+		bs_info_add(line, one);
+	}
+}
+
+/* bytes as "17 MB", "2.48 GB" or "116 GB" (of 2^20 and 2^30, as U-Boot and the status line count them) */
+static void
+bs_info_size(int line, uint64_t bytes)
+{
+	if (bytes < (1ULL << 30)) {
+		bs_info_num(line, (bytes + (1ULL << 19)) >> 20);
+		bs_info_add(line, " MB");
+	} else if (bytes < (100ULL << 30)) {
+		uint64_t h = (bytes * 100 + (1ULL << 29)) >> 30;
+
+		bs_info_num(line, h / 100);
+		bs_info_add(line, ".");
+		bs_info_num(line, h / 10 % 10);
+		bs_info_num(line, h % 10);
+		bs_info_add(line, " GB");
+	} else {
+		bs_info_num(line, (bytes + (1ULL << 29)) >> 30);
+		bs_info_add(line, " GB");
+	}
+}
+
+static void
+bs_info_set(int line, const char *text)
+{
+	bs_info[line][0] = 0;
+	bs_info_add(line, text);
+}
+
+/* the system image's line, in its phase */
+static void
+bs_info_darwin(const char *how)
+{
+	bs_info_set(BS_INFO_DARWIN, "darwin: system image ");
+	bs_info_size(BS_INFO_DARWIN, bs_total);
+	bs_info_add(BS_INFO_DARWIN, ", ");
+	bs_info_add(BS_INFO_DARWIN, how);
+}
+
 /* the screen's places: the 6T's at 2340 high, scaled */
 static int32_t bs_y(int32_t at2340) { return (int32_t)((int64_t)at2340 * SCREEN.height / 2340); }
 static int32_t bs_x(int32_t at1080) { return (int32_t)((int64_t)at1080 * SCREEN.width / 1080); }
@@ -141,7 +212,7 @@ bs_status(int phrase, uint64_t done, uint64_t total)
 	int32_t width = bs_pictures[phrase].advance, x, y = bs_y(1280);
 
 	if (total != 0) {
-		uint64_t a = (done + 50000000) / 100000000, b = (total + 50000000) / 100000000;     /* tenths of a GB */
+		uint64_t a = (done * 10 + (1ULL << 29)) >> 30, b = (total * 10 + (1ULL << 29)) >> 30;    /* tenths of 2^30 */
 		uint64_t parts[2] = { a, b };
 
 		numbers[n++] = ' ', numbers[n++] = ' ', numbers[n++] = 0x7f, numbers[n++] = ' ', numbers[n++] = ' ';
@@ -173,7 +244,23 @@ bs_status(int phrase, uint64_t done, uint64_t total)
 	bs_string(numbers, x + bs_pictures[phrase].advance, y, 142);
 }
 
-/* bootscreen=log: the loader's last lines, dim, above the bottom corners */
+/* one line at the bottom, monospaced and dim, cut at the right margin */
+static void
+bs_mono(const char *text, uint32_t len, int32_t x, int32_t y, int32_t right)
+{
+	for (uint32_t at = 0; at < len && text[at] != 0 && text[at] != '\n'; at++) {
+		unsigned char c = (unsigned char)text[at];
+		int idx = BS_ASCII_FIRST + ((c >= 32 && c <= 127 ? c : '?') - 32);
+
+		if (x + bs_pictures[idx].advance > right) {
+			break;
+		}
+		bs_draw(idx, x, y, 96);
+		x += bs_pictures[idx].advance;
+	}
+}
+
+/* the bottom, above the corners: the boot's facts, or with bootscreen=log the loader's last lines */
 static void
 bs_log(void)
 {
@@ -182,6 +269,18 @@ bs_log(void)
 	    right = (int32_t)SCREEN.width - bs_x(90);
 	uint32_t starts[LINES], count = 0, end = log_len;
 
+	if (bs_mode == 1) {
+		int32_t y = top + (LINES - BS_INFO_LINES) * BS_LOG_HEIGHT;
+
+		bs_fill(0, top, (int32_t)SCREEN.width, LINES * BS_LOG_HEIGHT, 0);
+		for (int i = 0; i < BS_INFO_LINES; i++) {
+			if (bs_info[i][0] != 0) {
+				bs_mono(bs_info[i], sizeof(bs_info[i]), left, y, right);
+				y += BS_LOG_HEIGHT;
+			}
+		}
+		return;
+	}
 	if (bs_mode != 2) {
 		return;
 	}
@@ -197,18 +296,8 @@ bs_log(void)
 	bs_fill(0, top, (int32_t)SCREEN.width, LINES * BS_LOG_HEIGHT, 0);
 	for (uint32_t k = 0; k < count; k++) {
 		uint32_t at = starts[count - 1 - k];
-		int32_t x = left, y = top + (int32_t)(LINES - count + k) * BS_LOG_HEIGHT;
 
-		for (; at < end && log_buf[at] != '\n'; at++) {
-			char c = log_buf[at];
-			int idx = BS_ASCII_FIRST + ((c >= 32 && c < 127 ? c : '?') - 32);
-
-			if (x + bs_pictures[idx].advance > right) {
-				break;
-			}
-			bs_draw(idx, x, y, 92);
-			x += bs_pictures[idx].advance;
-		}
+		bs_mono(log_buf + at, end - at, left, top + (int32_t)(LINES - count + k) * BS_LOG_HEIGHT, right);
 	}
 }
 
@@ -244,6 +333,8 @@ bootscreen_begin(const char *cmdline, uint64_t total)
 		return;
 	}
 	screen_quiet = 1;
+	bs_total = total;
+	bs_info_darwin("reading");
 	for (uint32_t y = 0; y < SCREEN.height; y++) {
 		volatile uint32_t *row = (volatile uint32_t *)(uintptr_t)(SCREEN.base + (uint64_t)y * SCREEN.stride);
 
@@ -273,6 +364,9 @@ bootscreen_progress(int phase, uint64_t done, uint64_t total)
 		return;
 	}
 	bs_bar(permille);
+	if (phase != bs_phase && phase == 1) {
+		bs_info_darwin("checking");
+	}
 	if (phase != bs_phase || phase == 0) {
 		bs_status(phase == 0 ? BS_LOADING : BS_CHECKING, phase == 0 ? done : 0, phase == 0 ? total : 0);
 	}
@@ -290,5 +384,21 @@ bootscreen_end(int ok)
 	}
 	bs_bar(ok ? 1000 : bs_shown == 0xffffffff ? 0 : bs_shown);
 	bs_status(ok ? BS_STARTING : BS_FAILED, 0, 0);
+	bs_info_darwin(ok ? "checked" : "could not be read");
+	bs_log();
+}
+
+/* the slot that started this, marked as started (ab_mark_successful), the last fact before the kernel */
+static void
+bootscreen_slot(char slot, int marked)
+{
+	char one[2] = { slot, 0 };
+
+	if (bs_mode == 0) {
+		return;
+	}
+	bs_info_set(BS_INFO_SLOT, "slot ");
+	bs_info_add(BS_INFO_SLOT, one);
+	bs_info_add(BS_INFO_SLOT, marked ? ": started, marked successful" : ": started");
 	bs_log();
 }

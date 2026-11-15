@@ -878,9 +878,20 @@ ufs_copen(dev_t dev, int flags, int devtype, proc_t p)
 	return ufs_open(dev, flags, devtype, p);
 }
 
+/*
+ * A block device's d_close is its last close (spec_close): the data volume unmounted. The packed store may be written
+ * again from then on -- on the 6T the volume lies past the store's slots (ufs_data_first), and init unmounts it when
+ * the store could not be moved into it, so that this boot goes on as Beta 0.4's and its saver must be able to save.
+ * While it is mounted, the two stay apart as before.
+ */
 static int
-ufs_close(__unused dev_t dev, __unused int flags, __unused int devtype, __unused proc_t p)
+ufs_close(dev_t dev, int flags, __unused int devtype, __unused proc_t p)
 {
+	if (ufs_is_data(dev) && (flags & FWRITE)) {
+		lck_mtx_lock(&ufs_write_mtx);
+		ufs_data_used = false;
+		lck_mtx_unlock(&ufs_write_mtx);
+	}
 	return 0;
 }
 

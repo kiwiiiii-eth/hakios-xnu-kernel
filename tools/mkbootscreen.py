@@ -4,10 +4,13 @@
 the printable ASCII small for the debug screen's log (bootscreen=log), drawn here once from the Inter typeface and
 written as xnuloader/bootscreen_assets.h, 8-bit coverage run-length coded.
 
-usage: mkbootscreen.py FONT_DIR [OUT]        (FONT_DIR: Inter's release, https://github.com/rsms/inter: extras/ttf/
-                                              Inter-SemiBold.ttf and Inter-Regular.ttf; OUT: xnuloader/bootscreen_assets.h)
-Needs Pillow (python3 -m pip install pillow). Inter is under the SIL Open Font License 1.1: the pictures made from it
-may go into the loader as they are; the font files themselves are not in this repository.
+usage: mkbootscreen.py INTER_DIR MONO_DIR [OUT]
+  INTER_DIR  Inter's release (https://github.com/rsms/inter): extras/ttf/Inter-SemiBold.ttf and Inter-Regular.ttf
+  MONO_DIR   JetBrains Mono's release (https://github.com/JetBrains/JetBrainsMono): fonts/ttf/JetBrainsMono-Regular.ttf,
+             for the lines at the bottom (the boot's facts, or with bootscreen=log the loader's log)
+  OUT        xnuloader/bootscreen_assets.h
+Needs Pillow (python3 -m pip install pillow). Both typefaces are under the SIL Open Font License 1.1: the pictures made
+from them may go into the loader as they are; the font files themselves are not in this repository.
 
 The sizes are the 6T's screen's (1080 x 2340): the name 128 px, the lines 36 px, the log 26 px.
 """
@@ -25,7 +28,7 @@ PHRASES = {
     'FAILED': 'The system could not be loaded',
 }
 GLYPHS = '0123456789./ GB\u00b7'           # the middle dot last: "\\x7f" in BS_GLYPHS
-LOG_FONT = ('Inter-Regular.ttf', 26)
+LOG_FONT = ('JetBrainsMono-Regular.ttf', 25)
 
 
 def rle(alpha):
@@ -64,11 +67,11 @@ def c_bytes(data):
 
 
 def main():
-    if len(sys.argv) not in (2, 3):
+    if len(sys.argv) not in (3, 4):
         sys.exit(__doc__)
-    fonts = sys.argv[1]
+    fonts, mono = sys.argv[1], sys.argv[2]
     here = os.path.dirname(os.path.abspath(__file__))
-    out = sys.argv[2] if len(sys.argv) == 3 else os.path.join(here, '..', 'xnuloader', 'bootscreen_assets.h')
+    out = sys.argv[3] if len(sys.argv) == 4 else os.path.join(here, '..', 'xnuloader', 'bootscreen_assets.h')
     logo_font = ImageFont.truetype(os.path.join(fonts, LOGO[1]), LOGO[2])
     line_font = ImageFont.truetype(os.path.join(fonts, LINE_FONT[0]), LINE_FONT[1])
     pool, parts = bytearray(), []
@@ -84,14 +87,14 @@ def main():
         add('BS_' + name, text, line_font)
     for i, ch in enumerate(GLYPHS):
         add(f'BS_GLYPH_{i}', ch, line_font)
-    log_font = ImageFont.truetype(os.path.join(fonts, LOG_FONT[0]), LOG_FONT[1])
+    log_font = ImageFont.truetype(os.path.join(mono, LOG_FONT[0]), LOG_FONT[1])
     first_ascii = len(parts)
-    for c in range(32, 127):
-        add(f'BS_ASCII_{c}', chr(c), log_font)
+    for c in range(32, 128):                        # and 127: the middle dot
+        add(f'BS_ASCII_{c}', chr(c) if c < 127 else '\u00b7', log_font)
     asc, desc = line_font.getmetrics()
     lasc, ldesc = log_font.getmetrics()
     lines = [
-        '/* made by tools/mkbootscreen.py from Inter (SIL Open Font License 1.1, https://github.com/rsms/inter): do not edit */',
+        '/* made by tools/mkbootscreen.py from Inter and JetBrains Mono (SIL Open Font License 1.1): do not edit */',
         '',
         'struct bs_picture {',
         '\tuint16_t w, h;          /* the coverage\'s size */',
@@ -102,7 +105,7 @@ def main():
         '',
         f'#define BS_LINE_HEIGHT {asc + desc}',
         f'#define BS_LOG_HEIGHT {lasc + ldesc}',
-        f'#define BS_ASCII_FIRST {first_ascii}     /* the picture of character c (32..126): BS_ASCII_FIRST + c - 32 */',
+        f'#define BS_ASCII_FIRST {first_ascii}     /* the picture of character c (32..127, 127 the middle dot): BS_ASCII_FIRST + c - 32 */',
         '#define BS_GLYPHS "' + GLYPHS.replace(chr(0xb7), '\\x7f') + '"     /* \\x7f: the middle dot */',
         '',
         'static const struct bs_picture bs_pictures[] = {',

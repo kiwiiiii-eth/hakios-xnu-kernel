@@ -4298,6 +4298,27 @@ ab_rehash(uint8_t *hdr, const uint8_t *entries, uint64_t bytes)
 	*(uint32_t *)(hdr + 16) = ufs_crc32(hdr, header_size);
 }
 
+/* the active boot slot's letter, for the boot screen: 'a', 'b', or '?' */
+static char
+ab_active_slot(void)
+{
+	struct ab_table t;
+	int a, b;
+
+	if (!ab_locate(&t)) {
+		return '?';
+	}
+	a = ab_find(&t, ab_entries, "boot_a");
+	b = ab_find(&t, ab_entries, "boot_b");
+	if (a >= 0 && (*(uint64_t *)(ab_entries + (uint64_t)a * t.size + 48) & AB_ACTIVE)) {
+		return 'a';
+	}
+	if (b >= 0 && (*(uint64_t *)(ab_entries + (uint64_t)b * t.size + 48) & AB_ACTIVE)) {
+		return 'b';
+	}
+	return '?';
+}
+
 /* the active slot marked successful: 1 (done, or it already was), 0 (not, and why in the log) */
 static int
 ab_mark_successful(void)
@@ -5404,8 +5425,23 @@ efi_main(efi_handle image, efi_system_table *st)
 	 */
 	if (have_payload) {
 		if (pi.rdsrc != NULL && str_eq(pi.rdsrc, "darwin")) {
+			struct gpt_unit u;
+			char slot[2] = { ab_active_slot(), 0 };
+
 			bs_wanted = 1;                      /* the boot screen while it is read (bootscreen.c) */
 			bs_cmdline = pi.cmdline;
+			/* the boot's facts at its bottom */
+			bs_info_set(BS_INFO_PHONE, PLAT == &platform_fajita ? "OnePlus 6T (fajita)" : PLAT->name);
+			bs_info_add(BS_INFO_PHONE, "  \x7f  slot ");
+			bs_info_add(BS_INFO_PHONE, slot);
+			if (gpt_locate(&u)) {
+				bs_info_set(BS_INFO_STORAGE, "storage: LUN 0 ");
+				bs_info_size(BS_INFO_STORAGE, (u.last + 1) * u.bs);
+			}
+			bs_info_set(BS_INFO_KERNEL, "kernel ");
+			bs_info_size(BS_INFO_KERNEL, pi.kernel_size);
+			bs_info_add(BS_INFO_KERNEL, "  \x7f  root ");
+			bs_info_size(BS_INFO_KERNEL, pi.ramdisk_size);
 		}
 		if (pi.rdsrc != NULL && str_eq(pi.rdsrc, "darwin") && !sysimg_load()) {
 			print("loader: rdsrc=darwin, and no system image could be read from darwin: the kernel is not started\n");
@@ -5416,7 +5452,9 @@ efi_main(efi_handle image, efi_system_table *st)
 			 * system image has been read and checked, and never for a test from a host.
 			 */
 			if (pi.installed) {
-				ab_mark_successful();
+				bootscreen_slot(ab_active_slot(), ab_mark_successful());
+			} else {
+				bootscreen_slot(ab_active_slot(), 0);
 			}
 			run_kernel(0, 0);
 		}

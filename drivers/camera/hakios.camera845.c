@@ -1635,6 +1635,7 @@ look_around(void)
 #define RPMH_CLIENT_CAMERA      2
 extern uint32_t hakios_rpmh_shared(unsigned client, uint32_t address, uint32_t value);  /* drivers/core/hakios.platform.c */
 extern void hakios_cpufreq_boost(void);                 /* drivers/power/hakios.cpufreq.c (or the stubs' empty one) */
+extern void hakios_gpu_boost(void);                     /* drivers/gpu/hakios.a630.c (or the stubs' empty one) */
 static bool rails_voted;
 static unsigned rails_users;
 static uint32_t rails_address[2], rails_ours[2];
@@ -3709,6 +3710,12 @@ camdev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 	 * speed did not climb for -- the main camera's preview took 57-69 ms a frame, 13-15 a second (r186).
 	 */
 	hakios_cpufreq_boost();
+	/*
+	 * And the GPU at its fast speed: gpu_dvfs (drivers/gpu/hakios.a630.c) counts submissions, more than six in 100 ms, and
+	 * the window server drawing the camera's preview at 20-30 frames a second stays at or under that -- r196's camera
+	 * ran with the GPU at 257 MHz the whole time, and the screen showed black patches.
+	 */
+	hakios_gpu_boost();
 
 	error = uiomove((caddr_t)&f, (int)MIN(sizeof(f), (size_t)uio_resid(uio)), uio);
 	if (error == 0 && uio_resid(uio) > 0) {

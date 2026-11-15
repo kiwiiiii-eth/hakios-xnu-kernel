@@ -1380,6 +1380,8 @@ power_step(const struct ctab_entry *e, bool up)
 }
 
 /* Everything that was switched on, off again: the module file's power-down, then the rest as it was found. */
+static void ois_down(void);            /* (the main camera's OIS: below, with its lens motor) */
+
 static void
 power_down(void)
 {
@@ -1392,6 +1394,7 @@ power_down(void)
 	if (!was) {
 		return;
 	}
+	ois_down();                     /* (whatever path brought it here: the OIS before its sensor's supplies) */
 	say("camera: powering down\n");
 	for (uint32_t i = 0; e != NULL && i < count; i++) {
 		(void)power_step(&e[i], false);
@@ -2840,6 +2843,220 @@ eeprom_dump(void)
 	say("camera: eeprom: done\n");
 }
 
+/*
+ * The main camera's OIS, a ROHM BU24218GWL on CCI master 0 (boot-arg cam_ois=1: the servo on, the lens held in the
+ * middle of its travel instead of loose on its springs; cam_ois=2: stabilised as for a still; 0, the default: not
+ * touched). As CamX drives it from the module file (tools/camsensor.py's ois* tables): powered by the PM8998's L21 at
+ * 2.85 V through RPMh (the dtbo's ois_rear_0: cam_vaf-supply, 500 mA) and GPIO 40 high (CAM_OIS_PWD_0); its program
+ * written into its RAM (oisinit: 0xF010 = 0, then 2580 bytes from 0x0000); its calibration from the module's EEPROM
+ * (oiscal: 39 bytes from 0x0112, each to its register, 0x1DC0-0x1DE5 and 0xF006: the EEPROM block's offset and count are
+ * in the module file's EEPROMDriverData); then centring (oiscent) and, for 2, the still mode (oisstill). Nothing here is
+ * kept by the chip: its RAM goes with its power. Anything not acknowledged: the OIS down again, the camera goes on.
+ */
+#define PID_L21                 0x154   /* the PM8998's L21 at 0x5400 (slave 1) */
+#define L21_MV                  2856    /* (2.85 V in the dtbo; the LDO's steps are 8 mV) */
+#define LDO_MODE_HPM            7       /* PMIC4 LDO: 4 retention, 5 LPM, 7 HPM (rpmh-regulator.c) */
+#define OIS_PWD_GPIO            40
+static bool ois_on, ois_l21_voted, ois_pwd_switched;
+static uint32_t ois_found_cfg, ois_found_io;
+static uint8_t ois_address;
+
+static bool
+ldo_vote(const char *name, uint32_t mv, bool on, bool *voted)
+{
+	uint16_t levels[1];
+	unsigned count, n = 0;
+	uint32_t base = rpmh_resource(name, levels, 1, &count), addresses[3], values[3];
+	bool done;
+
+	if (base == 0) {
+		say("camera: RPMh has no %s\n", name);
+		return false;
+	}
+	if (on) {
+		addresses[n] = base + VRM_VOLTAGE, values[n++] = mv;
+		addresses[n] = base + VRM_MODE, values[n++] = LDO_MODE_HPM;
+	}
+	addresses[n] = base + VRM_ENABLE, values[n++] = on;
+	*voted = on;
+	done = rpmh_write(n, addresses, values);
+	say("camera: RPMh %s %s (%#x) %s\n", done ? "took" : "DID NOT SAY IT TOOK", name, base, on ? "on" : "off (given back)");
+	return done;
+}
+
+/* an OIS table (address 16 bits, data 8, as the module file's), false at the first write not acknowledged */
+static bool
+ois_table(const char *name, bool quiet)
+{
+	uint32_t count = 0;
+	const struct ctab_entry *e = ctab_find(name, &count);
+	uint64_t t0 = mach_absolute_time(), ns;
+
+	if (e == NULL) {
+		say("camera: OIS: the tables have no \"%s\"\n", name);
+		return false;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		uint8_t out[3] = { (uint8_t)(e[i].address >> 8), (uint8_t)e[i].address, (uint8_t)e[i].data };
+
+		if (e[i].operation != 0 || e[i].address_bytes != 2 || e[i].data_bytes != 1 ||
+		    !i2c_transfer(&cci_bus, ois_address, out, 3, NULL, 0)) {
+			say("camera: OIS: \"%s\" %u: %#x <- %#x not done\n", name, i, e[i].address, e[i].data);
+			return false;
+		}
+		if (e[i].delay_us >= 1000) {
+			wait_ms((e[i].delay_us + 999) / 1000);
+		} else if (e[i].delay_us != 0) {
+			spin_us(e[i].delay_us);
+		}
+	}
+	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+	if (!quiet) {
+		say("camera: OIS: \"%s\": %u writes in %llu ms\n", name, count, ns / 1000000);
+	}
+	return true;
+}
+
+/*
+ * The OIS's program the fast way: runs of consecutive addresses written 32 bytes at a time (its RAM's address going up
+ * by itself), each run read back and compared; anything not as written, or not read: false, and the caller writes the
+ * whole table a byte at a time as the module file has it (2581 writes, 1.2 s at every start of the main camera, r201).
+ */
+#define OIS_RUN 32
+static bool
+ois_table_runs(const char *name)
+{
+	uint32_t count = 0, writes = 0;
+	const struct ctab_entry *e = ctab_find(name, &count);
+	uint64_t t0 = mach_absolute_time(), ns;
+
+	if (e == NULL) {
+		return false;
+	}
+	for (uint32_t i = 0; i < count;) {
+		uint32_t n = 1;
+		uint8_t out[2 + OIS_RUN], back[OIS_RUN];
+
+		if (e[i].operation != 0 || e[i].address_bytes != 2 || e[i].data_bytes != 1) {
+			return false;
+		}
+		while (n < OIS_RUN && i + n < count && e[i + n - 1].delay_us == 0 && e[i + n].address == e[i].address + n &&
+		    e[i + n].operation == 0 && e[i + n].address_bytes == 2 && e[i + n].data_bytes == 1) {
+			n++;
+		}
+		out[0] = (uint8_t)(e[i].address >> 8);
+		out[1] = (uint8_t)e[i].address;
+		for (uint32_t k = 0; k < n; k++) {
+			out[2 + k] = (uint8_t)e[i + k].data;
+		}
+		if (!i2c_transfer(&cci_bus, ois_address, out, 2 + n, NULL, 0)) {
+			say("camera: OIS: a run of %u at %#x not acknowledged: a byte at a time instead\n", n, e[i].address);
+			return false;
+		}
+		writes++;
+		if (n > 1) {
+			if (!i2c_transfer(&cci_bus, ois_address, out, 2, back, n) || memcmp(back, out + 2, n) != 0) {
+				say("camera: OIS: a run of %u at %#x reads back otherwise (%02x %02x .. not %02x %02x ..): a byte at a time "
+				    "instead\n", n, e[i].address, back[0], back[1], out[2], out[3]);
+				return false;
+			}
+		}
+		if (e[i + n - 1].delay_us >= 1000) {
+			wait_ms((e[i + n - 1].delay_us + 999) / 1000);
+		} else if (e[i + n - 1].delay_us != 0) {
+			spin_us(e[i + n - 1].delay_us);
+		}
+		i += n;
+	}
+	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+	say("camera: OIS: \"%s\": %u entries in %u writes of up to %u, each read back, in %llu ms\n", name, count, writes, OIS_RUN,
+	    ns / 1000000);
+	return true;
+}
+
+static void
+ois_down(void)
+{
+	if (ois_on) {
+		(void)ois_table("oisstby", true);
+		ois_on = false;
+	}
+	if (ois_pwd_switched) {
+		wr(GPIO_IO(OIS_PWD_GPIO), ois_found_io & 2);
+		wr(GPIO_CFG(OIS_PWD_GPIO), ois_found_cfg);
+		ois_pwd_switched = false;
+		say("camera: OIS: gpio%u back as it was found\n", OIS_PWD_GPIO);
+	}
+	if (ois_l21_voted) {
+		(void)ldo_vote("ldoa21", L21_MV, false, &ois_l21_voted);
+	}
+}
+
+static void
+ois_up(void)
+{
+	uint32_t wanted = 0, count = 0;
+	const struct ctab_entry *slave, *cal;
+	int l21;
+
+	if (hw != &sensors[1] || !PE_parse_boot_argn("cam_ois", &wanted, sizeof(wanted)) || wanted == 0) {
+		return;
+	}
+	if ((slave = ctab_find("oisslave", &count)) == NULL || count != 1 || (cal = ctab_find("oiscal", &count)) == NULL) {
+		say("camera: OIS: the tables have none (tools/camsensor.py makes them of the module file's OIS)\n");
+		return;
+	}
+	ois_address = (uint8_t)(slave->address >> 1);
+	l21 = regulator_state(PID_L21);
+	if (l21 < 0) {
+		say("camera: OIS: L21 cannot be read: it is not voted for blind\n");
+		return;
+	}
+	if (l21 == 0 && !ldo_vote("ldoa21", L21_MV, true, &ois_l21_voted)) {
+		ois_down();
+		return;
+	}
+	spin_us(500);
+	if (regulator_state(PID_L21) <= 0) {
+		say("camera: OIS: L21 does not come up\n");
+		ois_down();
+		return;
+	}
+	ois_found_cfg = rd(GPIO_CFG(OIS_PWD_GPIO));
+	ois_found_io = rd(GPIO_IO(OIS_PWD_GPIO));
+	ois_pwd_switched = true;
+	wr(GPIO_IO(OIS_PWD_GPIO), 2);
+	wr(GPIO_CFG(OIS_PWD_GPIO), CFG_OUTPUT | CFG_DRIVE_MA(2));
+	say("camera: OIS: L21 %s, gpio%u high: the BU24218 at %#x\n", l21 > 0 ? "on already" : "on", OIS_PWD_GPIO, ois_address);
+	wait_ms(10);
+	ois_on = true;
+	if (!ois_table_runs("oisinit") && !ois_table("oisinit", false)) {
+		say("camera: OIS: its program not taken: the OIS down again\n");
+		ois_down();
+		return;
+	}
+	/* its calibration, a byte at a time from the EEPROM (the entries' data: the EEPROM's offset) */
+	for (uint32_t i = 0; i < count; i++) {
+		uint8_t at[2] = { (uint8_t)(cal[i].data >> 8), (uint8_t)cal[i].data }, byte = 0;
+
+		if (!i2c_transfer(&cci_bus, 0x50, at, 2, &byte, 1) ||
+		    !i2c_transfer(&cci_bus, ois_address, (uint8_t[]){ (uint8_t)(cal[i].address >> 8), (uint8_t)cal[i].address, byte }, 3,
+		    NULL, 0)) {
+			say("camera: OIS: calibration byte %u (EEPROM %#x -> %#x) not done: the OIS down again\n", i, cal[i].data,
+			    cal[i].address);
+			ois_down();
+			return;
+		}
+	}
+	say("camera: OIS: its calibration, %u bytes from the EEPROM at %#x\n", count, cal[0].data);
+	if (!ois_table("oiscent", false) || (wanted >= 2 && !ois_table("oisstill", false))) {
+		say("camera: OIS: not started: the OIS down again\n");
+		ois_down();
+		return;
+	}
+	say("camera: OIS: %s\n", wanted >= 2 ? "stabilising (the still mode)" : "the lens held in the middle (centring)");
+}
+
 static void
 af_move(uint32_t position)
 {
@@ -3233,6 +3450,7 @@ darwin_stop(const char *why)
 	if (!broken && darwin_source != SOURCE_CSID_TPG) {
 		(void)sensor_table("off");
 	}
+	ois_down();
 	af_down();
 	/* (only when the paths were set up: a start that failed before them -- a PMIC that did not answer -- has no CSID mapped) */
 	if (csid_running || ife_running) {
@@ -3307,6 +3525,7 @@ darwin_start(void)
 	}
 	if (darwin_source == SOURCE_SENSOR) {
 		eeprom_dump();
+		ois_up();
 	}
 	af_up(darwin_source == SOURCE_SENSOR);
 	darwin_now.lines = darwin_next.lines = lines;

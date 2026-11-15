@@ -126,7 +126,7 @@ def main():
         used[after] = n + 1
         if n < len(names):
             tables.append((names[n], regsetting(data, pool, syms, value, sid)))
-    tables = mode_tables + tables
+    tables = mode_tables + tables + ois_tables(data, pool, syms, value)
 
     print(f'camsensor.py: slave {slave:#x}, id {chip_id:#x} at {id_address:#x} ({address_bytes}/{data_bytes} bytes, mask {id_mask:#x}), '
           f'lane assignment {lane_assign:#x}')
@@ -159,6 +159,48 @@ def main():
 
 TYPES = {0: 'MCLK', 1: 'VANA', 2: 'VDIG', 3: 'VIO', 4: 'VAF', 8: 'RESET', 9: 'STANDBY'}
 CFA = {0: 'BGGR', 1: 'GBRG', 2: 'GRBG', 3: 'RGGB', 4: 'mono'}
+
+
+def ois_tables(data, pool, syms, value):
+    """The OIS's tables, where the module has one (the OnePlus 6T's main camera: a BU24218GWL), as the kernel's camera driver
+    drives it (hakios.camera845.c, cam_ois=N): oisslave (one entry: its 8-bit address), oisinit (its program: 0xF010 = 0,
+    then 2580 bytes from 0x0000), oiscal (its calibration: each entry an OIS register and, as its data, the module EEPROM's
+    offset to take the byte from -- EEPROMDriverData's OIS block: the offset 10 bytes before the reference to
+    OISAddressArray, and the count after the offset's mask), oiscent (centring: the servo on, the lens held in the middle),
+    oisstill and oismovie (the stabilisation's modes), oisstby (0x6020 = 0: standby, made here). [] without an OIS."""
+    by_name = {}
+    for sid, (name, _, _) in syms.items():
+        by_name.setdefault(name, []).append(sid)
+    if 'OISDriver' not in by_name or 'OISAddressArray' not in by_name:
+        return []
+    ois = value(by_name['OISDriver'][0])
+    slave = struct.unpack_from('<H', ois, 0x14)[0]
+    init = None
+    for i in range(len(ois) - 3):
+        sid = struct.unpack_from('<I', ois, i)[0]
+        if sid in syms and syms[sid][0] == 'regSetting' and syms[sid][2] // 40 > 1000:
+            init = sid
+            break
+    array_sid = by_name['OISAddressArray'][0]
+    addresses = struct.unpack('<%dI' % (len(value(array_sid)) // 4), value(array_sid))
+    eeprom = value(by_name['EEPROMDriverData'][0]) if 'EEPROMDriverData' in by_name else b''
+    cal = []
+    for i in range(10, len(eeprom) - 3):
+        if struct.unpack_from('<I', eeprom, i)[0] == array_sid and struct.unpack_from('<I', eeprom, i - 4)[0] == len(addresses):
+            offset = struct.unpack_from('<H', eeprom, i - 10)[0]
+            cal = [(a, offset + k, 2, 1, 0, 0) for k, a in enumerate(addresses)]
+            break
+    if init is None or not cal:
+        return []
+
+    def named(name):
+        if name not in by_name:
+            return []
+        count, sid = struct.unpack('<2I', value(by_name[name][0]))
+        return regsetting(data, pool, syms, value, sid) if count else []
+    return [('oisslave', [(slave, 0, 0, 0, 0, 0)]), ('oisinit', regsetting(data, pool, syms, value, init)), ('oiscal', cal),
+            ('oiscent', named('centeringOnSettings')), ('oisstill', named('stillModeSettings')),
+            ('oismovie', named('movieModeSettings')), ('oisstby', [(0x6020, 0, 2, 1, 0, 0)])]
 
 
 def regsetting(data, pool, syms, value, sid):

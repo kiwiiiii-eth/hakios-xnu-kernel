@@ -18,6 +18,7 @@ ap.add_argument('--usb', action='store_true', help='make the loader stay residen
 ap.add_argument('--rdres', default='', help='hex size of a root image already placed at the resident address (QEMU)')
 # (a resident image the loader places itself: give it as an item, resident=FILE -- a boot with no host, from the phone's boot partition)
 ap.add_argument('--rdsrc', default='', help='darwin: the root image is the one in the darwin partition (oem darwinput), read by the loader at boot')
+ap.add_argument('--installed', action='store_true', help='from the phone\'s own boot partition: the loader marks the slot successful and, should it come back, leaves the reset to U-Boot\'s install environment')
 ap.add_argument('--checkpoint', default='', help='kernel checkpoint to stop at; 999 = loader self test')
 ap.add_argument('--kernel-version', default='',
                 help='the kernel.ver the loader prints under its banner (default: tools/kernel-version.py)')
@@ -41,6 +42,8 @@ if args.rdres:
     add('rdres', args.rdres.lower().replace('0x', '').encode() + b'\0')
 if args.usb:
     add('usb', b'1\0')
+if args.installed:
+    add('installed', b'1\0')
 if args.rdsrc:
     add('rdsrc', args.rdsrc.encode() + b'\0')
 if args.checkpoint:

@@ -2592,6 +2592,7 @@ struct payload_info {
 	uint32_t resident_size;
 	const char *kernel_version;     /* kernel.ver: the version of the kernel in this payload (tools/kernel-version.py) */
 	const char *rdsrc;              /* rdsrc: "darwin": the root image is the one in darwin (oem darwinput), read at boot */
+	int installed;                  /* installed: from the phone's own boot partition (mk-installimg.sh), not a test */
 	int usb_mode;
 };
 
@@ -2670,6 +2671,8 @@ parse_payload(struct payload_info *pi, int verbose)
 			pi->kernel_version = text;                /* printed under the banner; the kernel gets it as hakios_kver */
 		} else if (str_eq(e->name, "checkpoint")) {
 			pi->checkpoint = parse_number(text, 10);  /* where the kernel should stop and come back */
+		} else if (str_eq(e->name, "installed")) {
+			pi->installed = 1;
 		} else if (str_eq(e->name, "rdsrc")) {
 			pi->rdsrc = (const char *)(p + sizeof(*e));
 		} else if (str_eq(e->name, "usb")) {
@@ -4095,6 +4098,300 @@ sysimg_info(void)
 	fb_reply("OKAY", text);
 }
 
+/* ------------------------------------------------------------------------ */
+/* A/B: the boot slot marked successful, as Android's boot_control does      */
+/*
+ * Qualcomm's ABL keeps each slot's state in the attributes of its boot partition's GPT entry (boot_a, boot_b):
+ * priority in bits 48-49, active 50, the retries left in 51-53, successful 54, unbootable 55. A slot not marked
+ * successful loses a retry at every start, and at none left ABL marks it unbootable and turns to the other slot (on
+ * the 6T, slot a does not boot: "Load Error"). Android marks its slot successful once it has started; a phone that
+ * boots HakiOS by itself has the loader do it (an installed payload, halt_psci=1, once the system image has been read
+ * and checked), and "oem slotok" does it by hand. "oem slotinfo" says what both tables hold, writing nothing.
+ *
+ * The write changes the attribute word of the one entry and nothing else, in the primary table and the backup, with
+ * both CRCs made again; it is refused unless both tables check and are the same, and each block written is read back
+ * before the next. The primary goes first: ABL reads it, and the backup is only its copy.
+ */
+#define AB_ACTIVE      (1ULL << 50)
+#define AB_SUCCESSFUL  (1ULL << 54)
+#define AB_UNBOOTABLE  (1ULL << 55)
+#define AB_TABLE_MAX   (64 * 1024)
+
+static uint8_t ab_header[4096] __attribute__((aligned(4096)));
+static uint8_t ab_backup_header[4096] __attribute__((aligned(4096)));
+static uint8_t ab_entries[AB_TABLE_MAX] __attribute__((aligned(4096)));
+static uint8_t ab_backup_entries[AB_TABLE_MAX] __attribute__((aligned(4096)));
+static uint8_t ab_check[AB_TABLE_MAX] __attribute__((aligned(4096)));
+
+struct ab_table {
+	efi_block_io *bio;
+	uint64_t unit, bs, entries_lba, backup_lba, backup_entries_lba, bytes, blocks_bytes;
+	uint32_t count, size;
+};
+
+/* a GPT header in hdr (one block) that checks, and its entries read into entries and checked: 1, else 0 */
+static int
+ab_read(efi_block_io *bio, uint64_t lba, uint8_t *hdr, uint8_t *entries, struct ab_table *t)
+{
+	uint64_t bs = bio->media->block_size;
+	uint32_t header_size, crc, want;
+
+	if (bs < 512 || bs > sizeof(ab_header) || EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, lba, bs, hdr)) ||
+	    memcmp(hdr, "EFI PART", 8) != 0) {
+		return 0;
+	}
+	header_size = *(uint32_t *)(hdr + 12);
+	if (header_size < 92 || header_size > bs) {
+		return 0;
+	}
+	want = *(uint32_t *)(hdr + 16);
+	*(uint32_t *)(hdr + 16) = 0;
+	crc = ufs_crc32(hdr, header_size);
+	*(uint32_t *)(hdr + 16) = want;
+	if (crc != want) {
+		return 0;
+	}
+	t->bio = bio;
+	t->bs = bs;
+	t->count = *(uint32_t *)(hdr + 80);
+	t->size = *(uint32_t *)(hdr + 84);
+	t->bytes = (uint64_t)t->count * t->size;
+	t->blocks_bytes = (t->bytes + bs - 1) / bs * bs;
+	if (t->size < 128 || t->bytes == 0 || t->blocks_bytes > AB_TABLE_MAX ||
+	    EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, *(uint64_t *)(hdr + 72), t->blocks_bytes, entries))) {
+		return 0;
+	}
+	return ufs_crc32(entries, t->bytes) == *(uint32_t *)(hdr + 88);
+}
+
+/* the entry named name (ASCII) in entries, or -1 */
+static int
+ab_find(const struct ab_table *t, const uint8_t *entries, const char *name)
+{
+	for (uint32_t i = 0; i < t->count; i++) {
+		const uint8_t *e = entries + (uint64_t)i * t->size;
+		unsigned k = 0;
+
+		for (; name[k] != 0 && k < 36; k++) {
+			if (e[56 + 2 * k] != (uint8_t)name[k] || e[57 + 2 * k] != 0) {
+				break;
+			}
+		}
+		if (name[k] == 0 && e[56 + 2 * k] == 0 && e[57 + 2 * k] == 0) {
+			return (int)i;
+		}
+	}
+	return -1;
+}
+
+/* the logical unit whose GPT has boot_a and boot_b, both tables read and checked: 1, else 0 (and why) */
+static int
+ab_locate(struct ab_table *t)
+{
+	static const efi_guid blk_guid = EFI_BLOCK_IO_GUID;
+	efi_handle *handles;
+	uint64_t count, units = 0;
+	int found = 0;
+
+	if (EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &blk_guid, NULL, &count, &handles))) {
+		return 0;
+	}
+	for (uint64_t i = 0; i < count && !found; i++) {
+		efi_block_io *bio;
+
+		if (EFI_ERROR(BS->handle_protocol(handles[i], &blk_guid, (void **)&bio)) || bio->media->logical) {
+			continue;
+		}
+		units++;
+		if (!ab_read(bio, 1, ab_header, ab_entries, t) || ab_find(t, ab_entries, "boot_a") < 0 ||
+		    ab_find(t, ab_entries, "boot_b") < 0) {
+			continue;
+		}
+		t->unit = units - 1;
+		t->entries_lba = *(uint64_t *)(ab_header + 72);
+		t->backup_lba = *(uint64_t *)(ab_header + 32);
+		found = 1;
+	}
+	BS->free_pool(handles);
+	if (!found) {
+		print("slot: no logical unit has boot_a and boot_b in a GPT that checks\n");
+		return 0;
+	}
+	{
+		struct ab_table b;
+
+		if (!ab_read(t->bio, t->backup_lba, ab_backup_header, ab_backup_entries, &b) || b.count != t->count ||
+		    b.size != t->size) {
+			print("slot: unit %d: the backup GPT does not check: nothing is written\n", t->unit);
+			return 0;
+		}
+		t->backup_entries_lba = *(uint64_t *)(ab_backup_header + 72);
+	}
+	if (memcmp(ab_entries, ab_backup_entries, t->bytes) != 0) {
+		print("slot: unit %d: the primary and backup tables differ: nothing is written\n", t->unit);
+		return 0;
+	}
+	return 1;
+}
+
+static void
+ab_say(const struct ab_table *t, const char *name)
+{
+	int i = ab_find(t, ab_entries, name);
+	uint64_t a = i < 0 ? 0 : *(uint64_t *)(ab_entries + (uint64_t)i * t->size + 48);
+
+	print("slot: %s (unit %d, entry %d): attributes %x: priority %d, %s, %d retries left, %s, %s\n", name, t->unit,
+	    (uint64_t)i, a, (a >> 48) & 3, a & AB_ACTIVE ? "ACTIVE" : "inactive", (a >> 51) & 7,
+	    a & AB_SUCCESSFUL ? "SUCCESSFUL" : "not successful", a & AB_UNBOOTABLE ? "UNBOOTABLE" : "bootable");
+}
+
+/* one table (header at hdr_lba, entries at entries_lba) written from the buffers and read back: NULL, or what failed */
+static const char *
+ab_write_table(const struct ab_table *t, uint64_t entries_lba, uint8_t *entries, uint64_t hdr_lba, uint8_t *hdr)
+{
+	efi_block_io *bio = t->bio;
+
+	if (EFI_ERROR(bio->write_blocks(bio, bio->media->media_id, entries_lba, t->blocks_bytes, entries)) ||
+	    EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, entries_lba, t->blocks_bytes, ab_check)) ||
+	    memcmp(ab_check, entries, t->blocks_bytes) != 0) {
+		return "the entries";
+	}
+	if (EFI_ERROR(bio->write_blocks(bio, bio->media->media_id, hdr_lba, t->bs, hdr)) ||
+	    EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, hdr_lba, t->bs, ab_check)) ||
+	    memcmp(ab_check, hdr, t->bs) != 0) {
+		return "the header";
+	}
+	bio->flush_blocks(bio);
+	return NULL;
+}
+
+static void
+ab_rehash(uint8_t *hdr, const uint8_t *entries, uint64_t bytes)
+{
+	uint32_t header_size = *(uint32_t *)(hdr + 12);
+
+	*(uint32_t *)(hdr + 88) = ufs_crc32(entries, bytes);
+	*(uint32_t *)(hdr + 16) = 0;
+	*(uint32_t *)(hdr + 16) = ufs_crc32(hdr, header_size);
+}
+
+/* the active slot marked successful: 1 (done, or it already was), 0 (not, and why in the log) */
+static int
+ab_mark_successful(void)
+{
+	struct ab_table t;
+	int a, b, active;
+	uint64_t *attr, before;
+	const char *bad;
+
+	if (!ab_locate(&t)) {
+		return 0;
+	}
+	a = ab_find(&t, ab_entries, "boot_a");
+	b = ab_find(&t, ab_entries, "boot_b");
+	ab_say(&t, "boot_a");
+	ab_say(&t, "boot_b");
+	if (((*(uint64_t *)(ab_entries + (uint64_t)a * t.size + 48) & AB_ACTIVE) != 0) ==
+	    ((*(uint64_t *)(ab_entries + (uint64_t)b * t.size + 48) & AB_ACTIVE) != 0)) {
+		print("slot: not exactly one slot is active: nothing is written\n");
+		return 0;
+	}
+	active = (*(uint64_t *)(ab_entries + (uint64_t)a * t.size + 48) & AB_ACTIVE) ? a : b;
+	attr = (uint64_t *)(ab_entries + (uint64_t)active * t.size + 48);
+	before = *attr;
+	if (before & AB_SUCCESSFUL) {
+		print("slot: %s is already marked successful\n", active == a ? "boot_a" : "boot_b");
+		return 1;
+	}
+	if (before & AB_UNBOOTABLE) {
+		print("slot: the active slot is marked unbootable: left to ABL, nothing is written\n");
+		return 0;
+	}
+	*attr = before | AB_SUCCESSFUL;
+	*(uint64_t *)(ab_backup_entries + (uint64_t)active * t.size + 48) = before | AB_SUCCESSFUL;
+	ab_rehash(ab_header, ab_entries, t.bytes);
+	ab_rehash(ab_backup_header, ab_backup_entries, t.bytes);
+	if ((bad = ab_write_table(&t, t.entries_lba, ab_entries, 1, ab_header)) != NULL) {
+		print("slot: writing the primary table: %s did not read back the same\n", bad);
+		return 0;
+	}
+	if ((bad = ab_write_table(&t, t.backup_entries_lba, ab_backup_entries, t.backup_lba, ab_backup_header)) != NULL) {
+		print("slot: writing the backup table: %s did not read back the same\n", bad);
+		return 0;
+	}
+	print("slot: %s marked successful (attributes %x -> %x), both tables written and read back\n",
+	    active == a ? "boot_a" : "boot_b", before, *attr);
+	return 1;
+}
+
+static void
+ab_info(void)
+{
+	struct ab_table t;
+
+	if (!ab_locate(&t)) {
+		fb_reply("FAIL", "no A/B table that checks (oem log)");
+		return;
+	}
+	ab_say(&t, "boot_a");
+	ab_say(&t, "boot_b");
+	print("slot: unit %d: %d entries of %d bytes at %d, backup header at %d, backup entries at %d; both tables check and agree\n",
+	    t.unit, (uint64_t)t.count, (uint64_t)t.size, t.entries_lba, t.backup_lba, t.backup_entries_lba);
+	fb_reply("OKAY", "");
+}
+
+/* "oem readunit UNIT LBA BLOCKS": a raw logical unit's blocks staged for get_staged (read only), for copies of its GPT */
+static void
+read_unit_staged(const char *arg)
+{
+	static const efi_guid blk_guid = EFI_BLOCK_IO_GUID;
+	struct payload_info pi;
+	efi_handle *handles;
+	efi_block_io *found = NULL;
+	uint64_t want_unit = parse_number(arg, 10), lba, blocks, count, units = 0;
+	const char *c = arg;
+
+	while (*c && *c != ' ') c++;
+	while (*c == ' ') c++;
+	lba = parse_number(c, 10);
+	while (*c && *c != ' ') c++;
+	while (*c == ' ') c++;
+	blocks = parse_number(c, 10);
+	if (resident_rd_size != 0) {
+		fb_reply("FAIL", "a root image is in the resident area");
+		return;
+	}
+	if (!EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &blk_guid, NULL, &count, &handles))) {
+		for (uint64_t i = 0; i < count && found == NULL; i++) {
+			efi_block_io *bio;
+
+			if (EFI_ERROR(BS->handle_protocol(handles[i], &blk_guid, (void **)&bio)) || bio->media->logical) {
+				continue;
+			}
+			if (units++ == want_unit) {
+				found = bio;
+			}
+		}
+		BS->free_pool(handles);
+	}
+	parse_payload(&pi, 0);
+	if (found == NULL || blocks == 0 || lba + blocks > found->media->last_block + 1 || !choose_window(&pi) ||
+	    blocks * found->media->block_size > win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE) {
+		fb_reply("FAIL", "no such unit or blocks");
+		return;
+	}
+	if (EFI_ERROR(found->read_blocks(found, found->media->media_id, lba, blocks * found->media->block_size,
+	    (void *)(win_base + RESIDENT_RD_OFFSET)))) {
+		fb_reply("FAIL", "read error");
+		return;
+	}
+	print("readunit: unit %d, blocks %d..%d of %d bytes\n", want_unit, lba, lba + blocks - 1,
+	    (uint64_t)found->media->block_size);
+	staged_data = (const char *)(win_base + RESIDENT_RD_OFFSET);
+	staged_len = blocks * found->media->block_size;
+	fb_reply("OKAY", "");
+}
+
 /*
  * "oem readpart NAME": a partition read whole into the resident area and staged for "fastboot get_staged", so that a
  * copy of it is on the host before anything near it is written (installing on the 6T: boot, dtbo and vbmeta of both
@@ -4213,7 +4510,8 @@ fb_command(char *cmd)
 		if (busy && (starts_with(cmd, "oem ramdisk") || starts_with(cmd, "download:") || starts_with(cmd, "oem run") ||
 		    starts_with(cmd, "oem selftest") || starts_with(cmd, "oem hang") || starts_with(cmd, "oem recording") ||
 		    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap") ||
-		    starts_with(cmd, "oem readpart") || starts_with(cmd, "oem darwin"))) {
+		    starts_with(cmd, "oem readpart") || starts_with(cmd, "oem darwin") || starts_with(cmd, "oem slot") ||
+		    starts_with(cmd, "oem readunit"))) {
 			fb_reply("FAIL", "a kernel is running (oem stop ends it)");
 		} else if (starts_with(cmd, "oem stop")) {
 			/* the kernel looks at this once a second and comes back as it does when its time is up */
@@ -4343,6 +4641,12 @@ fb_command(char *cmd)
 				sent += chunk;
 			}
 			fb_reply("OKAY", "");
+		} else if (starts_with(cmd, "oem slotinfo")) {
+			ab_info();
+		} else if (starts_with(cmd, "oem slotok")) {
+			fb_reply(ab_mark_successful() ? "OKAY" : "FAIL", "");
+		} else if (starts_with(cmd, "oem readunit ")) {
+			read_unit_staged(cmd + 13);
 		} else if (starts_with(cmd, "oem darwinput")) {
 			sysimg_put(cmd[13] == ' ' ? cmd + 14 : "0");
 		} else if (starts_with(cmd, "oem darwininfo")) {
@@ -4791,10 +5095,18 @@ efi_main(efi_handle image, efi_system_table *st)
 		if (pi.rdsrc != NULL && str_eq(pi.rdsrc, "darwin") && !sysimg_load()) {
 			print("loader: rdsrc=darwin, and no system image could be read from darwin: the kernel is not started\n");
 		} else {
+			/*
+			 * Installed (the payload says so: mk-installimg.sh, for the phone's boot partition): the slot that started
+			 * this is marked successful, so that ABL stops counting its retries down ("A/B" above). Only once the
+			 * system image has been read and checked, and never for a test from a host.
+			 */
+			if (pi.installed) {
+				ab_mark_successful();
+			}
 			run_kernel(0, 0);
 		}
 	}
-	if (PLAT == &platform_fajita && have_payload && !pi.usb_mode) {
+	if (PLAT == &platform_fajita && have_payload && !pi.usb_mode && !pi.installed) {
 		/*
 		 * The end of a boot with no host (a one-shot payload: from `fastboot boot`, or the phone's own boot partition), or
 		 * no system image to boot: NOT back to U-Boot, whose fastboot after a kernel has run enumerates and then answers
@@ -4812,7 +5124,11 @@ efi_main(efi_handle image, efi_system_table *st)
 		reboot();
 	}
 	if (PLAT == &platform_fajita) {
-		/* back to U-Boot (its fastboot): a reset would land in the phone's other boot slot */
+		/*
+		 * back to U-Boot: from the host's loader (USB), to its fastboot; installed (the payload's "installed"), to the install
+		 * environment's bootcmd, which sets the PMIC's reboot reason and resets into ABL's fastboot
+		 * (hakios-fajita-install.env): a kernel that went wrong, or a system image that could not be read
+		 */
 		uint64_t n = log_len;
 		print("\n== LOADER LOG (all of it, the lines kept off the screen during the run too) ==\n");
 		for (uint64_t i = 0; i < n; i++) {

@@ -13,6 +13,7 @@
  */
 #include <kern/locks.h>
 #include <kern/startup.h>
+#include <pexpert/pexpert.h>
 #include <libkern/libkern.h>
 #include <sys/sysctl.h>
 #include <sys/systm.h>
@@ -82,7 +83,16 @@ hakios_rpmh_shared(unsigned client, uint32_t address, uint32_t value)
 	unsigned s, free = RPMH_SHARED_SLOTS;
 	uint32_t top = 0;
 
-	if (client >= HAKIOS_RPMH_CLIENTS || address == 0) {
+	static int shared = -1;
+
+	if (shared < 0) {
+		/* boot-arg rpmh_shared=0: each driver's own value as before there was this (for telling what it changes) */
+		uint32_t on = 1;
+
+		(void)PE_parse_boot_argn("rpmh_shared", &on, sizeof(on));
+		shared = on != 0;
+	}
+	if (!shared || client >= HAKIOS_RPMH_CLIENTS || address == 0) {
 		return value;
 	}
 	for (s = 0; s < RPMH_SHARED_SLOTS && rpmh_shared[s].address != address; s++) {

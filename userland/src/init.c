@@ -991,6 +991,20 @@ move_store_into_volume(void)
 		    "one tries again\n", status);
 		return 0;
 	}
+	/*
+	 * What load wrote is on the flash before the marker says so: each file fsynced as it was made (var_store.c), then
+	 * the volume's journal and the flash's write cache flushed (F_FULLFSYNC) -- and only then the marker, flushed the
+	 * same way. A reset anywhere before leaves no marker, and the next boot moves the store again.
+	 */
+	fd = open("/private/var", O_RDONLY, 0);
+	if (fd < 0 || fcntl(fd, F_FULLFSYNC, 0) != 0) {
+		printf("  flushing the data volume: %s: the data volume is not used this boot\n", strerror(errno));
+		if (fd >= 0) {
+			close(fd);
+		}
+		return 0;
+	}
+	close(fd);
 	mkdir("/private/var/db", 0755);
 	n = 0;
 	strcpy(line, "generation ");
@@ -1001,7 +1015,7 @@ move_store_into_volume(void)
 	line[n++] = '\n';
 	line[n] = 0;
 	fd = open(VAR_MIGRATED, O_CREAT | O_TRUNC | O_WRONLY, 0644);
-	ok = fd >= 0 && write(fd, line, (size_t)n) == n && fsync(fd) == 0;
+	ok = fd >= 0 && write(fd, line, (size_t)n) == n && fsync(fd) == 0 && fcntl(fd, F_FULLFSYNC, 0) == 0;
 	if (fd >= 0) {
 		close(fd);
 	}

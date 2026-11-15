@@ -28,7 +28,7 @@ enum {
 	SYS_mount = 167, SYS_mmap = 197, SYS_lseek = 199, SYS_ftruncate = 201, SYS_getxattr = 234,
 	SYS_setxattr = 236, SYS_listxattr = 240, SYS_sysctlbyname = 274, SYS_stat64 = 338, SYS_fstat64 = 339,
 	SYS_lstat64 = 340, SYS_getdirentries64 = 344, SYS_lchown = 364, SYS_sync = 36, SYS_unmount = 159,
-	SYS_statfs64 = 345,
+	SYS_statfs64 = 345, SYS_fcntl = 92,
 };
 
 /*
@@ -167,6 +167,9 @@ int     setxattr(const char *path, const char *name, const void *value, size_t s
 int     ftruncate(int fd, off_t length);
 int     fsync(int fd);
 int     sync(void);
+/* fcntl(fd, F_FULLFSYNC, 0): what the file system holds, and the flash's cache, written through */
+#define F_FULLFSYNC 51
+int     fcntl(int fd, int cmd, long arg);
 int     unmount(const char *dir, int flags);
 /* the type of the file system PATH is on ("hfs", "ramfs", ...), from statfs64's f_fstypename: 0, or -1 */
 int     fs_type(const char *path, char *name, size_t size);

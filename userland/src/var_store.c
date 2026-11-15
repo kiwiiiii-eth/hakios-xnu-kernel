@@ -1002,6 +1002,8 @@ unpack_one(int make)
 			out_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, (int)e.mode);
 			if (out_fd < 0) {
 				printf("var_store: %s cannot be made: %s\n", path, strerror(errno));
+				short_files++;                  /* not there: the store did not come back whole */
+				lost_bytes += e.size;
 			} else {
 				made_files++;
 			}
@@ -1117,6 +1119,8 @@ unpack_one(int make)
 		}
 	}
 	if (out_fd >= 0) {
+		/* on the data volume (Beta 0.5) each file is on the flash before init counts the move done */
+		fsync(out_fd);
 		close(out_fd);
 	}
 	if (!ok || !in_pad()) {

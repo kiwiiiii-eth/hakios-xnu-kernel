@@ -264,6 +264,12 @@ fsync(int fd)
 }
 
 int
+fcntl(int fd, int cmd, long arg)
+{
+	return (int)SC(SYS_fcntl, fd, cmd, arg, 0, 0, 0);
+}
+
+int
 sync(void)
 {
 	return (int)SC(SYS_sync, 0, 0, 0, 0, 0, 0);

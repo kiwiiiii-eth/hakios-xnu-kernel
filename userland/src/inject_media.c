@@ -363,8 +363,13 @@ time_photo_encoder(id output, CMSampleBufferRef sample_buffer)
 			if (timebase.denom == 0) {
 				mach_timebase_info(&timebase);
 			}
-			say("hakios: mediaserverd: a photograph of %zux%zu encoded in %.0f ms\n", CVPixelBufferGetWidth(image),
-			    CVPixelBufferGetHeight(image), (double)(mach_absolute_time() - began) * timebase.numer / timebase.denom / 1e6);
+			CMFormatDescriptionRef fd = CMSampleBufferGetFormatDescription(sample_buffer);
+			FourCharCode codec = fd != NULL ? CMFormatDescriptionGetMediaSubType(fd) : 0;
+
+			say("hakios: mediaserverd: a photograph of %zux%zu encoded in %.0f ms (%c%c%c%c)\n", CVPixelBufferGetWidth(image),
+			    CVPixelBufferGetHeight(image), (double)(mach_absolute_time() - began) * timebase.numer / timebase.denom / 1e6,
+			    codec ? (int)(codec >> 24) : '-', codec ? (int)(codec >> 16 & 255) : '-', codec ? (int)(codec >> 8 & 255) : '-',
+			    codec ? (int)(codec & 255) : '-');
 		}
 		began = 0;
 		return;

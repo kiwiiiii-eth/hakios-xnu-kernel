@@ -219,6 +219,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			{ ${LDID:-ldid} -Ssrc/record_test.entitlements obj/record_test 2>/dev/null ||
 			  echo "build.sh: no ldid: record_test is unsigned, and the system may not let it record"; }
 		$DYN -o obj/cpu_test src/cpu_test.c
+		# the camera's processor on one thread, outside mediaserverd (src/isp_bench.c)
+		$DYN -O2 -DISP_PROFILE -o obj/isp_bench src/isp_bench.c src/camera_isp.c
 		# which processes take the processors, every few seconds (src/cputop.c; rc.jobs.cputop)
 		$DYN -o obj/cputop src/cputop.c
 		# what works behind the screen (widgets' extensions, the daemons behind them) to the background (src/quietboot.c)
@@ -396,6 +398,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	fi
 	cp obj/hello_dyn obj/svc_test obj/surf_test obj/rwtouch obj/mg_test root/bin/
 	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
+	[ -f obj/isp_bench ] && cp obj/isp_bench root/bin/
 	[ -f obj/cputop ] && cp obj/cputop root/bin/
 	[ -f obj/quietboot ] && cp obj/quietboot root/bin/
 	[ -f obj/socks ] && cp obj/socks root/bin/
@@ -579,6 +582,15 @@ done
 for tuned in ../fw-camera/com.qti.tuned.hakios_*.bin; do
 	[ -f "$tuned" ] || continue
 	sensor=$(basename "$tuned" .bin | sed 's/^com\.qti\.tuned\.hakios_[a-z]*_\([a-z0-9]*\)_.*/\1/')
+	mkdir -p root/fw
+	../tools/camtuning.py "$tuned" "root/fw/camera-$sensor.isp" >/dev/null
+done
+# ... and the OnePlus 6T's, com.qti.tuned.<maker>_<sensor>.bin (semco_imx519, oflim_imx371, semco_imx376k; not the
+# "_fat"/"_fatt" ones beside them): camera-<sensor>.isp
+for tuned in ../fw-camera/com.qti.tuned.*.bin; do
+	[ -f "$tuned" ] || continue
+	case "$(basename "$tuned")" in com.qti.tuned.hakios_*|com.qti.tuned.*_fat*.bin|com.qti.tuned.default.bin) continue ;; esac
+	sensor=$(basename "$tuned" .bin | sed 's/^com\.qti\.tuned\.[a-z]*_\([a-z0-9]*\).*/\1/')
 	mkdir -p root/fw
 	../tools/camtuning.py "$tuned" "root/fw/camera-$sensor.isp" >/dev/null
 done

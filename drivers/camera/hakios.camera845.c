@@ -204,6 +204,10 @@ struct sensor_hw {
 	uint8_t         pattern_bayer;  /* ... and its own colour bars' (none of the 6T's module files has them) */
 	const char *    chip;           /* for the frames' header */
 	uint16_t        gain_unity, gain_max;   /* the gain as the frames' header and the program count it: 1x, and the most */
+	struct supply   vaf;            /* the lens motor's supply (SUPPLY_NONE: a fixed-focus lens) ... */
+	uint8_t         af_address, af_sa_address;  /* ... and the motor on the sensor's CCI master (7-bit): the modules come with an
+	                                             * LC898217XC or an SA3103 (two module files each) */
+	bool            quad;           /* the full array is a Quad Bayer's (2x2 of a colour): only its binned modes are Bayer */
 };
 enum {
 	REGS_SONY,                      /* SMIA's registers (frame length 0x0340, coarse integration 0x0202, analog gain 0x0204, hold
@@ -220,6 +224,7 @@ static const struct sensor_hw sensors[] = {
 		.vio = { SUPPLY_RPMH, 1800, 0, 0, "vsa1" },
 		.csiphy = 1, .phy_cbcr = 0x5044, .timer_cmd = 0x5028, .timer_cbcr = 0x5040, .regs = REGS_SONY, .bayer = 0,
 		.pattern_bayer = 0, .chip = "IMX376K", .gain_unity = SONY_GAIN_UNITY, .gain_max = 16 * SONY_GAIN_UNITY,
+		.vaf = { SUPPLY_GPIO, 2800, 77, 200, NULL }, .af_address = 0x74, .af_sa_address = 0x0d,
 	},
 	{       /* cam-sensor0: IMX519, CCI master 0 (GPIO 17/18), reset GPIO 28, MCLK0 (GPIO 13), CSIPHY 0 (C-PHY) */
 		.name = "main (IMX519)", .tab = "camera-imx519.tab", .bus_name = "CCI master 0", .sda = 17, .scl = 18, .reset = 28,
@@ -228,6 +233,7 @@ static const struct sensor_hw sensors[] = {
 		.vio = { SUPPLY_RPMH, 1800, 0, 0, "vsa1" },
 		.csiphy = 0, .phy_cbcr = 0x5020, .timer_cmd = 0x5004, .timer_cbcr = 0x501c, .regs = REGS_SONY, .bayer = 0,
 		.pattern_bayer = 0, .chip = "IMX519", .gain_unity = SONY_GAIN_UNITY, .gain_max = 16 * SONY_GAIN_UNITY,
+		.vaf = { SUPPLY_GPIO, 2800, 31, 200, NULL }, .af_address = 0x72, .af_sa_address = 0x0c,
 	},
 	{       /* cam-sensor2: IMX371, CCI master 0 (GPIO 17/18), reset GPIO 9, MCLK1 (GPIO 14), CSIPHY 2 */
 		.name = "front (IMX371)", .tab = "camera-imx371.tab", .bus_name = "CCI master 0", .sda = 17, .scl = 18, .reset = 9,
@@ -236,6 +242,7 @@ static const struct sensor_hw sensors[] = {
 		.vio = { SUPPLY_RPMH, 1800, 0, 0, "vsa1" },
 		.csiphy = 2, .phy_cbcr = 0x5068, .timer_cmd = 0x504c, .timer_cbcr = 0x5064, .regs = REGS_SONY, .bayer = 0,
 		.pattern_bayer = 0, .chip = "IMX371", .gain_unity = SONY_GAIN_UNITY, .gain_max = 16 * SONY_GAIN_UNITY,
+		.quad = true,           /* (r189: its 4608x3456 is RRGG/RRGG/GGBB/GGBB, though its module file says RGGB) */
 	},
 };
 static const struct sensor_hw *hw = &sensors[1];
@@ -1199,8 +1206,8 @@ sensor_address(void)
 }
 
 static bool powered, reset_driven, power_rails;
-static bool gpio_switched[2];           /* VANA's, VDIG's pin */
-static uint32_t found_supply_cfg[2], found_supply_io[2];
+static bool gpio_switched[4];           /* VANA's, VDIG's pin (0, 1), the lens motor's (3) */
+static uint32_t found_supply_cfg[4], found_supply_io[4];
 
 /* 1 ready, 0 not ready, -1 it cannot be read (and then nothing is voted for it: a vote somebody else holds could be replaced) */
 static int
@@ -1261,7 +1268,7 @@ supply_on(const struct supply *s, unsigned which)
 			return false;
 		}
 		spin_us(s->ramp_us);
-		say("camera: gpio%u high: the %s regulator on\n", s->gpio, which == 0 ? "VANA" : "VDIG");
+		say("camera: gpio%u high: the %s regulator on\n", s->gpio, which == 0 ? "VANA" : which == 3 ? "lens motor's" : "VDIG");
 		return true;
 	}
 	if (s->kind == SUPPLY_RPMH) {
@@ -1293,7 +1300,7 @@ supply_on(const struct supply *s, unsigned which)
 static void
 supply_off(const struct supply *s, unsigned which)
 {
-	if (s->kind == SUPPLY_GPIO && which < 2 && gpio_switched[which]) {
+	if (s->kind == SUPPLY_GPIO && which < 4 && which != 2 && gpio_switched[which]) {
 		bool found_on = (found_supply_cfg[which] & CFG_OUTPUT) && (found_supply_io[which] & 2);
 
 		if (!found_on) {
@@ -1303,7 +1310,8 @@ supply_off(const struct supply *s, unsigned which)
 		wr(GPIO_IO(s->gpio), found_supply_io[which] & 2);
 		wr(GPIO_CFG(s->gpio), found_supply_cfg[which]);
 		gpio_switched[which] = false;
-		say("camera: gpio%u back as it was found: the %s regulator off\n", s->gpio, which == 0 ? "VANA" : "VDIG");
+		say("camera: gpio%u back as it was found: the %s regulator off\n", s->gpio, which == 0 ? "VANA" : which == 3 ? "lens motor's" :
+		    "VDIG");
 	} else if (s->kind == SUPPLY_RPMH && vio_voted) {
 		(void)vrm_vote(s->rpmh, false, &vio_voted);
 	}
@@ -1375,7 +1383,8 @@ power_step(const struct ctab_entry *e, bool up)
 static void
 power_down(void)
 {
-	bool was = powered || mclk_switched || gdsc_switched || reset_driven || gpio_switched[0] || gpio_switched[1] || vio_voted ||
+	bool was = powered || mclk_switched || gdsc_switched || reset_driven || gpio_switched[0] || gpio_switched[1] || gpio_switched[3] ||
+	    vio_voted ||
 	    bob_voted || power_rails || gcc_axi_switched || gcc_xo_switched;
 	uint32_t count = 0;
 	const struct ctab_entry *e = ctab != NULL ? ctab_block(ctab_power, 2, "pwrdn", &count) : NULL;
@@ -1392,6 +1401,7 @@ power_down(void)
 	if (reset_driven) {
 		reset_pin(false);
 	}
+	supply_off(&hw->vaf, 3);
 	supply_off(&hw->vio, 2);
 	supply_off(&hw->vdig, 1);
 	supply_off(&hw->vana, 0);
@@ -1624,6 +1634,7 @@ look_around(void)
  */
 #define RPMH_CLIENT_CAMERA      2
 extern uint32_t hakios_rpmh_shared(unsigned client, uint32_t address, uint32_t value);  /* drivers/core/hakios.platform.c */
+extern void hakios_cpufreq_boost(void);                 /* drivers/power/hakios.cpufreq.c (or the stubs' empty one) */
 static bool rails_voted;
 static unsigned rails_users;
 static uint32_t rails_address[2], rails_ours[2];
@@ -2692,25 +2703,172 @@ sensor_write(uint16_t address, uint16_t value, bool sixteen)
 }
 
 /*
- * The main camera's lens motor (the module's LC898217XC or SA3103 on CCI master 0, powered by GPIO 31's 2.8 V regulator)
- * is not driven yet: the lens stays where the motor's spring holds it, and the frames say "no focus".
+ * The rear cameras' lens motors, powered by a 2.8 V regulator from BOB that a pin switches (GPIO 31, 77; the dtbo's
+ * rear_N_actuator_regulator). Their modules come with one of two drivers, and the module files say how each is driven:
+ * - an LC898217XC (ON Semiconductor, an 11-bit DAC): 0x72 on CCI master 0 for the main camera, 0x74 on master 1 for the
+ *   second (the module files' 0xE4, 0xE8; mainline's sdm845-oneplus); its initialisation a poll of 0xB3 until it reads 0,
+ *   the position the 16-bit register 0x84, 0 to 2047 (linux-media's lc898217xc driver): the program's 0-1023 doubled.
+ * - an SA3103: 0x0C, 0x0D (the files' 0x18, 0x1A); its initialisation 0x81 = 1, the position's high byte in 0x82 and its
+ *   low one in 0x83 (two writes, as the file's two register parameters), 12 bits (the module files' actuator regions
+ *   go to 4095, in steps of 384): the program's 0-1023 times four. (r191 took it for 10 bits: the lens went a quarter
+ *   of its way at the most, and the search saw no sharpness change.)
+ * 0 is no current: the spring's stop, the furthest focus. r190: the developer's main camera did not answer at 0x72.
  */
+#define LC_READY                0xb3
+#define LC_DAC                  0x84
+#define LC_DAC_MAX              2047
+#define SA_CONTROL              0x81
+#define SA_POSITION_HIGH        0x82
+#define SA_POSITION_LOW         0x83
 static uint32_t af_position = HAKIOS_CAMERA_NO_FOCUS;
+static uint8_t af_chip_address;
+static bool af_sa;                      /* the SA3103's way, not the LC898217XC's */
 
-static void
-af_up(__unused bool sensor_frames)
+static bool
+af_dac(uint32_t position)
 {
-	af_position = HAKIOS_CAMERA_NO_FOCUS;
+	if (af_sa) {
+		uint32_t code = (position > 1023 ? 1023 : position) * 4;
+
+		return i2c_transfer(&cci_bus, af_chip_address, (uint8_t[]){ SA_POSITION_HIGH, (uint8_t)(code >> 8) }, 2, NULL, 0) &&
+		       i2c_transfer(&cci_bus, af_chip_address, (uint8_t[]){ SA_POSITION_LOW, (uint8_t)code }, 2, NULL, 0);
+	}
+	uint32_t dac = position * 2 > LC_DAC_MAX ? LC_DAC_MAX : position * 2;
+
+	return i2c_transfer(&cci_bus, af_chip_address, (uint8_t[]){ LC_DAC, (uint8_t)(dac >> 8), (uint8_t)dac }, 3, NULL, 0);
+}
+
+/* the LC898217XC: answering, and ready (0xB3 reads 0) within 50 ms */
+static bool
+af_lc_ready(void)
+{
+	uint8_t reg = LC_READY, status = 0xff;
+
+	for (int i = 0; i < 50; i++) {
+		if (i2c_transfer(&cci_bus, hw->af_address, &reg, 1, &status, 1) && status == 0) {
+			return true;
+		}
+		wait_ms(1);
+	}
+	return false;
 }
 
 static void
-af_move(__unused uint32_t position)
+af_up(bool sensor_frames)
 {
+	af_position = HAKIOS_CAMERA_NO_FOCUS;
+	if (!sensor_frames || hw->af_address == 0 || hw->vaf.kind == SUPPLY_NONE) {
+		return;
+	}
+	if (!supply_on(&hw->vaf, 3)) {
+		say("camera: the lens motor's supply did not come on: no focus in this session\n");
+		return;
+	}
+	wait_ms(10);                    /* (8-10 ms from its supply on to its first command: linux-media's driver) */
+	if (af_lc_ready()) {
+		af_sa = false;
+		af_chip_address = hw->af_address;
+	} else if (hw->af_sa_address != 0 && i2c_transfer(&cci_bus, hw->af_sa_address, (uint8_t[]){ SA_CONTROL, 0x01 }, 2, NULL, 0)) {
+		af_sa = true;
+		af_chip_address = hw->af_sa_address;
+		wait_ms(1);
+	} else {
+		say("camera: the lens motor answers neither as an LC898217XC (%#x) nor as an SA3103 (%#x): no focus in this session\n",
+		    hw->af_address, hw->af_sa_address);
+		supply_off(&hw->vaf, 3);
+		return;
+	}
+	/* from the stop to a quarter of the travel in small steps (a jump knocks the lens: a click to hear) */
+	af_position = 0;
+	for (uint32_t p = 16; p <= 256; p += 16) {
+		if (!af_dac(p)) {
+			say("camera: the lens motor stopped answering: no focus in this session\n");
+			af_position = HAKIOS_CAMERA_NO_FOCUS;
+			supply_off(&hw->vaf, 3);
+			return;
+		}
+		af_position = p;
+		wait_ms(2);
+	}
+	say("camera: the lens motor (%s at %#x) is up, the lens at %u\n", af_sa ? "SA3103" : "LC898217XC", af_chip_address,
+	    af_position);
+}
+
+/*
+ * boot-arg cam_eeprom=1: the main camera module's EEPROM (a CAT24C64 at 0x50 on CCI master 0, the module file's 0xA0:
+ * 8 KB, 16-bit addresses), read once, the first time the sensor is up, into the log -- reading only. Its layout is
+ * OnePlus's (the module file says to read all of it, not what is where): the OIS's calibration that CamX writes into the
+ * BU24218 (39 bytes, OISAddressArray 0x1DC0-0x1DE5 and 0xF006) is somewhere in it, and the lens's infinity and macro.
+ */
+static bool eeprom_read_once;
+
+static void
+eeprom_dump(void)
+{
+	uint32_t wanted = 0;
+	char line[2 * 32 + 1];
+
+	if (eeprom_read_once || hw != &sensors[1] || !PE_parse_boot_argn("cam_eeprom", &wanted, sizeof(wanted)) || wanted == 0) {
+		return;
+	}
+	eeprom_read_once = true;
+	say("camera: eeprom: 8192 bytes at 0x50 on CCI master 0 (only lines not all 0xff said)\n");
+	for (uint32_t at = 0; at < 8192; at += 32) {
+		uint8_t address[2] = { (uint8_t)(at >> 8), (uint8_t)at }, data[32];
+
+		if (!i2c_transfer(&cci_bus, 0x50, address, 2, data, sizeof(data))) {
+			say("camera: eeprom: no answer at %#x: the rest not read\n", at);
+			return;
+		}
+		for (int i = 0; i < 32; i++) {
+			static const char hex[] = "0123456789abcdef";
+
+			line[2 * i] = hex[data[i] >> 4];
+			line[2 * i + 1] = hex[data[i] & 15];
+		}
+		line[64] = 0;
+		bool blank = true;
+
+		for (int i = 0; i < 32; i++) {
+			blank = blank && data[i] == 0xff;
+		}
+		if (!blank) {                   /* (the erased parts left out: the log is a ring, and the boot fills it) */
+			say("camera: eeprom %04x: %s\n", at, line);
+		}
+	}
+	say("camera: eeprom: done\n");
+}
+
+static void
+af_move(uint32_t position)
+{
+	if (af_position == HAKIOS_CAMERA_NO_FOCUS) {
+		return;
+	}
+	position = position > 1023 ? 1023 : position;
+	if (position != af_position && af_dac(position)) {
+		af_position = position;
+	}
 }
 
 static void
 af_down(void)
 {
+	if (af_position != HAKIOS_CAMERA_NO_FOCUS) {
+		/* back to the stop in small steps and held there a moment, not to knock the lens against it as the current goes */
+		while (af_position > 0) {
+			uint32_t to = af_position > 16 ? af_position - 16 : 0;
+
+			if (!af_dac(to)) {
+				break;
+			}
+			af_position = to;
+			wait_ms(2);
+		}
+		wait_ms(20);
+		af_position = HAKIOS_CAMERA_NO_FOCUS;
+	}
+	supply_off(&hw->vaf, 3);
 }
 
 /* Sony's analog gain register for a linear gain (SONY_GAIN_UNITY is 1x): 1024 - 1024 / gain, at most 16x */
@@ -2765,15 +2923,23 @@ exposure(const struct ctab_mode *mode)
 static uint32_t
 preferred_mode(void)
 {
-	uint64_t best = 0;
-	uint32_t mode_n = 0;
+	uint64_t best = 0, most = 13000000;
+	uint32_t mode_n = 0, full = 0;
 
+	/*
+	 * cam_full=1: the sensor's whole array (the IMX519's 4656x3496, the IMX371's 4608x3456), at 30 frames a second at
+	 * the most -- four times the binned modes' pixels, for photographs as sharp as the sensor is; 20 MB a frame.
+	 */
+	if (PE_parse_boot_argn("cam_full", &full, sizeof(full)) && full != 0 && !hw->quad) {
+		most = 17000000;
+	}
 	for (uint32_t m = 0; m < ctab->modes; m++) {
 		const struct ctab_mode *o = &ctab_modes[m];
 		uint64_t pixels = (uint64_t)o->width * o->height;
 		uint32_t a = o->width * 3, b = o->height * 4;
 
-		if ((a > b ? a - b : b - a) * 100 <= b && o->fps_milli <= 61000 && pixels <= 13000000 && pixels > best) {
+		if ((a > b ? a - b : b - a) * 100 <= b && o->fps_milli <= 61000 && pixels <= most &&
+		    (pixels <= 13000000 || o->fps_milli <= 31000) && pixels > best) {
 			best = pixels;
 			mode_n = m;
 		}
@@ -3137,6 +3303,9 @@ darwin_start(void)
 	exposure_limits(&lines, &gain, &frame_lines);
 	if (!sensor_table("on") || !exposure_write(lines, gain, frame_lines)) {
 		return false;
+	}
+	if (darwin_source == SOURCE_SENSOR) {
+		eeprom_dump();
 	}
 	af_up(darwin_source == SOURCE_SENSOR);
 	darwin_now.lines = darwin_next.lines = lines;
@@ -3534,6 +3703,12 @@ camdev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 	f.sensor = hw_index;
 	f.focus = af_position;
 	lck_mtx_unlock(&darwin_lock);
+	/*
+	 * Every group of cores at its top speed while frames are read, as with a finger on the screen: the program makes
+	 * each frame's picture on all the cores at once (libhakios.media's processor, in pieces), a burst the load-driven
+	 * speed did not climb for -- the main camera's preview took 57-69 ms a frame, 13-15 a second (r186).
+	 */
+	hakios_cpufreq_boost();
 
 	error = uiomove((caddr_t)&f, (int)MIN(sizeof(f), (size_t)uio_resid(uio)), uio);
 	if (error == 0 && uio_resid(uio) > 0) {

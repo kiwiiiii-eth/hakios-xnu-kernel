@@ -45,8 +45,8 @@ struct isp_lsc {
  * index, Qualcomm's measure: higher is darker) and within that per range of the light's colour
  * temperature.
  */
-#define TUNE_LIGHTS     6
-#define TUNE_CCTS       6
+#define TUNE_LIGHTS     8
+#define TUNE_CCTS       8               /* (the OnePlus 6T's front camera has 7 in a light) */
 struct isp_tune_set {
 	uint32_t        lights;
 	struct {
@@ -78,8 +78,10 @@ struct isp {
 	uint8_t         gamma[4096];    /* linear (959 above black is 3836) to 8 bits, sRGB's curve */
 	uint32_t        asked_lines, asked_gain, asked_frame_lines;     /* what AE asked for last */
 	bool            asked;
+	uint32_t        min_frame_lines;        /* the shortest frame AE may ask for (0, or less than the mode's: the mode's) */
 	uint32_t        max_frame_lines;        /* the longest frame AE may ask for (0: twice the shortest) */
 	struct isp_tuning *tuning;              /* isp_load_tuning()'s, or none */
+	float           awb_band;               /* how far off the reference lights' line the white balance may be (0: on it) */
 };
 
 void isp_init(struct isp *isp);

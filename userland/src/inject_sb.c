@@ -28,9 +28,9 @@
  *       com.hakios.unlock      what the lock screen does after "swipe up to open"
  *       com.hakios.layers      write down the layers SpringBoard has on the screen: see layers()
  *       com.hakios.switcher    open the switcher of running applications: see switcher()
- *       com.hakios.open.prefs, com.hakios.open.safari, com.hakios.open.notes
- *                              bring Settings, Safari, Notes to the front: see open_app() (for scripts that measure
- *                              scrolling without a person: userland/rc.jobs.smooth6t)
+ *       com.hakios.open.prefs, com.hakios.open.safari, com.hakios.open.notes, com.hakios.open.camera
+ *                              bring Settings, Safari, Notes, Camera to the front: see open_app() (for scripts that
+ *                              measure without a person: userland/rc.jobs.smooth6t, the camera's preview)
  *     In any other program given this library (INJECT in build.sh) only the last of them is
  *     answered, with that program's layers.
  */
@@ -2548,6 +2548,10 @@ hakios_springboard_init(void)
 	notify_register_dispatch("com.hakios.open.notes", &token, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
 	    ^(__unused int t) {
 		open_app("com.apple.mobilenotes");
+	});
+	notify_register_dispatch("com.hakios.open.camera", &token, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+	    ^(__unused int t) {
+		open_app("com.apple.camera");
 	});
 	/*
 	 * Belt-and-suspenders unlock. The user can always swipe up to open the home screen -- that

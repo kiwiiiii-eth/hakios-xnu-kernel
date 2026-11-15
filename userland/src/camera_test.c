@@ -14,6 +14,10 @@
  *   colour matrix M (nine numbers, row by row, separated by commas: a check of the matrix's path).
  *   cycle: each of the four sensors in turn, FRAMES frames each (default 30), the kernel's exposure:
  *   what came of each, and how long the change from one to the next took.
+ *   With tuning PATH, the camera's colour tuning (fw/camera-<sensor>.isp: colour matrix, lens shading, the white
+ *   balance kept near its reference lights) as libhakios.media has it. With focus, after the exposure has settled, the
+ *   lens moved from 0 to 1023 in steps of 32 and the middle of the frame's sharpness measured at each (three frames
+ *   after the move), then a finer pass around the sharpest, and the lens left at the sharpest for the picture.
  *   noise: the sensor's black level and noise in the dark (the lens covered, or a dark room): at the
  *   longest exposure of its usual frame and 1x, 2x, 4x, 8x and its most gain, two frames each: per
  *   site of the 2x2 cell the mean (the black level), the temporal noise (the two frames' difference,
@@ -289,6 +293,65 @@ full_piece(void *context, size_t i)
 
 static float ccm[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
 
+static const char *tuning_path;
+static bool focus_sweep;
+
+/* the frame after `settle' more, read into f (false: a read went wrong) */
+static bool
+read_after(int device, struct hakios_camera_frame *f, size_t bytes, int settle)
+{
+	for (int i = 0; i <= settle; i++) {
+		if (read(device, f, bytes) != (ssize_t)bytes) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* the lens to `position', and the middle of the frame's sharpness three frames later */
+static float
+sharpness_at(int device, struct hakios_camera_frame *f, size_t bytes, uint32_t position)
+{
+	struct hakios_camera_command c = { .command = HAKIOS_CAMERA_FOCUS, .a = position };
+	float level = 0, sharp;
+
+	if (write(device, &c, sizeof(c)) != (ssize_t)sizeof(c) || !read_after(device, f, bytes, 3)) {
+		return -1;
+	}
+	sharp = isp_sharpness(f, (const uint8_t *)f + f->header_bytes, 0.3f, 0.3f, 0.7f, 0.7f, &level);
+	printf("camera_test: focus %4u (the kernel's %u): sharpness %.5f, green %.1f\n", position, f->focus, sharp, level);
+	return sharp;
+}
+
+static void
+sweep(int device, struct hakios_camera_frame *f, size_t bytes)
+{
+	uint32_t best = 0, fine_best;
+	float best_sharp = -1, s;
+
+	if (f->focus == HAKIOS_CAMERA_NO_FOCUS) {
+		printf("camera_test: focus: this camera's lens has no motor the kernel drives\n");
+		return;
+	}
+	for (uint32_t p = 0; p <= 1023; p += 32) {
+		s = sharpness_at(device, f, bytes, p);
+		if (s > best_sharp) {
+			best_sharp = s;
+			best = p;
+		}
+	}
+	fine_best = best;
+	for (uint32_t p = best > 32 ? best - 32 : 0; p <= best + 32 && p <= 1023; p += 8) {
+		s = sharpness_at(device, f, bytes, p);
+		if (s > best_sharp) {
+			best_sharp = s;
+			fine_best = p;
+		}
+	}
+	(void)sharpness_at(device, f, bytes, fine_best);
+	printf("camera_test: focus: the sharpest at %u (%.5f)\n", fine_best, best_sharp);
+}
+
 static int
 raw(int frames, bool ae, bool awb, bool keep_raw, bool full, int sensor)
 {
@@ -321,6 +384,14 @@ raw(int frames, bool ae, bool awb, bool keep_raw, bool full, int sensor)
 	f = malloc(bytes);
 	isp_init(&isp);
 	isp_set_ccm(&isp, ccm);
+	if (tuning_path != NULL) {
+		if (isp_load_tuning(&isp, tuning_path)) {
+			isp.awb_band = 0.15f;
+			printf("camera_test: the colour tuning of %s\n", tuning_path);
+		} else {
+			printf("camera_test: %s is not a colour tuning\n", tuning_path);
+		}
+	}
 	while (got < frames && failures < 5) {
 		struct hakios_camera_command c;
 		uint64_t t0 = mach_absolute_time();
@@ -339,6 +410,14 @@ raw(int frames, bool ae, bool awb, bool keep_raw, bool full, int sensor)
 		isp_measure(&isp, f, raw, &s);
 		if (awb) {
 			isp_awb(&isp, &s);
+		}
+		if (isp.tuning != NULL) {
+			float cct = isp_cct(&isp);
+
+			isp_tune(&isp, 300, cct > 0 ? cct : 5000);
+		}
+		if (focus_sweep && got == 45) {
+			sweep(device, f, bytes);
 		}
 		if (ae && isp_ae(&isp, f, &s, &c) && write(device, &c, sizeof(c)) != (ssize_t)sizeof(c)) {
 			perror("camera_test: the exposure");
@@ -436,6 +515,10 @@ main(int argc, char **argv)
 			if (strcmp(argv[i], "sensor") == 0 && i + 1 < argc) {
 				sensor = atoi(argv[++i]);
 			}
+			if (strcmp(argv[i], "tuning") == 0 && i + 1 < argc) {
+				tuning_path = argv[++i];
+			}
+			focus_sweep = focus_sweep || strcmp(argv[i], "focus") == 0;
 		}
 		return raw(argc >= 3 ? atoi(argv[2]) : 150, ae, awb, keep_raw, full, sensor);
 	}
@@ -445,6 +528,6 @@ main(int argc, char **argv)
 	if (argc >= 2 && strcmp(argv[1], "cycle") == 0) {
 		return cycle(argc >= 3 ? atoi(argv[2]) : 30);
 	}
-	fprintf(stderr, "usage: camera_test raw [FRAMES] [noae] [noawb] [keepraw|full] [ccm M] [sensor N]\n       camera_test cycle [FRAMES]\n       camera_test noise [SENSOR|all]\n");
+	fprintf(stderr, "usage: camera_test raw [FRAMES] [noae] [noawb] [keepraw|full] [ccm M] [sensor N] [tuning PATH] [focus]\n       camera_test cycle [FRAMES]\n       camera_test noise [SENSOR|all]\n");
 	return 2;
 }

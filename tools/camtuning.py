@@ -6,8 +6,8 @@ the repository; so is what this makes of it).
 
 usage: camtuning.py TUNED.bin OUT.isp     (camtuning.py TUNED.bin -   lists what is there only)
 
-The tuning file is a "QTI Chromatix Header" / "Parameter Parser V3.0.1" file, laid out as the sensors'
-module files are (see camsensor.py): a table of symbols { id, name[32], kind, ?, parent, offset, size }
+The tuning file is a "QTI Chromatix Header" / "Parameter Parser V3.0.1" file (the OnePlus 6T's: the older layout of
+its module files, "ParameterParser V1.1.0" or "Chromatix"), laid out as the sensors' module files are (see camsensor.py): a table of symbols { id, name[32], kind, ?, parent, offset, size }
 and the data they point into. Two of its modules are taken, each as Chromatix keeps it -- a tree whose
 first level is the flash (led_idx_data: 0 without one, the only one taken), the next the scene's light
 (aec_data: from a lux index to another, Qualcomm's measure of how dark the scene is: higher is darker),
@@ -39,23 +39,47 @@ import sys
 GRID = 17 * 13
 
 
-def symbols(data):
-    count = struct.unpack_from('<I', data, 0xa4)[0]
-    entries = [struct.unpack_from('<3I', data, 0xa8 + 12 * i) for i in range(count)]
+def layout(data):
+    """Where the symbols are: V3.0.1's count at 0xa4, entries at 0xa8 and symbols of 0x38 bytes; the OnePlus 6T's
+    (ParameterParser V1.1.0, and its tuning files that name no parser, "Chromatix" only): 0x9c, 0xa0 and 0x40 bytes
+    { id, name[32], kind, ?, ?, ?, parent, offset, size } -- None for neither"""
+    if not data.startswith(b'QTI Chromatix Header'):
+        return None
+    if b'Parameter Parser V3.0.1' in data[:0x60]:
+        return 0xa4, 0xa8, 0x38
+    count, first = struct.unpack_from('<2I', data, 0x9c)
+    if 2 <= count <= 8 and first == 0 and (b'ParameterParser V1.1.0' in data[:0x60] or data[0x28:0x32] == b'Chromatix\0'):
+        return 0x9c, 0xa0, 0x40
+    return None
+
+
+def symbols(data, where):
+    count_at, entries_at, length = where
+    count = struct.unpack_from('<I', data, count_at)[0]
+    entries = [struct.unpack_from('<3I', data, entries_at + 12 * i) for i in range(count)]
     table, pool = entries[0][1], entries[1][1]
     syms, at = {}, table
-    while at + 0x38 <= pool:
+    while at + length <= pool:
         sid = struct.unpack_from('<I', data, at)[0]
         name = data[at + 4:at + 0x24].split(b'\0')[0].decode('latin1')
-        _, _, _, ref, size = struct.unpack_from('<5i', data, at + 0x24)
+        ref, size = struct.unpack_from('<2i', data, at + length - 8)
         syms[sid] = (name, data[pool + ref:pool + ref + size])
-        at += 0x38
+        at += length
     return syms
 
 
 def module(syms, name, floats):
-    """[(lux from, lux to, [(cct from, cct to, values)])] of the module's first tree, without the flash"""
-    led = next(v for n, v in syms.values() if n == 'mod_%s_led_idx_data' % name)
+    """[(lux from, lux to, [(cct from, cct to, values)])] of the module's first tree that does something (the 6T's
+    files begin with one of an identity matrix, or gains of 1: a mode's that leaves the module out), without the
+    flash"""
+    trees = [tree(syms, v, floats) for n, v in syms.values() if n == 'mod_%s_led_idx_data' % name]
+    if not trees:
+        raise SystemExit('camtuning.py: no %s in the file' % name)
+    plain = (1, 0, 0, 0, 1, 0, 0, 0, 1) if floats == 9 else (1,) * floats
+    return next((t for t in trees if any(tuple(round(x, 4) for x in v) != plain for _, _, r in t for _, _, v in r)), trees[0])
+
+
+def tree(syms, led, floats):
     _, regions, sid = next(e for e in struct.iter_unpack('<3I', led) if e[0] == 0)
     out = []
     for i in range(regions):
@@ -90,9 +114,10 @@ def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     data = open(sys.argv[1], 'rb').read()
-    if not data.startswith(b'QTI Chromatix Header') or b'Parameter Parser V3.0.1' not in data[:0x60]:
+    where = layout(data)
+    if where is None:
         sys.exit('camtuning.py: not a tuning file of the kind known here')
-    syms = symbols(data)
+    syms = symbols(data, where)
     ccm = module(syms, 'cc13', 9)
     lsc = module(syms, 'lsc34', 4 * GRID)
     refs = references(syms)

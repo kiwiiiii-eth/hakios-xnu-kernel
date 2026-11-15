@@ -46,6 +46,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/sysctl.h>
 #include "camera_isp.h"
 
 void hakios_camera_say(const char *format, ...) __attribute__((format(printf, 1, 2)));
@@ -409,6 +410,11 @@ struct output {
 	CVPixelBufferRef held[HELD];            /* the pictures given last, kept from the pool (see deliver) */
 	unsigned        held_next;
 	bool            said_pool;
+	uint64_t        render_ns;              /* the moving pictures' making, since it was last said ... */
+	uint64_t        copy_ns;                /* ... of which their copying from `scratch' into the graph's buffers */
+	uint32_t        rendered;
+	uint8_t         *scratch;               /* (see struct render_job) */
+	size_t          scratch_bytes;
 };
 
 static void let_go(struct output *out);
@@ -816,6 +822,7 @@ struct render_job {
 	CVPixelBufferRef pb;
 	uint32_t format, width, height, pieces;
 	bool still;                     /* the photograph: every pixel of the sensor (isp_render_still_nv12) */
+	uint8_t *scratch;               /* the moving picture made here first (NV12, width a line), then copied out (deliver()) */
 };
 
 static void
@@ -833,6 +840,9 @@ render_piece(void *context, size_t i)
 		isp_render_still_nv12(j->isp, j->f, j->raw, CVPixelBufferGetBaseAddressOfPlane(j->pb, 0),
 		    CVPixelBufferGetBytesPerRowOfPlane(j->pb, 0), CVPixelBufferGetBaseAddressOfPlane(j->pb, 1),
 		    CVPixelBufferGetBytesPerRowOfPlane(j->pb, 1), j->width, j->height, first, end, j->format == PF_420V);
+	} else if (j->scratch != NULL) {
+		isp_render_nv12(j->isp, j->f, j->raw, j->scratch, j->width, j->scratch + (size_t)j->width * j->height, j->width,
+		    j->width, j->height, first, end, j->format == PF_420V);
 	} else {
 		isp_render_nv12(j->isp, j->f, j->raw, CVPixelBufferGetBaseAddressOfPlane(j->pb, 0), CVPixelBufferGetBytesPerRowOfPlane(j->pb, 0),
 		    CVPixelBufferGetBaseAddressOfPlane(j->pb, 1), CVPixelBufferGetBytesPerRowOfPlane(j->pb, 1), j->width, j->height, first, end,
@@ -956,6 +966,104 @@ frame_metadata(const struct isp *isp, const struct hakios_camera_frame *f, const
 	return m;
 }
 
+/*
+ * The pieces of a picture on threads of our own: GCD's dispatch_apply ran them one after another on this port (the
+ * main camera's preview took 42-69 ms a frame however it was cut up or however fast the cores went, a photograph
+ * 400 ms -- four times what one of this Mac's cores takes, where eight of the phone's would take about one's), so
+ * HELPERS threads wait here for a job and take its pieces as they come free, the caller with them.
+ */
+#define HELPERS 6
+static struct {
+	pthread_mutex_t lock;
+	pthread_cond_t  go, done;
+	struct render_job *job;
+	size_t          next, finished;
+	uint64_t        generation;
+	uint64_t        cpu_ns;         /* the pieces' processor time, and the processors they ran on, since last said */
+	uint32_t        cpus;
+} pool = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER, NULL, 0, 0, 0, 0, 0 };
+static pthread_mutex_t pool_user = PTHREAD_MUTEX_INITIALIZER;      /* one job at a time (two streams' workers may overlap) */
+static pthread_once_t pool_once = PTHREAD_ONCE_INIT;
+static unsigned pool_threads;
+
+/* (called with pool.lock held, returned with it held) */
+static void
+pool_work(void)
+{
+	struct render_job *j = pool.job;
+
+	while (j != NULL && pool.next < j->pieces) {
+		size_t i = pool.next++;
+
+		uint64_t t0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), t1;
+		size_t cpu = 0;
+
+		pthread_mutex_unlock(&pool.lock);
+		render_piece(j, i);
+		t1 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
+		(void)pthread_cpu_number_np(&cpu);
+		pthread_mutex_lock(&pool.lock);
+		pool.cpu_ns += t1 - t0;
+		pool.cpus |= 1u << (cpu & 31);
+		if (++pool.finished == j->pieces) {
+			pthread_cond_broadcast(&pool.done);
+		}
+	}
+}
+
+static void *
+pool_helper(void *unused)
+{
+	uint64_t seen = 0;
+
+	(void)unused;
+	pthread_setname_np("hakios-isp");
+	(void)pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+	pthread_mutex_lock(&pool.lock);
+	for (;;) {
+		while (pool.generation == seen) {
+			pthread_cond_wait(&pool.go, &pool.lock);
+		}
+		seen = pool.generation;
+		pool_work();
+	}
+	return NULL;
+}
+
+static void
+pool_start(void)
+{
+	for (unsigned i = 0; i < HELPERS; i++) {
+		pthread_t t;
+
+		if (pthread_create(&t, NULL, pool_helper, NULL) == 0) {
+			pthread_detach(t);
+			pool_threads++;
+		}
+	}
+	say("the processor's pictures on %u threads of our own and the caller's", pool_threads);
+}
+
+static void
+render_all(struct render_job *job)
+{
+	pthread_once(&pool_once, pool_start);
+	pthread_mutex_lock(&pool_user);
+	pthread_mutex_lock(&pool.lock);
+	pool.job = job;
+	pool.next = 0;
+	pool.finished = 0;
+	pool.generation++;
+	pthread_cond_broadcast(&pool.go);
+	pool_work();
+	while (pool.finished < job->pieces) {
+		pthread_cond_wait(&pool.done, &pool.lock);
+	}
+	pool.job = NULL;
+	pthread_mutex_unlock(&pool.lock);
+	pthread_mutex_unlock(&pool_user);
+}
+
 static void
 deliver(struct stream *s, struct output *out, const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw,
     CFDictionaryRef metadata)
@@ -981,18 +1089,74 @@ deliver(struct stream *s, struct output *out, const struct isp *isp, const struc
 	}
 	CVPixelBufferLockBaseAddress(pb, 0);
 
-	struct render_job job = { isp, f, raw, pb, pf, width, height, 8, strcmp(out->name, "StillImage") == 0 && pf != PF_BGRA };
-	uint64_t began = mach_absolute_time();
+	/*
+	 * In 32 pieces: the threads take them as they come free, so the big cores make more of the picture than the small
+	 * ones (render_all()).
+	 */
+	struct render_job job = { isp, f, raw, pb, pf, width, height, 32, strcmp(out->name, "StillImage") == 0 && pf != PF_BGRA, NULL };
+	uint64_t began = mach_absolute_time(), copied = 0;
+	size_t planes = (size_t)width * height + (size_t)width * ((height + 1) / 2);
 
-	dispatch_apply_f(job.pieces, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), &job, render_piece);
-	if (job.still) {
-		static mach_timebase_info_data_t tb;
-
-		if (tb.denom == 0) {
-			mach_timebase_info(&tb);
+	/*
+	 * The moving picture made in memory of our own and then copied into the graph's buffer, the two timed apart: whether
+	 * the processors' time goes on making it or on writing the buffer (an IOSurface, perhaps memory not cached here).
+	 */
+	if (!job.still && pf != PF_BGRA) {
+		if (out->scratch_bytes < planes) {
+			free(out->scratch);
+			out->scratch = malloc(planes);
+			out->scratch_bytes = out->scratch != NULL ? planes : 0;
 		}
-		say("%s: %ux%u made of every pixel in %.0f ms", out->name, width, height,
-		    (double)(mach_absolute_time() - began) * tb.numer / tb.denom / 1e6);
+		job.scratch = out->scratch;
+	}
+	render_all(&job);
+	if (job.scratch != NULL) {
+		uint64_t t = mach_absolute_time();
+		uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(pb, 0), *uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
+		size_t ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0), uvs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
+
+		for (uint32_t r = 0; r < height; r++) {
+			memcpy(y + r * ys, job.scratch + (size_t)r * width, width);
+		}
+		for (uint32_t r = 0; r < (height + 1) / 2; r++) {
+			memcpy(uv + r * uvs, job.scratch + (size_t)width * height + (size_t)r * width, (width + 1) & ~1u);
+		}
+		copied = mach_absolute_time() - t;
+	}
+
+	static mach_timebase_info_data_t tb;
+	uint64_t took;
+
+	if (tb.denom == 0) {
+		mach_timebase_info(&tb);
+	}
+	took = (mach_absolute_time() - began) * tb.numer / tb.denom;
+	copied = copied * tb.numer / tb.denom;
+	if (job.still) {
+		say("%s: %ux%u made of every pixel in %.0f ms", out->name, width, height, (double)took / 1e6);
+	} else {
+		/* (how long the processor takes over a moving picture: the preview's smoothness depends on it) */
+		out->render_ns += took;
+		out->copy_ns += copied;
+		if (++out->rendered == 150) {
+			uint64_t cpu_ns;
+			uint32_t cpus;
+
+			pthread_mutex_lock(&pool.lock);
+			cpu_ns = pool.cpu_ns;
+			cpus = pool.cpus;
+			pool.cpu_ns = 0;
+			pool.cpus = 0;
+			pthread_mutex_unlock(&pool.lock);
+			/* (processor time over the time that passed: how many processors' worth the pieces had at once) */
+			say("%s: %ux%u pictures made in %.1f ms each (the last 150), %.1f ms of it copying them out: %.1f ms of processor "
+			    "time each, %.1f processors' worth, on processors %#x", out->name, width, height,
+			    (double)out->render_ns / out->rendered / 1e6, (double)out->copy_ns / out->rendered / 1e6,
+			    (double)cpu_ns / out->rendered / 1e6, out->render_ns ? (double)cpu_ns / out->render_ns : 0, cpus);
+			out->render_ns = 0;
+			out->copy_ns = 0;
+			out->rendered = 0;
+		}
 	}
 	CVPixelBufferUnlockBaseAddress(pb, 0);
 	CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVAttachmentMode_ShouldPropagate);
@@ -1100,6 +1264,7 @@ enum { AF_WATCH, AF_STEADY, AF_CLIMB, AF_SWEEP, AF_FINE_SEARCH, AF_SETTLE };
 
 struct af {
 	int             state;
+	unsigned        watch_tick;     /* (AF_WATCH measures every other frame) */
 	uint32_t        at, target;     /* where the lens was told to go; where it is going a step at a time */
 	unsigned        wait;           /* frames before the next measurement */
 	int             way;            /* +1 nearer, -1 further */
@@ -1157,6 +1322,10 @@ af_frame(int device, struct af *af, const struct hakios_camera_frame *f, const u
 		af_go(device, af, af->target);          /* (the next step of a longer way) */
 		return;
 	}
+	/* (watching for a change of scene, every other frame: the measuring is a frame's 7 ms of the main camera's whole array) */
+	if (af->state == AF_WATCH && (++af->watch_tick & 1) != 0) {
+		return;
+	}
 	sharpness = isp_sharpness(f, raw, window[0], window[1], window[2], window[3], &level);
 	af->sum_sharpness += sharpness;
 	af->sum_level += level;
@@ -1174,7 +1343,7 @@ af_frame(int device, struct af *af, const struct hakios_camera_frame *f, const u
 			af->unlike = 0;
 			return;
 		}
-		if (af->sharpness > 0 && ++af->unlike < 30) {
+		if (af->sharpness > 0 && ++af->unlike < 15) {      /* (half a second or so: every other frame) */
 			return;
 		}
 		af->state = AF_STEADY;
@@ -1281,24 +1450,219 @@ af_frame(int device, struct af *af, const struct hakios_camera_frame *f, const u
 	}
 }
 
-/* the sensor's colour tuning, when the image has one (fw/camera-<sensor>.isp, tools/camtuning.py) */
+/*
+ * boot-arg cam_keep=1: the 90th frame of the front camera's stream, as the sensor gave it (RAW10), its middle 1024 lines,
+ * for the host after the run (the kernel's HAKIOS_CAMERA_KEEP; xl camera / fastboot oem recording) -- to see what the
+ * processor was given when a picture's colours are wrong.
+ */
+static void
+keep_raw(int device, struct stream *s, const struct hakios_camera_frame *f, const uint8_t *raw)
+{
+	static int wanted = -1;
+	static bool kept;
+	uint32_t lines = f->height < 1024 ? f->height : 1024, top = (f->height - lines) / 2 & ~1u;
+
+	if (wanted < 0) {
+		char args[1024] = "";
+		size_t n = sizeof(args) - 1;
+
+		wanted = sysctlbyname("kern.bootargs", args, &n, NULL, 0) == 0 && strstr(args, "cam_keep=1") != NULL;
+	}
+	if (!wanted || kept || s->camera->sensor != 2 || s->frames != 90) {
+		return;
+	}
+	size_t bytes = (size_t)f->stride * lines;
+	struct hakios_camera_command *k = malloc(sizeof(*k) + bytes);
+
+	if (k == NULL) {
+		return;
+	}
+	memset(k, 0, sizeof(*k));
+	k->command = HAKIOS_CAMERA_KEEP;
+	k->bytes = (uint32_t)bytes;
+	k->a = f->width;
+	k->b = lines;
+	k->c = f->stride;
+	k->d = 1;
+	memcpy(k + 1, raw + (size_t)top * f->stride, bytes);
+	kept = write(device, k, sizeof(*k) + bytes) == (ssize_t)(sizeof(*k) + bytes);
+	say("the front camera's frame 90 (%ux%u, lines %u-%u, gain %.1fx, %.1f ms) %s", f->width, f->height, top, top + lines,
+	    (double)f->gain / f->gain_unity, f->exposure_lines * (double)f->line_ns / 1e6,
+	    kept ? "kept for the host (RAW10)" : "NOT kept");
+	free(k);
+}
+
+/*
+ * The sensor's colour tuning, when the image has one (fw/camera-<sensor>.isp, tools/camtuning.py): the kernel's
+ * sensor numbers are the POCO X5 Pro's (drivers/camera/hakios.camera.c) or the OnePlus 6T's (hakios.camera845.c),
+ * and the image carries one phone's tunings, so the first of a number's names that is there is its sensor.
+ */
 static void
 load_tuning(struct isp *isp, uint32_t sensor)
 {
-	static const char *const names[] = { "ov02b10", "s5khm2sd", "ov16a1q", "s5k4h7" };
+	static const char *const names[][2] = {
+		{ "ov02b10", "imx376k" }, { "s5khm2sd", "imx519" }, { "ov16a1q", "imx371" }, { "s5k4h7", NULL },
+	};
 	char path[96];
 
 	if (sensor >= sizeof(names) / sizeof(names[0])) {
 		return;
 	}
-	snprintf(path, sizeof(path), "/redwood/fw/camera-%s.isp", names[sensor]);
+	for (int i = 0; i < 2 && names[sensor][i] != NULL; i++) {
+		snprintf(path, sizeof(path), "/redwood/fw/camera-%s.isp", names[sensor][i]);
+		if (access(path, R_OK) == 0) {
+			isp->awb_band = i == 1 ? 0.15f : 0;     /* (the 6T's: see isp_awb()) */
+			break;
+		}
+	}
 	if (isp_load_tuning(isp, path)) {
-		say("the %s's colour tuning from %s: %u colour matrices' lights, %u lens shadings'", names[sensor], path,
-		    isp->tuning->ccm.lights, isp->tuning->lsc.lights);
+		say("the colour tuning from %s: %u colour matrices' lights, %u lens shadings', %u reference lights", path,
+		    isp->tuning->ccm.lights, isp->tuning->lsc.lights, isp->tuning->refs);
 	} else {
-		say("no colour tuning for the %s (%s): no colour matrix, no lens shading", names[sensor], path);
+		say("no colour tuning for camera %u (%s): no colour matrix, no lens shading", sensor, path);
 		isp_set_ccm(isp, (const float[9]){ 1, 0, 0, 0, 1, 0, 0, 0, 1 });
 		isp->lsc.on = false;
+	}
+}
+
+/*
+ * The frames read on a thread of their own, into three buffers in turn -- one being read, one ready, one the worker's --
+ * so that the 20 MB copy of the main camera's whole-array frame (10-11 ms, r195) goes on while the last one is made into
+ * pictures, not before it. The worker takes the newest ready one; an older one not taken is read over (the preview is
+ * as late as the processing, not later).
+ */
+enum { READ_FREE, READ_FILLING, READ_READY, READ_TAKEN };
+struct reader {
+	pthread_t       thread;
+	pthread_mutex_t lock;
+	pthread_cond_t  cond;
+	int             device;
+	size_t          bytes;
+	uint8_t         *buf[3];
+	int             state[3];
+	uint64_t        order[3], readies;
+	volatile bool   stop;
+	bool            failed, eio;
+};
+
+static void *
+reader_thread(void *arg)
+{
+	struct reader *r = arg;
+	int failures = 0;
+
+	pthread_setname_np("hakios-camera-read");
+	(void)pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+	pthread_mutex_lock(&r->lock);
+	while (!r->stop) {
+		int b = -1;
+
+		for (int i = 0; i < 3 && b < 0; i++) {
+			b = r->state[i] == READ_FREE ? i : -1;
+		}
+		for (int i = 0; i < 3 && b < 0; i++) {
+			b = r->state[i] == READ_READY ? i : -1;
+		}
+		for (int i = 0; i < 3; i++) {   /* (of the ready ones, the oldest) */
+			if (b >= 0 && r->state[b] == READ_READY && r->state[i] == READ_READY && r->order[i] < r->order[b]) {
+				b = i;
+			}
+		}
+		if (b < 0) {
+			pthread_cond_wait(&r->cond, &r->lock);
+			continue;
+		}
+		r->state[b] = READ_FILLING;
+		pthread_mutex_unlock(&r->lock);
+
+		ssize_t n = read(r->device, r->buf[b], r->bytes);
+		int error = n < 0 ? errno : 0;
+
+		pthread_mutex_lock(&r->lock);
+		if (n == (ssize_t)r->bytes) {
+			r->state[b] = READ_READY;
+			r->order[b] = ++r->readies;
+			failures = 0;
+		} else {
+			r->state[b] = READ_FREE;
+			failures += error == EAGAIN ? 0 : 1;
+			if (error == EIO || failures >= 5) {
+				r->eio = error == EIO;
+				r->failed = true;
+				pthread_cond_broadcast(&r->cond);
+				break;
+			}
+		}
+		pthread_cond_broadcast(&r->cond);
+	}
+	pthread_mutex_unlock(&r->lock);
+	return NULL;
+}
+
+static bool
+reader_start(struct reader *r, int device, size_t bytes)
+{
+	memset(r, 0, sizeof(*r));
+	pthread_mutex_init(&r->lock, NULL);
+	pthread_cond_init(&r->cond, NULL);
+	r->device = device;
+	r->bytes = bytes;
+	for (int i = 0; i < 3; i++) {
+		if ((r->buf[i] = malloc(bytes)) == NULL) {
+			return false;
+		}
+	}
+	return pthread_create(&r->thread, NULL, reader_thread, r) == 0;
+}
+
+/* the newest ready frame's buffer (the worker's until reader_give_back), or -1: none within 100 ms, or the reads failed */
+static int
+reader_take(struct reader *r)
+{
+	int b = -1;
+
+	pthread_mutex_lock(&r->lock);
+	for (int tries = 0; tries < 2 && b < 0 && !r->failed; tries++) {
+		for (int i = 0; i < 3; i++) {
+			if (r->state[i] == READ_READY && (b < 0 || r->order[i] > r->order[b])) {
+				b = i;
+			}
+		}
+		if (b < 0) {
+			struct timespec ts = { 0, 100 * 1000 * 1000 };
+
+			pthread_cond_timedwait_relative_np(&r->cond, &r->lock, &ts);
+		}
+	}
+	if (b >= 0) {
+		r->state[b] = READ_TAKEN;
+	}
+	pthread_mutex_unlock(&r->lock);
+	return b;
+}
+
+static void
+reader_give_back(struct reader *r, int b)
+{
+	pthread_mutex_lock(&r->lock);
+	r->state[b] = READ_FREE;
+	pthread_cond_broadcast(&r->cond);
+	pthread_mutex_unlock(&r->lock);
+}
+
+static void
+reader_stop(struct reader *r, bool started)
+{
+	if (started) {
+		pthread_mutex_lock(&r->lock);
+		r->stop = true;
+		pthread_cond_broadcast(&r->cond);
+		pthread_mutex_unlock(&r->lock);
+		pthread_join(r->thread, NULL);
+	}
+	for (int i = 0; i < 3; i++) {
+		free(r->buf[i]);
+		r->buf[i] = NULL;
 	}
 }
 
@@ -1312,11 +1676,20 @@ worker(void *context)
 	struct isp_stats st;
 	uint8_t *buffer = NULL;
 	size_t bytes = 0;
+	struct reader reader;
+	bool reading = false;
+	int taken = -1;
 	uint32_t tuned_for = ~0u;
 	bool switched = false;
 	float lux = -1, cct = -1;
 	struct af af = { 0 };
 	int device = open(HAKIOS_CAMERA_DEVICE, O_RDWR), failures = 0;
+	/* where a frame's time goes, over 150 of them: the read, the measuring (and AE, AWB), the focus, the pictures */
+	uint64_t t_read = 0, t_measure = 0, t_af = 0, t_give = 0, t_first = 0, t_mark = 0;
+	unsigned timed = 0;
+	mach_timebase_info_data_t tb;
+
+	mach_timebase_info(&tb);
 
 	pthread_setname_np("hakios-camera");
 	if (device < 0) {
@@ -1349,25 +1722,35 @@ worker(void *context)
 				continue;
 			}
 			bytes = sizeof(head) + (size_t)head.stride * head.height;
-			buffer = malloc(bytes);
-			say("frames of %ux%u from the kernel (the %s)", head.width, head.height, s->camera->name);
-			continue;
-		}
-		n = read(device, buffer, bytes);
-		if (n != (ssize_t)bytes) {
-			if (n < 0 && errno == EIO) {
-				say("the kernel's camera has had a fault: no more frames");
+			reading = reader_start(&reader, device, bytes);
+			if (!reading) {
+				say("frames of %ux%u: no memory or thread to read them with", head.width, head.height);
 				break;
 			}
-			failures += n < 0 && errno == EAGAIN ? 0 : 1;
+			buffer = reader.buf[0];         /* (not NULL: the header is had) */
+			say("frames of %ux%u from the kernel (the %s), read on a thread of their own", head.width, head.height,
+			    s->camera->name);
 			continue;
 		}
+		t_mark = mach_absolute_time();
+		t_first = t_first ? t_first : t_mark;
+		taken = reader_take(&reader);
+		t_read += mach_absolute_time() - t_mark;
+		if (taken < 0) {
+			if (reader.failed) {
+				say("the kernel's camera %s: no more frames", reader.eio ? "has had a fault" : "gives no frames");
+				break;
+			}
+			continue;
+		}
+		buffer = reader.buf[taken];
 		failures = 0;
 
 		const struct hakios_camera_frame *f = (const void *)buffer;
 		const uint8_t *raw = buffer + f->header_bytes;
 		struct hakios_camera_command c;
 
+		t_mark = mach_absolute_time();
 		isp_measure(&isp, f, raw, &st);
 		isp_awb(&isp, &st);
 		if (f->sensor != tuned_for) {
@@ -1383,6 +1766,15 @@ worker(void *context)
 		isp_tune(&isp, lux, cct);
 		isp.zoom = s->zoom;
 		isp.turned = s->camera->turned;
+		/*
+		 * Frames no faster than the stream is asked for (the main camera's mode is a 60 a second one: twice the
+		 * frames to make for a preview of 30, and half the exposure there could be before the gain goes up), and
+		 * no slower: in the dark more gain, at the last digital, and the preview stays smooth.
+		 */
+		if (s->max_fps >= 1 && f->line_ns != 0) {
+			isp.min_frame_lines = (uint32_t)(1e9 / (s->max_fps * f->line_ns) + 0.5);
+			isp.max_frame_lines = isp.min_frame_lines;
+		}
 		if (isp_ae(&isp, f, &st, &c)) {
 			(void)write(device, &c, sizeof(c));
 		}
@@ -1393,8 +1785,16 @@ worker(void *context)
 			af.now = true;
 			af.sweep = true;
 		}
+		{
+			uint64_t t = mach_absolute_time();
+
+			t_measure += t - t_mark;
+			t_mark = t;
+		}
 		af_frame(device, &af, f, raw, s->af_window, s->af_locked);
+		t_af += mach_absolute_time() - t_mark;
 		s->frames++;
+		keep_raw(device, s, f, raw);
 
 		CFDictionaryRef metadata = frame_metadata(&isp, f, &st, s->port);
 
@@ -1413,6 +1813,7 @@ worker(void *context)
 			s->metadata = CFRetain(metadata);
 			pthread_mutex_unlock(&s->metadata_lock);
 		}
+		t_mark = mach_absolute_time();
 		pthread_mutex_lock(&s->lock);
 		for (int i = 0; s->graph_running && i < OUTPUTS; i++) {
 			struct output *out = &s->out[i];
@@ -1437,6 +1838,16 @@ worker(void *context)
 			}
 		}
 		pthread_mutex_unlock(&s->lock);
+		t_give += mach_absolute_time() - t_mark;
+		if (++timed == 150) {
+			double k = (double)tb.numer / tb.denom / 1e6 / timed, wall = (double)(mach_absolute_time() - t_first) * tb.numer /
+			    tb.denom / 1e6;
+
+			say("frames: %.1f a second (%u in %.0f ms); each: waited %.1f ms for it, measured %.1f, focus %.1f, given out %.1f",
+			    timed * 1000.0 / wall, timed, wall, t_read * k, t_measure * k, t_af * k, t_give * k);
+			timed = 0;
+			t_read = t_measure = t_af = t_give = t_first = 0;
+		}
 		if (metadata != NULL) {
 			CFRelease(metadata);
 		}
@@ -1445,8 +1856,12 @@ worker(void *context)
 			    "B %.2f, lux index %.0f, about %.0f K", f->sequence, f->exposure_lines * (double)f->line_ns / 1e6,
 			    (double)f->gain / f->gain_unity, isp.digital, st.mean[1], isp.wb[0], isp.wb[2], lux, cct);
 		}
+		reader_give_back(&reader, taken);
+		taken = -1;
 	}
-	free(buffer);
+	if (buffer != NULL) {
+		reader_stop(&reader, reading);
+	}
 	close(device);
 	say("the frames stopped (%llu)", s->frames);
 	return NULL;

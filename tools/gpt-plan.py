@@ -7,6 +7,7 @@ usage: gpt-plan.py info HEAD TAIL
        gpt-plan.py carve HEAD TAIL GIB OUT
        gpt-plan.py restore HEAD TAIL ORIG_HEAD ORIG_TAIL OUT
        gpt-plan.py check HEAD TAIL STAGED
+       gpt-plan.py mend HEAD TAIL OUT
 
   HEAD, TAIL            the first and last 8 blocks of the unit that holds userdata (oem readunit), as it is now
   ORIG_HEAD, ORIG_TAIL  the same, as saved before HakiOS was installed (the backup install.sh keeps)
@@ -14,6 +15,8 @@ usage: gpt-plan.py info HEAD TAIL
                         it: Android's data goes (fastboot -w after the write), as userdata-carve.py --wipe
   restore               the saved table again: darwin gone, userdata to its old end
   check                 a staged table held to the rules, as the loader will
+  mend                  the two copies on the flash made one again (a write cut short): the primary as it is when it
+                        checks, else the backup as a primary
 
 Each prints what it finds and ends with one line for a script:
   TABLE userdata=FIRST..LAST darwin=FIRST..LAST|none last_usable=N block=4096   (info, and the result of carve/restore)
@@ -82,10 +85,12 @@ def copies(head, tail):
         raise Refuse('HEAD and TAIL are to be 8 blocks of 4096 bytes each')
     ph, bh = head[BS:2 * BS], tail[7 * BS:8 * BS]
     disk = u64(ph, 32) + 1 if header_checks(ph) else (u64(bh, 24) + 1 if header_checks(bh) else 0)
-    p_ok = header_checks(ph) and u64(ph, 72) + (entries_bytes(ph) + BS - 1) // BS <= 8
+    p_ok = header_checks(ph) and u64(ph, 24) == 1 and u64(ph, 32) == disk - 1 and \
+        u64(ph, 72) + (entries_bytes(ph) + BS - 1) // BS <= 8
     pe = head[u64(ph, 72) * BS:u64(ph, 72) * BS + entries_bytes(ph)] if p_ok else b''
     p_ok = p_ok and table_checks(ph, pe)
-    b_ok = disk != 0 and header_checks(bh) and u64(bh, 24) == disk - 1 and disk - 8 <= u64(bh, 72) < disk - 1
+    b_ok = disk != 0 and header_checks(bh) and u64(bh, 24) == disk - 1 and u64(bh, 32) == 1 and \
+        disk - 8 <= u64(bh, 72) < disk - 1
     be = tail[(u64(bh, 72) - (disk - 8)) * BS:][:entries_bytes(bh)] if b_ok else b''
     b_ok = b_ok and table_checks(bh, be)
     return ph, pe, p_ok, bh, be, b_ok, disk
@@ -145,6 +150,8 @@ def rules(ref_h, ref_e, new_h, new_e, primary_entries_lba):
             continue
         if not ((i == dw_was or empty(was)) and (i == dw or empty(now)) and i in (dw_was, dw)):
             raise Refuse('an entry other than userdata and darwin changes')
+        if dw_was >= 0 and dw >= 0:
+            raise Refuse('darwin would move or change: it is only added or taken away')
     named = [entry(new_h, new_e, i)[56:128] for i in range(count)
              if not empty(entry(new_h, new_e, i)) and entry(new_h, new_e, i)[56:58] != b'\0\0']
     if len(named) != len(set(named)):
@@ -261,6 +268,19 @@ def carve(head, tail, gib):
     return staged_of(seal(ph, table), table)
 
 
+def mend(head, tail):
+    """the table to write so that both copies are one again: the primary when it checks, else the backup as a primary"""
+    ph, pe, p_ok, bh, be, b_ok, disk = copies(head, tail)
+    if p_ok:
+        return staged_of(ph, pe)
+    if b_ok:
+        h = bytearray(bh)
+        struct.pack_into('<QQ', h, 24, 1, u64(bh, 24))
+        struct.pack_into('<Q', h, 72, 2)
+        return staged_of(seal(bytes(h), be), be)
+    raise Refuse("neither copy of the phone's table checks")
+
+
 def main(argv):
     if len(argv) < 3:
         sys.exit(__doc__)
@@ -284,6 +304,9 @@ def main(argv):
             if index_of(oh, oe, 'darwin') != -1:
                 raise Refuse('the saved table has a darwin: it is not the phone\'s own from before')
             staged = staged_of(oh, oe)
+        elif cmd == 'mend' and len(args) == 3:
+            head, tail, out = rd(args[0]), rd(args[1]), args[2]
+            staged = mend(head, tail)
         elif cmd == 'check' and len(args) == 3:
             head, tail, staged, out = rd(args[0]), rd(args[1]), rd(args[2]), None
         else:

@@ -121,6 +121,11 @@ def main():
         ('REFUSE darwin of 11 GiB', nh, nt, staged(ph_n, carved_11), False, ''),
         ('REFUSE darwin not on 2 MiB', nh, nt, staged(ph_n, with_entry(ph_n, with_entry(ph_n, pe_n, ud, set_range(
             ud, u_first, 22048256)), dw, set_range(dw, 22048257, last_usable))), False, ''),
+        ('REFUSE darwin moved (what is in it would be lost)', nh, nt,
+         staged(ph_n, with_entry(ph_n, with_entry(ph_n, pe_n, ud, set_range(ud, u_first, 22048256 + 511)), dw,
+                                 set_range(dw, 22048256 + 512, last_usable))), False, ''),
+        ('mend a broken primary with gpt-plan.py mend', broken(nh), nt, gp.mend(broken(nh), nt), True, 'mend=1'),
+        ('mend a torn pair with gpt-plan.py mend', nh, ot, gp.mend(nh, ot), True, 'mend=1'),
         ('REFUSE darwin of another type', nh, nt,
          staged(ph_n, with_entry(ph_n, pe_n, dw, lambda x: x.__setitem__(0, x[0] ^ 1))), False, ''),
         ('REFUSE userdata to last usable + 1', nh, nt, staged(ph_o, with_entry(ph_o, pe_o, ud, set_range(

@@ -18,7 +18,8 @@
  *   - entry by entry, each is the phone's byte for byte, except
  *       the entry of userdata (exactly one in each, at the same index), whose end alone may move, with
  *       start <= end <= the last usable block and 4 GiB at least left to it, and
- *       the entry of darwin (one at most in each): an empty one may become darwin, darwin may become empty;
+ *       the entry of darwin (one at most in each): an empty one may become darwin, darwin may become empty, and a
+ *       darwin in both is left as it is (moved or resized, what lies in it -- /private/var -- would be lost);
  *   - a darwin there is: of the APFS container type, after userdata's end, from a 2 MiB boundary, within the usable
  *     range, 12 GiB at least (the system image's 7.79 GiB and the two 2 GiB slots of /private/var past 8 GiB);
  *   - no two named entries share a name (the 6T has entries with a type and no name or range: those are left be),
@@ -266,6 +267,9 @@ gpt_rules(const uint8_t *ref_hdr, const uint8_t *ref_entries, const uint8_t *new
 		/* darwin's entry: empty or darwin before, darwin or empty after, and darwin on one side at least */
 		if (!(((int)i == dw_was || gpt_empty(was)) && ((int)i == dw || gpt_empty(now)) && ((int)i == dw_was || (int)i == dw))) {
 			return "an entry other than userdata and darwin changes";
+		}
+		if (dw_was >= 0 && dw >= 0) {
+			return "darwin would move or change: it is only added or taken away";
 		}
 	}
 	for (uint32_t i = 0; i < count; i++) {

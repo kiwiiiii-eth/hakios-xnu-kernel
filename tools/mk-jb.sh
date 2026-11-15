@@ -234,6 +234,8 @@ for app in /var/jb/Applications/*.app; do
 		echo "prep.sh: ${app##*/} could not be registered"
 	) &
 done
+# TrollStore, installed once into an app container and kept registered (tools/jb-trollstore.sh, TROLLSTORE=1)
+[ -x /var/jb/usr/libexec/hakios-trollstore ] && /var/jb/bin/sh /var/jb/usr/libexec/hakios-trollstore &
 /var/jb/usr/sbin/pwd_mkdb -p /var/jb/etc/master.passwd 2>/dev/null
 for package in debianutils apt dash bash zsh vi; do
 	[ -x "/var/jb/Library/dpkg/info/$package.postinst" ] &&
@@ -243,6 +245,11 @@ exit 0
 PREP
 chmod 755 "$OUT/root/var/jb/prep.sh"
 rm -f "$OUT/root/var/jb/prep_bootstrap.sh"
+
+# TrollStore (opa334, MIT): so that an IPA -- one's own app -- can be installed after the boot, as neofetch is there for
+# a first look. Its own script, which can also be run alone on a prefix that is built: tools/jb-trollstore.sh.
+# TROLLSTORE=0 leaves it out.
+[ "${TROLLSTORE:-1}" = 0 ] || "$ROOT/tools/jb-trollstore.sh" "$OUT"
 
 echo "mk-jb.sh: $OUT/root/var/jb ($(du -sh "$OUT/root/var/jb" | cut -f1), $(find "$OUT/root/var/jb" | wc -l) entries)"
 echo "          Sileo $(grep -m1 '^Version:' "$TMP/control/control" | cut -d' ' -f2), $(grep -c '^Package:' "$OUT/root/var/jb/Library/dpkg/status") packages in dpkg's database"

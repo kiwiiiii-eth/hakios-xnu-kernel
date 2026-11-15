@@ -1,6 +1,7 @@
 /*
  * Small QMI NAS parser. Wire IDs and TLVs follow libqmi's qmi-service-nas.json:
- * Serving System (0x24), Get Signal Info (0x4f), Signal Info indication (0x51).
+ * Serving System (0x24: registration, the PLMN, and the time zone the network told), Get Signal Info (0x4f), Signal
+ * Info indication (0x51).
  * It only consumes reports. It never changes modem registration or radio power.
  */
 #include <sys/hakios.nas.h>
@@ -84,6 +85,13 @@ hakios_nas_apply(struct hakios_nas_state *state, const void *frame, size_t lengt
 			next.mnc = le16(value + 2);
 			memcpy(next.operator_name, value + 5, n);
 			next.operator_name[n] = 0;
+		} else if (message == 0x24 && type == 0x1a && size >= 1) {
+			/* "3GPP Time Zone" (libqmi): the offset the network told (NITZ), in quarters of an hour */
+			next.has_tz = true;
+			next.tz_quarters = (int8_t)value[0];
+		} else if (message == 0x24 && type == 0x1b && size >= 1) {
+			/* "3GPP Daylight Saving Time Adjustment": hours, part of the offset above */
+			next.dst_hours = value[0];
 		} else if ((message == 0x4f || message == 0x51) && type == 0x17 && size >= 4) {
 			level = (int16_t)le16(value); radio = 12; signal = true;
 		} else if ((message == 0x4f || message == 0x51) && type == 0x14 && size >= 6 && radio != 12) {
@@ -103,7 +111,8 @@ hakios_nas_apply(struct hakios_nas_state *state, const void *frame, size_t lengt
 	}
 	if (!serving && !signal) return 0;
 	if (next.registered == state->registered && next.has_signal == state->has_signal && next.mcc == state->mcc && next.mnc == state->mnc &&
-	    strcmp(next.operator_name, state->operator_name) == 0 &&
+	    strcmp(next.operator_name, state->operator_name) == 0 && next.has_tz == state->has_tz &&
+	    next.tz_quarters == state->tz_quarters && next.dst_hours == state->dst_hours &&
 	    next.radio_interface == state->radio_interface && next.dbm == state->dbm && next.bars == state->bars) return 0;
 	*state = next;
 	return 1;

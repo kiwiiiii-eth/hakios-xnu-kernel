@@ -6328,6 +6328,7 @@ static char cellular_operator[40];               /* "MCC MNC name" of the servin
 static char cellular_ip[20], cellular_gateway[20], cellular_dns[44];  /* the data session's addresses; "" until it is up */
 static int cellular_data, cellular_mtu;         /* 1 once the data session is up */
 static uint32_t nas_polls, nas_changes;
+static int cellular_mcc, cellular_tz_quarters = -128, cellular_dst;   /* -128: no time zone told */
 
 SYSCTL_DECL(_kern_hakios);
 SYSCTL_INT(_kern_hakios, OID_AUTO, cellular_up, CTLFLAG_RD | CTLFLAG_LOCKED, &cellular_up, 0,
@@ -6345,6 +6346,13 @@ SYSCTL_STRING(_kern_hakios, OID_AUTO, cellular_dns, CTLFLAG_RD | CTLFLAG_LOCKED,
 SYSCTL_INT(_kern_hakios, OID_AUTO, cellular_dbm, CTLFLAG_RD | CTLFLAG_LOCKED, &cellular_dbm, 0, "signal, dBm; 0: none read");
 SYSCTL_INT(_kern_hakios, OID_AUTO, cellular_radio, CTLFLAG_RD | CTLFLAG_LOCKED, &cellular_radio, 0,
     "the radio (QMI NAS): 4 GSM, 5 UMTS, 8 LTE, 12 NR");
+/* the country and the time zone, for userland/src/celltz.c: an iPhone's "Set Automatically" from the network (NITZ) */
+SYSCTL_INT(_kern_hakios, OID_AUTO, cellular_mcc, CTLFLAG_RD | CTLFLAG_LOCKED, &cellular_mcc, 0,
+    "the serving network's country code (MCC; Taiwan 466); 0 when none");
+SYSCTL_INT(_kern_hakios, OID_AUTO, cellular_tz_quarters, CTLFLAG_RD | CTLFLAG_LOCKED, &cellular_tz_quarters, 0,
+    "the network's time zone (NITZ), quarters of an hour from UTC (Taiwan 32); -128 when not told");
+SYSCTL_INT(_kern_hakios, OID_AUTO, cellular_dst, CTLFLAG_RD | CTLFLAG_LOCKED, &cellular_dst, 0,
+    "the daylight saving hours in that offset (NITZ)");
 
 static const char *
 radio_name(uint8_t radio)
@@ -6377,13 +6385,20 @@ nas_changed(__unused void *context, const struct hakios_nas_state *state)
 		snprintf(cellular_operator, sizeof(cellular_operator), "%s", state->registered ? name : "");
 	}
 	cellular_bars = state->bars;
+	cellular_mcc = state->registered ? state->mcc : 0;
+	if (state->has_tz) {
+		cellular_tz_quarters = state->tz_quarters;
+		cellular_dst = state->dst_hours;
+	}
 	cellular_dbm = state->has_signal ? state->dbm : 0;
 	cellular_radio = state->has_signal ? state->radio_interface : 0;
 	wds_registered = state->registered;
 	wds_advance();          /* bind once, start the session once registered, retry if refused */
-	tell("mpss: nas: %s%s%s (%u-%u); signal %s%d dBm (%s): %u bars\n", state->registered ? "REGISTERED WITH A NETWORK" : "not registered",
+	tell("mpss: nas: %s%s%s (%u-%u); signal %s%d dBm (%s): %u bars; time zone %s%d/4 h (DST %u)\n",
+	    state->registered ? "REGISTERED WITH A NETWORK" : "not registered",
 	    state->operator_name[0] ? ", network " : "", state->operator_name, state->mcc, state->mnc,
-	    state->has_signal ? "" : "none read, ", state->has_signal ? state->dbm : 0, radio_name(state->radio_interface), state->bars);
+	    state->has_signal ? "" : "none read, ", state->has_signal ? state->dbm : 0, radio_name(state->radio_interface), state->bars,
+	    state->has_tz ? "" : "not told ", state->has_tz ? state->tz_quarters : 0, state->dst_hours);
 }
 
 /* A datagram for our DMS port: the answer to our one question. From the link's thread. */

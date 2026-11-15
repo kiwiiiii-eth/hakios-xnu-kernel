@@ -14,6 +14,9 @@ struct hakios_nas_state {
 	uint8_t bars;           /* 0 until registration and a valid signal reading */
 	uint16_t mcc, mnc;      /* the current PLMN (serving system TLV 0x10); 0: none told */
 	char operator_name[32]; /* its description, as the network gives it; "" when none */
+	bool has_tz;            /* the network told its time zone (NITZ: serving system TLV 0x1A) */
+	int8_t tz_quarters;     /* ... the offset from UTC, in quarters of an hour (Taiwan: 32) */
+	uint8_t dst_hours;      /* ... and the daylight saving adjustment in it (TLV 0x1B), hours */
 };
 
 /* Apply one complete QMI NAS frame. 1: state changed; 0: ignored; -1: malformed. */

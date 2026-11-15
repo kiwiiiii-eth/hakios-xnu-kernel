@@ -17,6 +17,9 @@
 # this one wrote, then this run's own line
 /var/jb/usr/bin/cat /private/var/root/hakios-runs.txt
 /redwood/bin/var_store stamp /private/var/root/hakios-runs.txt
+# the package manager's prefix made ready (its packages configured; TrollStore installed once into an app container and
+# kept registered: tools/jb-trollstore.sh) -- every boot, as the prefix's other jobs do
+/var/jb/bin/sh /var/jb/prep.sh
 /var/jb/usr/sbin/sshd -D -e -h /var/root/.ssh/ssh_host_ed25519_key -o UsePAM=no -o PasswordAuthentication=no -o PermitRootLogin=prohibit-password -o AuthorizedKeysFile=/var/root/.ssh/authorized_keys &
 /var/jb/usr/bin/sleep 60
 /redwood/bin/net_test show

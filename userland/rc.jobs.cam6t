@@ -1,0 +1,45 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist) on the OnePlus 6T: a way in over Wi-Fi
+# (RC_JOBS=rc.jobs.ssh6t). The 6T's radio comes up by default (fajita.config: wifi=1 wifi_station=1); a network is joined
+# from Settings once and again by itself at every boot after (r161); once configd gives en0 an address, OpenSSH from the package manager's prefix (tools/mk-jb.sh) lets
+# root in with the key in ssh/authorized_keys, which build.sh puts on the data volume (never in the repository). Unlike
+# rc.jobs.ssh there are no taps: the 6T's touch is not the reference phone's, and nothing here needs the screen.
+# sshd is started at once and listens on every interface, so it answers as soon as an address is there; the
+# address is said in the log every few minutes (net_test show) for whoever reads it there.
+# the widgets' extensions and the daemons behind them in the background, so that the screen has the processors (src/quietboot.c)
+/redwood/bin/quietboot &
+# the date from the PMIC's real-time clock and the offset kept in /private/var, for a boot with no host to give it (src/rtcclock.c)
+/redwood/bin/rtcclock &
+# the time zone from the cellular network (NITZ), while Settings' Set Automatically is on (src/celltz.c)
+/redwood/bin/celltz &
+# the modem's positions to locationd once the kernel has any (with gnss=1 among the kernel's arguments; src/gnssfeed.m)
+/redwood/bin/gnssfeed &
+# the data volume across boots, seen at every boot (var_store keeps /private/var in the partition darwin): what the runs before
+# this one wrote, then this run's own line
+/var/jb/usr/bin/cat /private/var/root/hakios-runs.txt
+/redwood/bin/var_store stamp /private/var/root/hakios-runs.txt
+# the package manager's prefix made ready (its packages configured; TrollStore installed once into an app container and
+# kept registered: tools/jb-trollstore.sh) -- every boot, as the prefix's other jobs do
+/var/jb/bin/sh /var/jb/prep.sh
+/var/jb/usr/sbin/sshd -D -e -h /var/root/.ssh/ssh_host_ed25519_key -o UsePAM=no -o PasswordAuthentication=no -o PermitRootLogin=prohibit-password -o AuthorizedKeysFile=/var/root/.ssh/authorized_keys &
+/var/jb/usr/bin/sleep 60
+# (2026-11-16) Beta 0.6's run of everything at once: Wi-Fi's address, MobileGestalt's subtype (the island off or on),
+# Camera.app opened, a photograph, the home screen again; TrollStore says itself what it did (prep.sh, hakios-trollstore)
+/redwood/bin/net_test show
+/redwood/bin/mg_test MGGetProductType oPeik/9e8lQWMszEjbPzng
+/redwood/bin/rwtouch notify com.hakios.unlock
+/var/jb/usr/bin/sleep 5
+/var/jb/usr/bin/echo CAMPLIST-BEGIN
+/var/jb/usr/bin/base64 /private/var/mobile/Library/Preferences/com.apple.camera.plist
+/var/jb/usr/bin/echo CAMPLIST-END
+/redwood/bin/rwtouch notify com.hakios.open.camera wait 15 tap 0.5 0.894 wait 8 swipe 0.42 0.81 0.62 0.81 250 wait 4 tap 0.5 0.894 wait 12 tap 0.5 0.894 wait 8 button home wait 3
+/var/jb/usr/bin/ls -la /private/var/mobile/Media/DCIM/100APPLE
+/redwood/bin/rwtouch notify com.hakios.layers
+/var/jb/usr/bin/sleep 10
+/redwood/bin/net_test show
+/var/jb/usr/bin/sleep 120
+/redwood/bin/net_test show
+/var/jb/usr/bin/sleep 180
+/redwood/bin/net_test show
+/var/jb/usr/bin/sleep 300
+/redwood/bin/net_test show
+/var/jb/usr/bin/sleep 36000

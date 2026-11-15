@@ -1059,6 +1059,35 @@ ui_lite(void)
 	say("hakios: SpringBoard: ui_lite=%c: Reduce Transparency and Reduce Motion %s\n", argument[8], on == kCFBooleanTrue ? "on" : "off");
 }
 
+/*
+ * The Camera's Formats default to Most Compatible (JPEG photographs, H.264 videos) on this phone: High Efficiency's
+ * HEVC is encoded on the processors here, a few seconds a photograph where a JPEG takes 0.2 s (r199). What Settings ->
+ * Camera -> Formats -> Most Compatible writes to com.apple.camera (read off the phone, r212): the behaviour 1 and its
+ * source 2. Written only when no choice is there, so that one made in Settings -- either way -- stays.
+ */
+static void
+camera_formats(void)
+{
+	CFStringRef camera = CFSTR("com.apple.camera"), key = CFSTR("CAMUserPreferenceCaptureEncodingBehavior");
+	CFPropertyListRef have = CFPreferencesCopyValue(key, camera, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+	int one = 1, two = 2;
+	CFNumberRef compatible, chosen;
+
+	if (have != NULL) {
+		CFRelease(have);
+		return;
+	}
+	compatible = CFNumberCreate(NULL, kCFNumberIntType, &one);
+	chosen = CFNumberCreate(NULL, kCFNumberIntType, &two);
+	CFPreferencesSetValue(key, compatible, camera, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+	CFPreferencesSetValue(CFSTR("CAMUserPreferenceCaptureEncodingBehaviorSource"), chosen, camera,
+	    kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+	CFPreferencesSynchronize(camera, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+	CFRelease(compatible);
+	CFRelease(chosen);
+	say("hakios: SpringBoard: the Camera's Formats set to Most Compatible (JPEG), none having been chosen\n");
+}
+
 /* ---- the side button's long press ---------------------------------------------------------------- */
 
 /*
@@ -2414,6 +2443,7 @@ hakios_springboard_init(void)
 	    0x1f1c91480UL, (IMP)snapshot_output_format);
 	plain_vibrancy();
 	ui_lite();
+	camera_formats();
 	wallpaper_cache();
 	status_bar_fallback_is_split();
 	wallpaper_freeze();

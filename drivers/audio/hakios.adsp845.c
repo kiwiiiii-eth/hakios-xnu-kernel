@@ -4078,6 +4078,27 @@ static vm_offset_t mic_cap;             /* the microphone's 8 periods for Darwin
 static uint64_t s5_address;
 static volatile uint32_t s5_returned, s5_done, s5_underflows, s5_errors;
 
+extern void ml_io_unmap(vm_offset_t addr, vm_size_t sz);
+
+/*
+ * Whether a context bank is on (its SCTLR's M bit), read through a mapping of its own page: a context with no stream
+ * matched to it may still be another driver's, made ready before its match register is written (r234-r239: the
+ * speaker's step 17 came on context 9 so, half the time, and gave up -- no sound). Such a one is passed over.
+ */
+static bool
+smmu_context_on(uint32_t phys)
+{
+	vm_offset_t v = ml_io_map(phys, 0x1000);
+	uint32_t sctlr;
+
+	if (v == 0) {
+		return true;
+	}
+	sctlr = rd(v + SMMU_CB_SCTLR);
+	ml_io_unmap(v, 0x1000);
+	return (sctlr & 1) != 0;
+}
+
 /* stream 0x1821 through a context of ours; with hakios_smmu_lock held */
 static bool
 s5_space_on(void)
@@ -4115,7 +4136,14 @@ s5_space_on(void)
 			s5_space.old_s2cr = s2cr;
 		}
 	}
-	for (s5_space.context = 0; s5_space.context < contexts && used[s5_space.context]; s5_space.context++) {
+	for (s5_space.context = 0; s5_space.context < contexts; s5_space.context++) {
+		if (used[s5_space.context]) {
+			continue;
+		}
+		if (!smmu_context_on(s5_smmu.phys + (pages + s5_space.context) * page)) {
+			break;
+		}
+		printf("adsp845: %u: context %u is on with no stream through it: somebody's, passed over\n", step, s5_space.context);
 	}
 	if (s5_space.match == ~0u || s5_space.context >= contexts) {
 		printf("adsp845: %u: the SMMU has no match register or no context left\n", step);
@@ -5276,7 +5304,14 @@ mic_space_on(void)
 	if (s5_space.on) {
 		used[s5_space.context] = true;
 	}
-	for (mic_space.context = 0; mic_space.context < contexts && used[mic_space.context]; mic_space.context++) {
+	for (mic_space.context = 0; mic_space.context < contexts; mic_space.context++) {
+		if (used[mic_space.context]) {
+			continue;
+		}
+		if (!smmu_context_on(s5_smmu.phys + (pages + mic_space.context) * page)) {
+			break;
+		}
+		printf("adsp845: %u: context %u is on with no stream through it: somebody's, passed over\n", step, mic_space.context);
 	}
 	if (mic_space.match == ~0u || mic_space.context >= contexts) {
 		printf("adsp845: %u: the SMMU has no match register or no context left for stream 0x1806\n", step);

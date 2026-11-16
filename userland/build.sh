@@ -132,6 +132,10 @@ DARWIN_JOBS=${JOBS-"
 # tccd, securityd; and wifid, above, without which its antenna vendor command stalls); and BTLEServer (com.apple.BTServer.le,
 # which DENY's "BTServer" keeps out of --rest): the HID-over-GATT side of a BLE keyboard -- without it the phone connected to
 # one, read its Device Information and its name, and stopped there: no HID service read, no pairing (6T r124)
+# LOCKDOWN=1 (with ALLOW=lockdown): lockdownd, which keeps the phone's name (Settings > General > About > Name goes to it
+# through profiled) and answers what the device is to whoever asks; its job has no MachServices (a socket and USB events
+# start it), so it is not among the REST jobs started on demand
+[ -n "$LOCKDOWN" ] && DARWIN_JOBS="$DARWIN_JOBS com.apple.mobile.lockdown"
 [ -n "$BT" ] && DARWIN_JOBS="$DARWIN_JOBS com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.securityd com.apple.mobile.keybagd com.apple.BTServer.le"
 # The programs (file names) started with a library of ours inside them: "LIBRARY NAME..." per line
 # (src/inject.c is libhakios.dylib, src/inject_sb.c is libhakios.sb.dylib, src/inject_media.c is
@@ -246,6 +250,10 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			{ ${LDID:-ldid} -Ssrc/stacks.entitlements obj/stacks 2>/dev/null ||
 			  echo "build.sh: no ldid: stacks is unsigned, and gets no task port"; }
 		# what logd kept, read on the phone through LoggingSupport (src/logdump.m), signed to read the system's store
+		# the phone's name set as Settings sets it, and read back (src/devname.m)
+		$DYN -fobjc-arc -framework Foundation -lMobileGestalt -o obj/devname src/devname.m &&
+			{ ${LDID:-ldid} -Ssrc/devname.entitlements obj/devname 2>/dev/null ||
+			  echo "build.sh: no ldid: devname is unsigned, and profiled will refuse it"; }
 		# system app extensions registered with LaunchServices again (src/lsplugins.m): Files' "On My iPhone", the document picker
 		$DYN -fobjc-arc -framework Foundation -framework MobileCoreServices -o obj/lsplugins src/lsplugins.m &&
 			{ ${LDID:-ldid} -Ssrc/lsplugins.entitlements obj/lsplugins 2>/dev/null ||
@@ -408,6 +416,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/socks ] && cp obj/socks root/bin/
 	[ -f obj/logdump ] && cp obj/logdump root/bin/
 	[ -f obj/lsplugins ] && cp obj/lsplugins root/bin/
+	[ -f obj/devname ] && cp obj/devname root/bin/
 	[ -f obj/stacks ] && cp obj/stacks root/bin/
 	[ -f obj/varsaver ] && cp obj/varsaver root/bin/
 	[ -f obj/rtcclock ] && cp obj/rtcclock root/bin/

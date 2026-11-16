@@ -246,6 +246,10 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			{ ${LDID:-ldid} -Ssrc/stacks.entitlements obj/stacks 2>/dev/null ||
 			  echo "build.sh: no ldid: stacks is unsigned, and gets no task port"; }
 		# what logd kept, read on the phone through LoggingSupport (src/logdump.m), signed to read the system's store
+		# system app extensions registered with LaunchServices again (src/lsplugins.m): Files' "On My iPhone", the document picker
+		$DYN -fobjc-arc -framework Foundation -framework MobileCoreServices -o obj/lsplugins src/lsplugins.m &&
+			{ ${LDID:-ldid} -Ssrc/lsplugins.entitlements obj/lsplugins 2>/dev/null ||
+			  echo "build.sh: no ldid: lsplugins is unsigned, and lsd will refuse it"; }
 		$DYN -fobjc-arc -framework Foundation -o obj/logdump src/logdump.m &&
 			{ ${LDID:-ldid} -Ssrc/logdump.entitlements obj/logdump 2>/dev/null ||
 			  echo "build.sh: no ldid: logdump is unsigned, and logd will not let it read"; }
@@ -403,6 +407,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/quietboot ] && cp obj/quietboot root/bin/
 	[ -f obj/socks ] && cp obj/socks root/bin/
 	[ -f obj/logdump ] && cp obj/logdump root/bin/
+	[ -f obj/lsplugins ] && cp obj/lsplugins root/bin/
 	[ -f obj/stacks ] && cp obj/stacks root/bin/
 	[ -f obj/varsaver ] && cp obj/varsaver root/bin/
 	[ -f obj/rtcclock ] && cp obj/rtcclock root/bin/

@@ -3361,6 +3361,13 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	 */
 	dt_begin(&w, "defaults");
 	dt_prop_u32(&w, "kern.vm_compressor", 2);
+	/*
+	 * and the vnodes: the kernel is configured "xsmall" (MASTER.arm64.bcm2837: CONFIG_VNODES=1024), which caps the table
+	 * at 1024 whatever the memory, where an iPhone's has tens of thousands; PE_get_default("kern.maxvnodes") is read
+	 * before that cap. r232 (16 November): "vnode table is full", 1024 desired, 1024 in use, 74 s into the boot, once a
+	 * few more framework files were in the system image; r234 had 29765 in use a minute into the boot. 65536.
+	 */
+	dt_prop_u32(&w, "kern.maxvnodes", 65536);
 	dt_end(&w);
 
 	/* the product: screen class, artwork scale, name ... as on the real phone */

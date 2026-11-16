@@ -23,18 +23,36 @@
 /var/jb/bin/sh /var/jb/prep.sh
 /var/jb/usr/sbin/sshd -D -e -h /var/root/.ssh/ssh_host_ed25519_key -o UsePAM=no -o PasswordAuthentication=no -o PermitRootLogin=prohibit-password -o AuthorizedKeysFile=/var/root/.ssh/authorized_keys &
 /var/jb/usr/bin/sleep 60
+/var/jb/usr/sbin/sysctl kern.maxvnodes kern.num_vnodes
+/redwood/bin/logdump 200 process=="usermanagerd" >> /private/var/root/umd.txt
+/var/jb/usr/bin/grep -aiE -e persona -e error -e fail -e denied -e boot /private/var/root/umd.txt
+/var/jb/usr/bin/grep -aiE -e error -e fail -e denied -e disabl -e enabl -e LocalStorage -e domain /private/var/root/fplog.txt
 /var/jb/usr/bin/find /private/var/containers/Bundle/Application -maxdepth 2 -name *.app
+/usr/bin/fileproviderctl listproviders
+/var/jb/usr/bin/rm -f /private/var/root/lsplugins.txt
+/redwood/bin/lsplugins >> /private/var/root/lsplugins.txt
+/var/jb/usr/bin/cat /private/var/root/lsplugins.txt
+/var/jb/usr/bin/sudo -u mobile /usr/bin/fileproviderctl domain list
+/var/jb/usr/bin/sudo -u mobile /usr/bin/fileproviderctl dump com.apple.FileProvider.LocalStorage >> /private/var/root/fpdump.txt
+/var/jb/usr/bin/head -c 6000 /private/var/root/fpdump.txt
+/var/jb/usr/bin/sleep 20
 /var/jb/usr/bin/ls -la /private/var/staged_system_apps
 /redwood/bin/rwtouch notify com.hakios.unlock
 /var/jb/usr/bin/sleep 5
 /redwood/bin/rwtouch notify com.hakios.open.files
-/var/jb/usr/bin/sleep 25
+/var/jb/usr/bin/sleep 12
+/redwood/bin/rwtouch tap 0.75 0.955 wait 5 tap 0.1 0.089 wait 6 tap 0.1 0.089 wait 5 tap 0.93 0.086 wait 4 tap 0.43 0.245 wait 4 tap 0.75 0.37 wait 4 tap 0.9 0.088 wait 6
+/usr/bin/fileproviderctl listproviders
+/var/jb/usr/bin/sudo -u mobile /usr/bin/fileproviderctl listproviders
+/redwood/bin/logdump 150 process=="fileproviderd"||process=="Files"||process=="LocalStorageFileProvider"||process=="containermanagerd" >> /private/var/root/fplog.txt
 /redwood/bin/rwtouch notify com.hakios.layers
 /var/jb/usr/bin/sleep 10
 /redwood/bin/rwtouch button home
 /var/jb/usr/bin/sleep 3
 /redwood/bin/rwtouch notify com.hakios.open.trollstore
-/var/jb/usr/bin/sleep 15
+/var/jb/usr/bin/sleep 10
+/redwood/bin/rwtouch tap 0.92 0.088 wait 4 tap 0.55 0.139 wait 12
+/var/jb/usr/bin/sudo -u mobile /usr/bin/fileproviderctl domain list
 /var/jb/usr/bin/find /private/var/mobile/Library/Logs/CrashReporter -newer /private/var/root/hakios-runs.txt -type f
 /redwood/bin/net_test show
 /var/jb/usr/bin/sleep 120

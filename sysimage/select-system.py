@@ -96,7 +96,10 @@ BIG_WANTED = ('usr/libexec/locationd',)
 # system's own sounds, and the ringtones (18 MB: without them Settings' ringtone list neither plays nor
 # changes one, 6T r100). Not the neural networks among the tunings, nor the sounds of the watch.
 AUDIO = ('Library/Audio/Plug-Ins/', 'Library/Audio/Tunings/D22/', 'Library/Audio/Tunings/Generic/',
-         'System/Library/Audio/UISounds/', 'Library/Ringtones/')
+         'System/Library/Audio/UISounds/', 'Library/Ringtones/',
+         # the one of Apple's own HAL plug-ins wanted: Bluetooth audio (A2DP to headphones -- AirPods), which
+         # mediaserverd loads from here; the others (baseband voice, CarPlay, AirPlay, USB, the AOP) stay out
+         'System/Library/Audio/Plug-Ins/HAL/BTAudioHALPlugin.driver/')
 SKIP_AUDIO = ('System/Library/Audio/UISounds/nano/',)
 KEEP_LANG = ('en', 'Base', 'English', 'en_US', 'en_GB')
 

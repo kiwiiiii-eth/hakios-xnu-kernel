@@ -156,6 +156,13 @@ def wanted_file(path, size):
     if path.startswith(FRAMEWORKS):
         if re.search(r'/(XPCServices|Support|Helpers)/', path):
             return size <= 32 << 20 and not path.lower().endswith(('.png', '.car', '.loctable', '.caml'))
+        # an app extension's own program, as big as an XPC service's: the five over 4 MB are the Files app's and the
+        # document picker's (LocalStorageFileProvider, "On My iPhone"; com.apple.DocumentManager.Service, the picker
+        # every app opens, TrollStore's among them; SaveToFiles, RecentsAvocado, RecentsAppPopover), 30 MB together.
+        # Without them Files showed nothing and TrollStore could open no IPA (16 November)
+        appex = re.search(r'/PlugIns/([^/]+)\.appex/([^/]+)$', path)
+        if appex and appex.group(1) == appex.group(2):
+            return size <= 32 << 20
         if path.endswith('.car'):
             return size <= MAX_ASSET_CATALOG or path.startswith(BIG_CATALOGS)
         if path.endswith('.loctable'):

@@ -4078,35 +4078,22 @@ static vm_offset_t mic_cap;             /* the microphone's 8 periods for Darwin
 static uint64_t s5_address;
 static volatile uint32_t s5_returned, s5_done, s5_underflows, s5_errors;
 
-extern void ml_io_unmap(vm_offset_t addr, vm_size_t sz);
-
-/*
- * Whether a context bank is on (its SCTLR's M bit), read through a mapping of its own page: a context with no stream
- * matched to it may still be another driver's, made ready before its match register is written (r234-r239: the
- * speaker's step 17 came on context 9 so, half the time, and gave up -- no sound). Such a one is passed over.
- */
-static bool
-smmu_context_on(uint32_t phys)
-{
-	vm_offset_t v = ml_io_map(phys, 0x1000);
-	uint32_t sctlr;
-
-	if (v == 0) {
-		return true;
-	}
-	sctlr = rd(v + SMMU_CB_SCTLR);
-	ml_io_unmap(v, 0x1000);
-	return (sctlr & 1) != 0;
-}
-
 /* stream 0x1821 through a context of ours; with hakios_smmu_lock held */
 static bool
 s5_space_on(void)
 {
 	bool used[256] = { false };
-	uint32_t scr0 = get(&s5_smmu, "scr0", SMMU_SCR0), idr0 = get(&s5_smmu, "idr0", SMMU_IDR0);
-	uint32_t idr1 = get(&s5_smmu, "idr1", SMMU_IDR1), matches = idr0 & 0xff, contexts = idr1 & 0xff, page, pages;
+	uint32_t scr0, idr0, idr1, matches, contexts, page, pages;
 	uint64_t *root, *second, *third, table_root;
+
+	if (s5_space.on) {			/* (kept from step 15 for step 17: ours already) */
+		return true;
+	}
+	scr0 = get(&s5_smmu, "scr0", SMMU_SCR0);
+	idr0 = get(&s5_smmu, "idr0", SMMU_IDR0);
+	idr1 = get(&s5_smmu, "idr1", SMMU_IDR1);
+	matches = idr0 & 0xff;
+	contexts = idr1 & 0xff;
 
 	if (scr0 & 1u << 3) {
 		printf("adsp845: %u: this SMMU numbers its streams with 16 bits: not written for\n", step);
@@ -4136,14 +4123,7 @@ s5_space_on(void)
 			s5_space.old_s2cr = s2cr;
 		}
 	}
-	for (s5_space.context = 0; s5_space.context < contexts; s5_space.context++) {
-		if (used[s5_space.context]) {
-			continue;
-		}
-		if (!smmu_context_on(s5_smmu.phys + (pages + s5_space.context) * page)) {
-			break;
-		}
-		printf("adsp845: %u: context %u is on with no stream through it: somebody's, passed over\n", step, s5_space.context);
+	for (s5_space.context = 0; s5_space.context < contexts && used[s5_space.context]; s5_space.context++) {
 	}
 	if (s5_space.match == ~0u || s5_space.context >= contexts) {
 		printf("adsp845: %u: the SMMU has no match register or no context left\n", step);
@@ -4969,9 +4949,18 @@ out:
 	if (clock) {
 		afe_mi2s_clock(false);
 	}
-	lck_mtx_lock(&hakios_smmu_lock);
-	s5_space_off();
-	lck_mtx_unlock(&hakios_smmu_lock);
+	/*
+	 * With step 17 to come, the SMMU context stays ours: given back here, another driver (the Wi-Fi's, the modem's IPA)
+	 * took it before step 17 asked again, which then came on a context the boot left switched on and gave up -- no sound
+	 * in half the runs (r234-r241). Step 17 goes on with this one (step_darwin asks for one only when it is not on).
+	 */
+	if (last_step < 17) {
+		lck_mtx_lock(&hakios_smmu_lock);
+		s5_space_off();
+		lck_mtx_unlock(&hakios_smmu_lock);
+	} else if (s5_space.on) {
+		printf("adsp845: %u: the SMMU's context %u is kept for step 17\n", step, s5_space.context);
+	}
 	for (unsigned i = 0; i < 4; i++) {
 		put(&pins[i].page, "I/O (given back)", 4, found_io[i] & 2);
 		put(&pins[i].page, "control (given back)", 0, found_ctl[i]);
@@ -5304,14 +5293,7 @@ mic_space_on(void)
 	if (s5_space.on) {
 		used[s5_space.context] = true;
 	}
-	for (mic_space.context = 0; mic_space.context < contexts; mic_space.context++) {
-		if (used[mic_space.context]) {
-			continue;
-		}
-		if (!smmu_context_on(s5_smmu.phys + (pages + mic_space.context) * page)) {
-			break;
-		}
-		printf("adsp845: %u: context %u is on with no stream through it: somebody's, passed over\n", step, mic_space.context);
+	for (mic_space.context = 0; mic_space.context < contexts && used[mic_space.context]; mic_space.context++) {
 	}
 	if (mic_space.match == ~0u || mic_space.context >= contexts) {
 		printf("adsp845: %u: the SMMU has no match register or no context left for stream 0x1806\n", step);

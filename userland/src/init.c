@@ -73,28 +73,35 @@ static const char *boot_arg(const char *name);
 static void
 island_cache(void)
 {
-	const char *arg = boot_arg("island");
-	char want = arg != NULL && strcmp(arg, "1") == 0 ? '1' : '0', last = '0';
-	int fd = open(ISLAND_STATE, O_RDONLY, 0);
+	/* the island and the screen's size together: island=1 makes the screen the 14 Pro's (MiniIOMobileFramebuffer.cpp),
+	 * fbwidth/fbheight another, and MobileGestalt keeps the screen's size in the same cache */
+	const char *island = boot_arg("island"), *width = boot_arg("fbwidth"), *height = boot_arg("fbheight");
+	char want[64], last[64] = "";
+	int fd = open(ISLAND_STATE, O_RDONLY, 0), n;
 
+	/* (no snprintf here: mini.h) */
+	/* ("buttons=2": the loader's /buttons home-button-type since 16 November, a cache from before it dropped once) */
+	strcpy(want, island != NULL && strcmp(island, "1") == 0 ? "buttons=2 island=1 fbwidth=" : "buttons=2 island=0 fbwidth=");
+	strcpy(want + strlen(want), width != NULL && strlen(width) < 8 ? width : "-");
+	strcpy(want + strlen(want), " fbheight=");
+	strcpy(want + strlen(want), height != NULL && strlen(height) < 8 ? height : "-");
 	if (fd >= 0) {
-		if (read(fd, &last, 1) != 1) {
-			last = '0';
-		}
+		n = (int)read(fd, last, sizeof(last) - 1);
+		last[n > 0 ? n : 0] = 0;
 		close(fd);
 	}
-	if (want == last) {
+	if (strcmp(last, want) == 0 || (last[0] == 0 && strcmp(want, "buttons=2 island=0 fbwidth=- fbheight=-") == 0)) {
 		return;
 	}
 	if (unlink(MG_CACHE) == 0 || errno == 2) {    /* (ENOENT: none to drop) */
-		printf("  the Dynamic Island %s: MobileGestalt's cache dropped\n", want == '1' ? "on (island=1)" : "off");
+		printf("  the screen is now \"%s\" (was \"%s\"): MobileGestalt's cache dropped\n", want, last);
 	} else {
-		printf("  the Dynamic Island %s: MobileGestalt's cache NOT dropped: %s\n", want == '1' ? "on" : "off", strerror(errno));
+		printf("  the screen is now \"%s\": MobileGestalt's cache NOT dropped: %s\n", want, strerror(errno));
 	}
 	mkdir("/private/var/db", 0755);
 	fd = open(ISLAND_STATE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (fd >= 0) {
-		(void)write(fd, &want, 1);
+		(void)write(fd, want, strlen(want));
 		close(fd);
 	}
 }

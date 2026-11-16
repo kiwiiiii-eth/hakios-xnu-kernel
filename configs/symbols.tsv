@@ -126,11 +126,11 @@ FB_MEASURE	arg	fb_measure	GPU and display	k	MiniIOMobileFramebuffer.cpp	how ofte
 FB_PRI	arg	fb_pri	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_QUEUE	arg	fb_queue	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_THREADS	arg	fb_threads	GPU and display	k	MiniIOMobileFramebuffer.cpp	
-FBHEIGHT	arg	fbheight	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+FBHEIGHT	arg	fbheight	GPU and display	ku	MiniIOMobileFramebuffer.cpp,init.c	
 FBSCALE	arg	fbscale	GPU and display	k	MiniIOMobileFramebuffer.cpp	the same 375 x 812 points drawn at two pixels a point instead of three
 FBSUBTYPE	arg	fbsubtype	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FBTRACE	arg	fbtrace	GPU and display	k	MiniIOMobileFramebuffer.cpp	log the first N calls of every selector (default 3)
-FBWIDTH	arg	fbwidth	GPU and display	ku	MiniIOMobileFramebuffer.cpp,inject_sb.c	
+FBWIDTH	arg	fbwidth	GPU and display	ku	MiniIOMobileFramebuffer.cpp,init.c,inject_sb.c	
 FG8998	arg	fg8998	User space	k	hakios.fg8998.c	
 FG_CHARGE	arg	fg_charge	User space	k	hakios.fg8998.c	
 FG_CHARGE_MA	arg	fg_charge_ma	User space	k	hakios.fg8998.c	
@@ -189,7 +189,7 @@ HID_RESOURCE	arg	hid_resource	User space	k	hakios.hidres.c	neither (the default 
 IPA8	arg	ipa8	User space	k	hakios.mpss845.c	the IPA 3.5.1 is set up before the modem (its firmware, memory, hardware, our data path): the entry
 IPA_GSI_LOOK	arg	ipa_gsi_look	User space	k	hakios.mpss845.c	
 IPA_IRAM_LOOK	arg	ipa_iram_look	User space	k	hakios.mpss845.c	
-ISLAND	arg	island	Loader	lu	init.c,loader.c	the Dynamic Island. Darwin has no answer of its own for "this phone has one": SpringBoard, Spring
+ISLAND	arg	island	GPU and display	klu	MiniIOMobileFramebuffer.cpp,init.c,loader.c	the Dynamic Island. Darwin has no answer of its own for "this phone has one": SpringBoard, Spring
 M2V_UTRACE	arg	m2v_utrace	User space	u	HakiosMetalCA.m	Turnip's GPU trace of every render pass (u_trace) into a file, printed during the run
 MACHINE_NAME	arg	machine_name	CPU, memory and boot	k	GenericARMPE.cpp	
 MEMBENCH	arg	membench	CPU, memory and boot	k	hakios.cpufreq.c	

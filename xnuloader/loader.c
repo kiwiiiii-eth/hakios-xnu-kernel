@@ -3389,6 +3389,18 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 	dt_end(&w);
 
+	/*
+	 * /buttons home-button-type 2, as on the iPhone X and every iPhone without a home button: MobileGestalt's
+	 * HomeButtonType is read from here (libMobileGestalt, "IODeviceTree:/buttons" "home-button-type"), 0 without it --
+	 * a phone with a home button -- and SpringBoard looks up its screen type among the home-button phones' then
+	 * (SpringBoardHome's __SBHScreenTypeLookup: the X's and 14 Pro's screens are only in the other table). The cache
+	 * MobileGestalt kept from earlier had 2; once dropped (island=1, 16 November) the island's 14 Pro screen became a
+	 * home-button phone: no gestures, the old status bar. No compatible: nothing is to match it.
+	 */
+	dt_begin(&w, "buttons");
+	dt_prop_u32(&w, "home-button-type", 2);
+	dt_end(&w);
+
 	/* IOKit publishes its NVRAM object on this node; without it IOKit asserts. */
 	dt_begin(&w, "options");
 	dt_end(&w);

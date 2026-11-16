@@ -135,7 +135,7 @@ fb_measure	k
 fb_pri	k
 fb_queue	k
 fb_threads	k
-fbheight	k
+fbheight	ku
 fbscale	k
 fbsubtype	k
 fbtrace	k
@@ -202,7 +202,7 @@ hv_wdt_pet	k
 ipa8	k
 ipa_gsi_look	k
 ipa_iram_look	k
-island	lu
+island	klu
 loader_return_after	kl
 m2v_utrace	u
 machine_name	k

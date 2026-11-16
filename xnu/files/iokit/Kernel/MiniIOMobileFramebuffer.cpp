@@ -605,6 +605,22 @@ IOMobileFramebuffer::start(IOService * provider)
 	fRowBytes = vinfo.v_rowbytes;
 	fWidth = gFBWidth ? gFBWidth : fPanelWidth;
 	fHeight = gFBHeight ? gFBHeight : fPanelHeight;
+	/*
+	 * Boot-arg island=1 (the loader gives /product the iPhone 14 Pro's artwork-device-subtype, 2556): the screen is that
+	 * phone's too, 1179 x 2556 (393 x 852 points), unless fbwidth/fbheight say otherwise. SpringBoard finds its screen type
+	 * by its size in points; with the 14 Pro's subtype on the X's 375 x 812 it found none and laid the phone out as one
+	 * with a home button -- no gestures, the old status bar, the island on the first row of icons (16 November). The 14
+	 * Pro's 0.4613 is this panel's 0.4615 (1080 x 2340): scaled by 0.916 instead of 0.96, no more stretched.
+	 */
+	{
+		uint32_t island = 0, given = 0;
+
+		if (PE_parse_boot_argn("island", &island, sizeof(island)) && island == 1 &&
+		    !PE_parse_boot_argn("fbwidth", &given, sizeof(given)) && !PE_parse_boot_argn("fbheight", &given, sizeof(given))) {
+			fWidth = 1179;
+			fHeight = 2556;
+		}
+	}
 	if (gFBScale != 0 && gFBScale != kFBDefaultScale) {
 		static const char * const places[][2] = { { "/chosen", "display-scale" }, { "/product", "artwork-scale-factor" } };
 		uint32_t scale = gFBScale;

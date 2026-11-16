@@ -1739,7 +1739,7 @@ configure_inject(void)
  * idle daemons are killed to free vnodes. Give it what the kernel's own rule gives a bigger
  * configuration -- one for every 64 KB of memory, and 1024 -- up to MAX_VNODES.
  */
-#define MAX_VNODES      32768
+#define MAX_VNODES      65536           /* (r234: 29765 in use a minute into a boot; the loader gives 65536 from the start) */
 
 static void
 configure_vnodes(void)

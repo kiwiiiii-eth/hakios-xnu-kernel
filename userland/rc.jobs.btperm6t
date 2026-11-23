@@ -1,0 +1,12 @@
+# (2026-11-23) bluetoothd's folder given back (r246): init gives the system group containers' Library and Library/Caches,
+# which containermanagerd leaves mode 000 and owned by nobody, to mobile (src/init.c, system_groups()). Seen here: the
+# folders at once and two minutes later (does containermanagerd take them back?), and whether bluetoothd's databases open.
+/var/jb/usr/bin/sleep 45
+/var/jb/usr/bin/find /private/var/containers/Shared/SystemGroup -maxdepth 2 -name Library -ls
+/var/jb/usr/bin/find /private/var/containers/Shared/SystemGroup/DE0C1EFC-1430-46BA-ACD8-AA5920AC8046 -ls
+/redwood/bin/logdump 300 process=="bluetoothd" >> /private/var/root/btlog2.txt
+/var/jb/usr/bin/grep -aiE -e cache -e permission -e Database /private/var/root/btlog2.txt
+/var/jb/usr/bin/sleep 90
+/var/jb/usr/bin/find /private/var/containers/Shared/SystemGroup -maxdepth 2 -name Library -ls
+/var/jb/usr/bin/find /private/var/containers/Shared/SystemGroup/DE0C1EFC-1430-46BA-ACD8-AA5920AC8046 -ls
+/var/jb/usr/bin/sleep 36000

@@ -106,6 +106,60 @@ island_cache(void)
 	}
 }
 
+/*
+ * The system group containers (/private/var/containers/Shared/SystemGroup/<UUID>): containermanagerd makes each one's
+ * Library and Library/Caches mode 000, owned by uid -2 (nobody) -- the owner it would take from the user's persona, and
+ * there are no personas here (inject.c tells it so). A daemon that runs as mobile then cannot reach its own folder:
+ * bluetoothd wrote its 'paired devices' database once, on 15 November, and has been refused ever since, so no pairing
+ * outlived a restart (r245; geod, nearbyd and the others alike). Each such directory is given to mobile, 0755, before
+ * anything starts; one in any other state is left as it is.
+ */
+#define SYSTEM_GROUPS "/private/var/containers/Shared/SystemGroup"
+static void
+system_groups(void)
+{
+	static const char *const sub[] = { "/Library", "/Library/Caches" };
+	static char buf[8192];
+	off_t position = 0;
+	ssize_t n;
+	int given = 0, fd = open(SYSTEM_GROUPS, O_RDONLY | O_DIRECTORY, 0);
+
+	if (fd < 0) {
+		return;
+	}
+	while ((n = getdirentries(fd, buf, sizeof(buf), &position)) > 0) {
+		for (ssize_t at = 0; at < n;) {
+			struct dirent *de = (struct dirent *)(buf + at);
+
+			at += de->d_reclen;
+			if (de->d_name[0] == '.' || strlen(de->d_name) > 160) {
+				continue;
+			}
+			for (unsigned i = 0; i < sizeof(sub) / sizeof(sub[0]); i++) {
+				char path[256];
+				struct stat st;
+
+				strcpy(path, SYSTEM_GROUPS "/");
+				strcpy(path + strlen(path), de->d_name);
+				strcpy(path + strlen(path), sub[i]);
+				if (lstat(path, &st) != 0 || (st.st_mode & S_IFMT) != S_IFDIR || st.st_uid != 0xfffffffeu ||
+				    (st.st_mode & 07777) != 0) {
+					continue;
+				}
+				if (chown(path, 501, 501) == 0 && chmod(path, 0755) == 0) {
+					given++;
+				} else {
+					printf("  %s: %s\n", path, strerror(errno));
+				}
+			}
+		}
+	}
+	close(fd);
+	if (given > 0) {
+		printf("  %d folders of the system group containers given to mobile (they were mode 000, owned by nobody)\n", given);
+	}
+}
+
 /* The value of boot-arg NAME on the kernel's command line, or NULL. */
 static const char *
 boot_arg(const char *name)
@@ -1149,6 +1203,7 @@ mount_writable(void)
 	}
 	if (var_kept) {
 		island_cache();
+		system_groups();
 	}
 	if (var_kept) {
 		/* the root reports this volume's space, as an iPhone's / reports its container's (Settings > iPhone Storage) */

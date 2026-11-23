@@ -73,6 +73,18 @@ struct hakios_sta_channel {
  * may take as long as the thing takes: scan() returns when the scan is over, join() when frames
  * can pass or it is known why not. Each gives 0 or an errno.
  */
+/*
+ * The radio as an access point (the hotspot): a network of this name, WPA2 with this passphrase (8 to 63 characters:
+ * never an open one), on this channel; the radio is no station meanwhile.
+ */
+struct hakios_sta_ap {
+	uint8_t  ssid[32];
+	uint8_t  ssid_length;
+	uint8_t  passphrase[64];
+	uint8_t  passphrase_length;
+	uint16_t frequency;                     /* MHz (2412..2472); 0: 2437, channel 6 */
+};
+
 struct hakios_sta_ops {
 	int (*power)(bool on);                  /* off: leave the network, stop the radio; on: start it */
 	int (*scan)(const struct hakios_sta_scan *what);
@@ -81,6 +93,7 @@ struct hakios_sta_ops {
 	int (*leave)(void);
 	void (*state)(struct hakios_sta_state *state);         /* on any thread; does not sleep */
 	unsigned (*channels)(struct hakios_sta_channel *channels, unsigned most);      /* what the radio may tune to */
+	int (*ap)(const struct hakios_sta_ap *what);           /* start the access point; NULL: stop it */
 	uint8_t address[6];
 };
 
@@ -106,6 +119,7 @@ int      hakios_sta_ask_join(const struct hakios_sta_join *what);
 /* ... and joined again whenever the radio is turned on, until some other network is asked for */
 int      hakios_sta_ask_join_standing(const struct hakios_sta_join *what);
 int      hakios_sta_ask_leave(void);
+int      hakios_sta_ask_ap(const struct hakios_sta_ap *what);         /* the hotspot on; NULL: off */
 bool     hakios_sta_busy(void);                                        /* something asked for is not over yet */
 bool     hakios_sta_powered(void);
 /* the `index`th access point the last scan heard: true, or false when there are not that many */

@@ -94,6 +94,12 @@ struct lx_radio {
 	unsigned width;				/* MHz of the channel joined: 20, or with wifi_wide=1 what the access point offers */
 	struct lx_target target;		/* ... and the best of it */
 
+	/* the access point (the hotspot), while the radio is one instead of a station */
+	bool ap_wanted;				/* the interface to bring up is an access point's */
+	volatile bool ap_on;			/* it is up and beaconing */
+	struct hakios_sta_ap ap;		/* its name, passphrase and channel */
+	unsigned ap_probes, ap_auths, ap_assocs, ap_others;	/* what stations around have asked of it */
+
 	/* the network joined */
 	struct ieee80211_sta *sta;		/* its access point, as the driver knows it */
 	void *sta_memory;
@@ -134,6 +140,7 @@ struct lx_radio {
 };
 
 static struct lx_radio *the_radio;
+static void ap_management(struct lx_radio *radio, const uint8_t *f, unsigned length);
 static const uint8_t no_network[ETH_ALEN];	/* the address of the network an interface has joined, while it has joined none */
 
 static struct lx_radio *
@@ -1171,6 +1178,11 @@ linuxkpi_ieee80211_rx(struct ieee80211_hw *hw, struct sk_buff *skb, struct ieee8
 	const struct ieee80211_rx_status *status = IEEE80211_SKB_RXCB(skb);
 
 	radio->frames++;
+	if (radio->ap_on && skb->len >= 24 && (skb->data[0] & 0x0c) == 0x00) {
+		ap_management(radio, skb->data, skb->len);
+		dev_kfree_skb_any(skb);
+		return;
+	}
 	if (status->flag & RX_FLAG_8023) {
 		ethernet_received(radio, skb);
 	} else if (skb->len >= 36 && (skb->data[0] == 0x80 || skb->data[0] == 0x50)) {	/* a beacon, an answer to a probe */
@@ -1208,11 +1220,12 @@ station_up(struct lx_radio *radio)
 		return (ENOMEM);
 	}
 	vif = (struct ieee80211_vif *)roundup2((uintptr_t)radio->vif_memory, 64);
-	vif->type = NL80211_IFTYPE_STATION;
+	vif->type = radio->ap_wanted ? NL80211_IFTYPE_AP : NL80211_IFTYPE_STATION;
 	memcpy(vif->addr, hw->wiphy->perm_addr, ETH_ALEN);
 	memcpy(vif->bss_conf.addr, hw->wiphy->perm_addr, ETH_ALEN);
 	vif->bss_conf.vif = vif;
-	vif->bss_conf.bssid = no_network;	/* (the driver compares every beacon's sender with it) */
+	/* (a station's: the driver compares every beacon's sender with it; an access point's is its own address) */
+	vif->bss_conf.bssid = radio->ap_wanted ? vif->addr : no_network;
 	vif->link_conf[0] = &vif->bss_conf;
 	/* the firmware is to take Ethernet frames and to give them, if the driver offers that (its frame mode) */
 	if (ieee80211_hw_check(hw, SUPPORTS_TX_ENCAP_OFFLOAD)) {
@@ -1228,7 +1241,8 @@ station_up(struct lx_radio *radio)
 	if (ret == 0) {
 		radio->started = true;
 		ret = radio->ops->add_interface(hw, vif);
-		printf("lx: an interface in station mode is added to it: %d (Ethernet frames %s the firmware, %s it)\n", ret,
+		printf("lx: an interface in %s mode is added to it: %d (Ethernet frames %s the firmware, %s it)\n",
+		    radio->ap_wanted ? "access point" : "station", ret,
 		    vif->offload_flags & IEEE80211_OFFLOAD_ENCAP_ENABLED ? "to" : "NOT to", vif->offload_flags &
 		    IEEE80211_OFFLOAD_DECAP_ENABLED ? "from" : "NOT from");
 		if (ret == 0) {
@@ -2205,6 +2219,251 @@ lx_station_send(const unsigned char *frame, unsigned long length)
 	return (ethernet_send(radio, frame, (unsigned)length) ? 0 : ENOBUFS);
 }
 
+
+/* ---- the access point (the hotspot) ------------------------------------------------------------------------ */
+
+/*
+ * The radio as an access point instead of a station, as mac80211's ieee80211_start_ap() brings one up: an interface of
+ * the kind, its channel (20 MHz, 2.4 GHz), its name, beacon interval and rates, the beacon and the answer to a probe as
+ * templates the firmware sends by itself (ath10k: WMI's beacon offload, ath10k_mac_setup_bcn_tmpl/_prb_tmpl), and the
+ * beacons switched on. WPA2 with a passphrase only (the RSN element says CCMP and PSK): never an open network. What
+ * stations around ask of it (probes, authentication, association) is counted and said; answering them is next.
+ */
+#define AP_BEACON_INTERVAL	100		/* TU */
+#define AP_DTIM_PERIOD		2
+
+static unsigned
+ap_channel_number(const struct lx_radio *radio)
+{
+	unsigned frequency = radio->ap.frequency != 0 ? radio->ap.frequency : 2437;
+
+	return (frequency >= 2412 && frequency <= 2472 ? (frequency - 2407) / 5 : 6);
+}
+
+/* A beacon (true) or an answer to a probe: the frame, for the driver's template. tim: where the TIM element begins. */
+static struct sk_buff *
+ap_frame(struct lx_radio *radio, bool beacon, uint16_t *tim, uint16_t *tim_length)
+{
+	static const uint8_t rates[] = { 1, 8, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24 };   /* 1 2 5.5 11 basic; 6 9 12 18 */
+	static const uint8_t more_rates[] = { 50, 4, 0x30, 0x48, 0x60, 0x6c };                     /* 24 36 48 54 */
+	static const uint8_t rsn[] = { 48, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 2,
+		                       0, 0 };     /* version 1; group CCMP; one pairwise, CCMP; one AKM, PSK; no capabilities */
+	struct ieee80211_vif *vif = radio->vif;
+	struct sk_buff *skb = dev_alloc_skb(256 + 128);
+	uint8_t *f, *p;
+
+	if (skb == NULL || vif == NULL) {
+		if (skb != NULL) {
+			dev_kfree_skb_any(skb);
+		}
+		return (NULL);
+	}
+	f = p = skb_put(skb, 256);
+	bzero(f, 256);
+	f[0] = beacon ? 0x80 : 0x50;
+	memset(f + 4, 0xff, ETH_ALEN);			/* (a probe's answer: the firmware puts the asker's address here) */
+	memcpy(f + 10, vif->addr, ETH_ALEN);
+	memcpy(f + 16, vif->addr, ETH_ALEN);
+	p = f + 24 + 8;					/* the timestamp is the firmware's */
+	*p++ = AP_BEACON_INTERVAL & 0xff;
+	*p++ = AP_BEACON_INTERVAL >> 8;
+	*p++ = 0x31;					/* an infrastructure network, protected, short preambles */
+	*p++ = 0x04;					/* short slots */
+	*p++ = 0;
+	*p++ = radio->ap.ssid_length;
+	memcpy(p, radio->ap.ssid, radio->ap.ssid_length);
+	p += radio->ap.ssid_length;
+	memcpy(p, rates, sizeof(rates));
+	p += sizeof(rates);
+	*p++ = 3;
+	*p++ = 1;
+	*p++ = (uint8_t)ap_channel_number(radio);
+	if (beacon) {
+		if (tim != NULL) {
+			*tim = (uint16_t)(p - f);
+		}
+		*p++ = 5;				/* TIM: DTIM count, period, bitmap control, the bitmap (nobody asleep) */
+		*p++ = 4;
+		*p++ = 0;
+		*p++ = AP_DTIM_PERIOD;
+		*p++ = 0;
+		*p++ = 0;
+		if (tim_length != NULL) {
+			*tim_length = 6;
+		}
+	}
+	*p++ = 42;					/* ERP: no protection asked */
+	*p++ = 1;
+	*p++ = 0;
+	memcpy(p, rsn, sizeof(rsn));
+	p += sizeof(rsn);
+	memcpy(p, more_rates, sizeof(more_rates));
+	p += sizeof(more_rates);
+	skb_trim(skb, (unsigned)(p - f));
+	return (skb);
+}
+
+struct sk_buff *
+linuxkpi_ieee80211_beacon_get_template(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ieee80211_mutable_offsets *offs,
+    uint32_t link_id)
+{
+	struct lx_radio *radio = radio_of(hw);
+	uint16_t tim = 0, tim_length = 0;
+	struct sk_buff *skb = radio->ap_wanted && vif == radio->vif ? ap_frame(radio, true, &tim, &tim_length) : NULL;
+
+	(void)link_id;
+	if (offs != NULL) {
+		bzero(offs, sizeof(*offs));
+		offs->tim_offset = tim;
+		(void)tim_length;               /* (LinuxKPI's offsets have no length of the TIM) */
+	}
+	printf("lx: the driver asks for the access point's beacon: %u bytes, the TIM at %u\n", skb != NULL ? skb->len : 0, tim);
+	return (skb);
+}
+
+struct sk_buff *
+linuxkpi_ieee80211_proberesp_get(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
+{
+	struct lx_radio *radio = radio_of(hw);
+	struct sk_buff *skb = radio->ap_wanted && vif == radio->vif ? ap_frame(radio, false, NULL, NULL) : NULL;
+
+	printf("lx: the driver asks for the access point's answer to a probe: %u bytes\n", skb != NULL ? skb->len : 0);
+	return (skb);
+}
+
+/* A management frame a station sends the access point: counted, and the first of each kind said (nothing answered yet). */
+static void
+ap_management(struct lx_radio *radio, const uint8_t *f, unsigned length)
+{
+	unsigned kind = f[0] & 0xf0, *count = kind == 0x40 ? &radio->ap_probes : kind == 0xb0 ? &radio->ap_auths :
+	    (kind == 0x00 || kind == 0x20) ? &radio->ap_assocs : &radio->ap_others;
+
+	if (kind == 0x80 || kind == 0x50) {
+		return;					/* (other networks' beacons and answers) */
+	}
+	if (kind == 0x40 && length >= 26 && f[24] == 0 && f[25] != 0 &&
+	    (f[25] != radio->ap.ssid_length || length < 26u + f[25] || memcmp(f + 26, radio->ap.ssid, f[25]) != 0)) {
+		return;					/* (a probe for another network by name) */
+	}
+	(*count)++;
+	if (*count <= 4 || (*count & (*count - 1)) == 0) {
+		lx_tell("lx: access point: %s from ..:%02x:%02x (%u so far, %u bytes)\n", kind == 0x40 ? "a probe" : kind == 0xb0 ?
+		    "AN AUTHENTICATION REQUEST" : kind == 0x00 ? "AN ASSOCIATION REQUEST" : kind == 0x20 ? "A REASSOCIATION REQUEST" :
+		    kind == 0xc0 ? "a deauthentication" : kind == 0xa0 ? "a disassociation" : "a management frame", f[14], f[15],
+		    *count, length);
+	}
+}
+
+static void
+ap_stop(struct lx_radio *radio)
+{
+	struct ieee80211_hw *hw = &radio->hw;
+	struct ieee80211_vif *vif = radio->vif;
+
+	if (vif != NULL && radio->ap_wanted) {
+		if (vif->bss_conf.enable_beacon) {
+			vif->bss_conf.enable_beacon = false;
+			bss_changed(radio, BSS_CHANGED_BEACON_ENABLED);
+		}
+		if (radio->channel != NULL) {
+			mutex_lock(&hw->wiphy->mtx);
+			radio->ops->unassign_vif_chanctx(hw, vif, &vif->bss_conf, radio->channel);
+			vif->bss_conf.chanctx_conf = NULL;
+			radio->ops->remove_chanctx(hw, radio->channel);
+			mutex_unlock(&hw->wiphy->mtx);
+			kfree(radio->channel);
+			radio->channel = NULL;
+		}
+		station_down(radio);
+	}
+	if (radio->ap_on) {
+		lx_tell("lx: THE ACCESS POINT IS DOWN (%u probes, %u authentication and %u association requests heard)\n",
+		    radio->ap_probes, radio->ap_auths, radio->ap_assocs);
+	}
+	radio->ap_on = false;
+	radio->ap_wanted = false;
+	explicit_bzero(&radio->ap, sizeof(radio->ap));
+}
+
+static int
+ap_start(struct lx_radio *radio, const struct hakios_sta_ap *what)
+{
+	struct ieee80211_hw *hw = &radio->hw;
+	struct linuxkpi_ieee80211_channel *channel;
+	struct ieee80211_vif *vif;
+	unsigned frequency = what->frequency != 0 ? what->frequency : 2437;
+	int ret;
+
+	if (what->ssid_length == 0 || what->ssid_length > 32 || what->passphrase_length < 8 || what->passphrase_length > 63) {
+		lx_tell("lx: access point: a name of %u bytes and a passphrase of %u: not started (a name, and 8 to 63 characters)\n",
+		    what->ssid_length, what->passphrase_length);
+		return (EINVAL);
+	}
+	channel = linuxkpi_ieee80211_get_channel(radio->wiphy, frequency);
+	if (channel == NULL || (channel->flags & IEEE80211_CHAN_DISABLED) || frequency > 2472) {
+		lx_tell("lx: access point: %u MHz is not a channel the radio may use here: not started\n", frequency);
+		return (EINVAL);
+	}
+	/* a station first leaves, and the radio comes up again as an access point */
+	if (radio->sta != NULL) {
+		station_leave(radio);
+	}
+	if (radio->ap_wanted || radio->vif != NULL) {
+		ap_stop(radio);
+		station_down(radio);
+	}
+	radio->ap = *what;
+	radio->ap.frequency = (uint16_t)frequency;
+	radio->ap_probes = radio->ap_auths = radio->ap_assocs = radio->ap_others = 0;
+	radio->ap_wanted = true;
+	if ((ret = station_up(radio)) != 0 || (vif = radio->vif) == NULL) {
+		lx_tell("lx: access point: no interface (%d)\n", ret);
+		ap_stop(radio);
+		return (ret != 0 ? ret : ENXIO);
+	}
+	/* its channel, 20 MHz */
+	radio->channel = kzalloc(sizeof(*radio->channel) + hw->chanctx_data_size + 64, GFP_KERNEL);
+	if (radio->channel == NULL) {
+		ap_stop(radio);
+		return (ENOMEM);
+	}
+	radio->channel->def.chan = channel;
+	radio->channel->def.width = NL80211_CHAN_WIDTH_20_NOHT;
+	radio->channel->def.center_freq1 = channel->center_freq;
+	radio->channel->min_def = radio->channel->def;
+	radio->channel->rx_chains_static = radio->channel->rx_chains_dynamic = 2;
+	radio->width = 20;
+	vif->bss_conf.chanreq.oper = radio->channel->def;
+	/* what the beacons say: the name, every 100 TU, a DTIM every second one, the four 802.11b rates basic */
+	memcpy(vif->cfg.ssid, radio->ap.ssid, radio->ap.ssid_length);
+	vif->cfg.ssid_len = radio->ap.ssid_length;
+	vif->bss_conf.beacon_int = AP_BEACON_INTERVAL;
+	vif->bss_conf.dtim_period = AP_DTIM_PERIOD;
+	vif->bss_conf.basic_rates = 0xf;
+	vif->bss_conf.use_short_slot = true;
+	vif->bss_conf.use_short_preamble = true;
+	vif->bss_conf.hidden_ssid = false;
+	mutex_lock(&hw->wiphy->mtx);
+	ret = radio->ops->add_chanctx(hw, radio->channel);
+	if (ret == 0) {
+		vif->bss_conf.chanctx_conf = radio->channel;
+		ret = radio->ops->assign_vif_chanctx(hw, vif, &vif->bss_conf, radio->channel);
+	}
+	mutex_unlock(&hw->wiphy->mtx);
+	lx_tell("lx: access point: the channel is taken, %u (%u MHz): %d\n", ap_channel_number(radio), frequency, ret);
+	if (ret != 0) {
+		ap_stop(radio);
+		return (-ret);
+	}
+	vif->bss_conf.enable_beacon = true;
+	bss_changed(radio, BSS_CHANGED_SSID | BSS_CHANGED_BEACON_INT | BSS_CHANGED_BASIC_RATES | BSS_CHANGED_ERP_SLOT |
+	    BSS_CHANGED_ERP_PREAMBLE | BSS_CHANGED_BEACON | BSS_CHANGED_BEACON_ENABLED);
+	radio->ap_on = true;
+	lx_tell("lx: THE ACCESS POINT IS UP: a network of %u bytes' name, WPA2 with a passphrase (%u characters), channel %u; "
+	    "beacons every %u TU\n", radio->ap.ssid_length, radio->ap.passphrase_length, ap_channel_number(radio), AP_BEACON_INTERVAL);
+	return (0);
+}
+
 /* ---- the station boundary: what the kernel asks through sys/hakios.sta.h --------------------------------- */
 
 static int
@@ -2216,7 +2475,11 @@ boundary_power(bool on)
 		return (ENXIO);
 	}
 	if (on) {
-		return (station_up(radio));
+		return (radio->ap_wanted ? 0 : station_up(radio));
+	}
+	if (radio->ap_wanted) {
+		ap_stop(radio);
+		return (0);
 	}
 	if (radio->sta != NULL) {
 		station_leave(radio);
@@ -2237,6 +2500,9 @@ boundary_scan(const struct hakios_sta_scan *what)
 
 	if (radio == NULL || !radio->registered) {
 		return (ENXIO);
+	}
+	if (radio->ap_wanted) {
+		return (EBUSY);				/* (the radio is an access point now) */
 	}
 	if ((error = station_up(radio)) != 0) {
 		return (error);
@@ -2317,6 +2583,9 @@ boundary_join(const struct hakios_sta_join *what)
 	if (radio == NULL || !radio->registered) {
 		return (ENXIO);
 	}
+	if (radio->ap_wanted) {
+		return (EBUSY);
+	}
 	radio->joining = true;
 	error = station_join(radio, what);
 	radio->last_error = error;
@@ -2387,6 +2656,21 @@ boundary_channels(struct hakios_sta_channel *channels, unsigned most)
 	return (count);
 }
 
+static int
+boundary_ap(const struct hakios_sta_ap *what)
+{
+	struct lx_radio *radio = the_radio;
+
+	if (radio == NULL || !radio->registered) {
+		return (ENXIO);
+	}
+	if (what == NULL) {
+		ap_stop(radio);
+		return (0);
+	}
+	return (ap_start(radio, what));
+}
+
 static struct hakios_sta_ops boundary = {
 	.power = boundary_power,
 	.scan = boundary_scan,
@@ -2395,6 +2679,7 @@ static struct hakios_sta_ops boundary = {
 	.leave = boundary_leave,
 	.state = boundary_state,
 	.channels = boundary_channels,
+	.ap = boundary_ap,
 };
 
 /*

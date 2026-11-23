@@ -532,6 +532,37 @@ index 95192dd62449..b00da803b5b4 100644
  	decmpfs_header *hdr = NULL;
  
  	/*
+diff --git a/bsd/kern/kern_descrip.c b/bsd/kern/kern_descrip.c
+index 13b08b5b624e..6f648fd0790a 100644
+--- a/bsd/kern/kern_descrip.c
++++ b/bsd/kern/kern_descrip.c
+@@ -4255,7 +4255,14 @@ dropboth:
+ 			if (VATTR_IS_SUPPORTED(&va, va_dataprotect_class)) {
+ 				*retval = va.va_dataprotect_class;
+ 			} else {
+-				error = ENOTSUP;
++				/*
++				 * HakiOS: the data volume here has no data protection, and an iPhone's always has, so nothing
++				 * in iOS is ready for ENOTSUP: StreamingZip's unzip service asks for the class of the folder it
++				 * unzips into and gives up on "Operation not supported" -- every MobileAsset download that is
++				 * a zip (the AirPods' card among them: r253, r255). A file on a volume without protection is
++				 * what class D says, "no protection"; that is the answer.
++				 */
++				*retval = 4;                    /* PROTECTION_CLASS_D (sys/content_protection.h) */
+ 			}
+ 		}
+ 
+@@ -4294,6 +4301,10 @@ dropboth:
+ 		VATTR_SET(&va, va_dataprotect_class, tmp);
+ 
+ 		error = VNOP_SETATTR(vp, &va, ctx);
++		/* HakiOS: on a volume without data protection (see F_GETPROTECTIONCLASS) every class is class D: done */
++		if (error == ENOTSUP) {
++			error = 0;
++		}
+ 
+ 		vnode_put(vp);
+ 		break;
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index 1d71c66629fb..a22095ccf5f0 100644
 --- a/bsd/kern/kern_exec.c

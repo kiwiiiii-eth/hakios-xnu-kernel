@@ -274,13 +274,23 @@ struct block {
 	const char *name;
 	uint32_t phys, size;
 	vm_offset_t base;
+	uint32_t mapped;        /* the phys that base maps: a block whose phys is changed (an SMMU context) is mapped again */
 };
 
 static void
 need(struct block *b)
 {
+	/*
+	 * The SMMU's context blocks are one struct whose phys is set to the context chosen: mapped once, a later choice
+	 * read the first one's registers under the new one's name (on a 6T: step 17 chose context 9, read
+	 * context 8's sctlr -- the camera's by then -- found it on, and the speaker and the microphone stayed off).
+	 */
+	if (b->base != 0 && b->mapped != b->phys) {
+		b->base = 0;    /* (the old mapping is a page of address space, left: it is not used again) */
+	}
 	if (b->base == 0) {
 		b->base = ml_io_map(b->phys, b->size);
+		b->mapped = b->phys;
 	}
 }
 
@@ -4123,18 +4133,22 @@ s5_space_on(void)
 			s5_space.old_s2cr = s2cr;
 		}
 	}
-	for (s5_space.context = 0; s5_space.context < contexts && used[s5_space.context]; s5_space.context++) {
-	}
-	if (s5_space.match == ~0u || s5_space.context >= contexts) {
-		printf("adsp845: %u: the SMMU has no match register or no context left\n", step);
-		return false;
-	}
-	s5_smmu_second.phys = s5_smmu.phys + page;
-	s5_smmu_context.phys = s5_smmu.phys + (pages + s5_space.context) * page;
-	s5_space.old_sctlr = get(&s5_smmu_context, "sctlr", SMMU_CB_SCTLR);
-	if (s5_space.old_sctlr & 1) {
-		printf("adsp845: %u: context %u is on with no stream through it: somebody's, left alone\n", step, s5_space.context);
-		return false;
+	for (;;) {
+		for (s5_space.context = 0; s5_space.context < contexts && used[s5_space.context]; s5_space.context++) {
+		}
+		if (s5_space.match == ~0u || s5_space.context >= contexts) {
+			printf("adsp845: %u: the SMMU has no match register or no context left\n", step);
+			return false;
+		}
+		s5_smmu_second.phys = s5_smmu.phys + page;
+		s5_smmu_context.phys = s5_smmu.phys + (pages + s5_space.context) * page;
+		s5_space.old_sctlr = get(&s5_smmu_context, "sctlr", SMMU_CB_SCTLR);
+		if (!(s5_space.old_sctlr & 1)) {
+			break;
+		}
+		printf("adsp845: %u: context %u is on with no stream through it: somebody's, left alone; the next free one\n", step,
+		    s5_space.context);
+		used[s5_space.context] = true;
 	}
 	if (s5_space.tables == 0 && kmem_alloc(kernel_map, &s5_space.tables, 3 * 4096, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
 	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
@@ -5293,18 +5307,22 @@ mic_space_on(void)
 	if (s5_space.on) {
 		used[s5_space.context] = true;
 	}
-	for (mic_space.context = 0; mic_space.context < contexts && used[mic_space.context]; mic_space.context++) {
-	}
-	if (mic_space.match == ~0u || mic_space.context >= contexts) {
-		printf("adsp845: %u: the SMMU has no match register or no context left for stream 0x1806\n", step);
-		return false;
-	}
-	mic_smmu_second.phys = s5_smmu.phys + page;
-	mic_smmu_context.phys = s5_smmu.phys + (pages + mic_space.context) * page;
-	mic_space.old_sctlr = get(&mic_smmu_context, "sctlr", SMMU_CB_SCTLR);
-	if (mic_space.old_sctlr & 1) {
-		printf("adsp845: %u: context %u is on with no stream through it: somebody's, left alone\n", step, mic_space.context);
-		return false;
+	for (;;) {
+		for (mic_space.context = 0; mic_space.context < contexts && used[mic_space.context]; mic_space.context++) {
+		}
+		if (mic_space.match == ~0u || mic_space.context >= contexts) {
+			printf("adsp845: %u: the SMMU has no match register or no context left for stream 0x1806\n", step);
+			return false;
+		}
+		mic_smmu_second.phys = s5_smmu.phys + page;
+		mic_smmu_context.phys = s5_smmu.phys + (pages + mic_space.context) * page;
+		mic_space.old_sctlr = get(&mic_smmu_context, "sctlr", SMMU_CB_SCTLR);
+		if (!(mic_space.old_sctlr & 1)) {
+			break;
+		}
+		printf("adsp845: %u: context %u is on with no stream through it: somebody's, left alone; the next free one\n", step,
+		    mic_space.context);
+		used[mic_space.context] = true;
 	}
 	if (mic_space.root == 0 &&
 	    kmem_alloc(kernel_map, &mic_space.root, 3 * 4096, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {

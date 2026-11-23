@@ -538,3 +538,185 @@ lx_wpa_message(struct lx_wpa *wpa, const unsigned char *message, unsigned length
 	answer(wpa, message, 2 | INFO_MIC | INFO_SECURE, NULL, NULL, 0, reply, reply_length);
 	return (LX_WPA_GROUP);
 }
+
+/* ---- the access point's side (the hotspot): AES encryption, the wrapping of a key, messages 1 and 3 ---------- */
+
+/* FIPS 197, 5.1: the cipher on one block. */
+static void
+aes_encrypt(const uint8_t round_keys[176], uint8_t s[16])
+{
+	for (unsigned i = 0; i < 16; i++) {
+		s[i] ^= round_keys[i];
+	}
+	for (unsigned round = 1; round <= 10; round++) {
+		uint8_t t[16];
+
+		for (unsigned c = 0; c < 4; c++) {		/* the bytes substituted, the rows shifted */
+			for (unsigned r = 0; r < 4; r++) {
+				t[4 * c + r] = sbox[s[4 * ((c + r) % 4) + r]];
+			}
+		}
+		if (round == 10) {
+			memcpy(s, t, 16);
+		} else {
+			for (unsigned c = 0; c < 4; c++) {	/* the columns mixed */
+				const uint8_t *a = t + 4 * c;
+
+				s[4 * c + 0] = times(a[0], 2) ^ times(a[1], 3) ^ a[2] ^ a[3];
+				s[4 * c + 1] = a[0] ^ times(a[1], 2) ^ times(a[2], 3) ^ a[3];
+				s[4 * c + 2] = a[0] ^ a[1] ^ times(a[2], 2) ^ times(a[3], 3);
+				s[4 * c + 3] = times(a[0], 3) ^ a[1] ^ a[2] ^ times(a[3], 2);
+			}
+		}
+		for (unsigned i = 0; i < 16; i++) {
+			s[i] ^= round_keys[16 * round + i];
+		}
+		memset(t, 0, sizeof(t));
+	}
+}
+
+/* RFC 3394, 2.2.1: `plain` (a multiple of 8 bytes, at least 16) wrapped into `wrapped`, 8 bytes longer. */
+static void
+aes_wrap(const uint8_t kek[16], const uint8_t *plain, unsigned length, uint8_t *wrapped)
+{
+	unsigned n = length / 8;
+	uint8_t round_keys[176], a[8], block[16];
+
+	aes_keys(kek, round_keys);
+	memset(a, 0xa6, 8);
+	memcpy(wrapped + 8, plain, length);
+	for (unsigned j = 0; j < 6; j++) {
+		for (unsigned i = 1; i <= n; i++) {
+			uint64_t t = (uint64_t)n * j + i;
+
+			memcpy(block, a, 8);
+			memcpy(block + 8, wrapped + 8 * i, 8);
+			aes_encrypt(round_keys, block);
+			memcpy(a, block, 8);
+			for (unsigned k = 0; k < 8; k++) {
+				a[7 - k] ^= (uint8_t)(t >> (8 * k));
+			}
+			memcpy(wrapped + 8 * i, block + 8, 8);
+		}
+	}
+	memcpy(wrapped, a, 8);
+	memset(round_keys, 0, sizeof(round_keys));
+	memset(block, 0, sizeof(block));
+}
+
+/* A message of ours, the access point's: our counter (one more each time), our bits, our nonce, key data, and the MIC once
+ * there are keys. */
+static unsigned
+ap_message(struct lx_wpa *wpa, unsigned info, const uint8_t *data, unsigned data_length, uint8_t *out)
+{
+	unsigned length = AT_DATA + data_length;
+
+	memset(out, 0, length);
+	out[0] = 2;					/* 802.1X-2004 */
+	out[1] = 3;					/* a key */
+	out[2] = (uint8_t)((length - 4) >> 8);
+	out[3] = (uint8_t)(length - 4);
+	out[AT_KIND] = 2;				/* RSN */
+	out[AT_INFO] = (uint8_t)(info >> 8);
+	out[AT_INFO + 1] = (uint8_t)info;
+	out[AT_INFO + 3] = 16;				/* the pairwise key's length: CCMP */
+	for (int i = 7; i >= 0 && ++wpa->replay[i] == 0; i--) {
+	}
+	memcpy(out + AT_REPLAY, wpa->replay, 8);
+	wpa->replay_known = 1;
+	memcpy(out + AT_NONCE, wpa->own_nonce, 32);
+	out[AT_DATA_LENGTH] = (uint8_t)(data_length >> 8);
+	out[AT_DATA_LENGTH + 1] = (uint8_t)data_length;
+	if (data_length != 0) {
+		memcpy(out + AT_DATA, data, data_length);
+	}
+	if (info & INFO_MIC) {
+		mic_of(wpa, out, length, out + AT_MIC);
+	}
+	return (length);
+}
+
+unsigned
+lx_wpa_ap_first(struct lx_wpa *wpa, unsigned char *out)
+{
+	wpa->have_keys = 0;
+	return (ap_message(wpa, 0x0002 | INFO_PAIRWISE | INFO_ACK, NULL, 0, out));
+}
+
+int
+lx_wpa_ap_message(struct lx_wpa *wpa, const unsigned char *message, unsigned length, unsigned char *reply,
+    unsigned *reply_length, const char **why)
+{
+	unsigned info, data_length;
+	uint8_t mic[16];
+
+	*reply_length = 0;
+	if (length < AT_DATA || message[1] != 3 || message[AT_KIND] != 2) {
+		return (LX_WPA_NOTHING);
+	}
+	info = (unsigned)message[AT_INFO] << 8 | message[AT_INFO + 1];
+	data_length = (unsigned)message[AT_DATA_LENGTH] << 8 | message[AT_DATA_LENGTH + 1];
+	if (AT_DATA + data_length > length) {
+		*why = "its key data is longer than the message";
+		return (LX_WPA_BAD);
+	}
+	if (!(info & INFO_MIC) || (info & INFO_ACK) || !(info & INFO_PAIRWISE) || !wpa->replay_known ||
+	    memcmp(message + AT_REPLAY, wpa->replay, 8) != 0) {
+		*why = "not the answer to our last message (its bits or its counter)";
+		return (LX_WPA_BAD);
+	}
+	if (!(info & INFO_SECURE)) {
+		/* message 2: the station's nonce; the keys; its MIC proves the passphrase */
+		uint8_t data[96];
+		unsigned at = 0;
+
+		memcpy(wpa->peer_nonce, message + AT_NONCE, 32);
+		derive(wpa);
+		mic_of(wpa, message, AT_DATA + data_length, mic);
+		if (memcmp(mic, message + AT_MIC, 16) != 0) {
+			wpa->have_keys = 0;
+			*why = "message 2's MIC is wrong: the station has another passphrase";
+			return (LX_WPA_BAD);
+		}
+		/* message 3: our RSN element and the group key, wrapped with the KEK */
+		memcpy(data, wpa->rsn, wpa->rsn_length);
+		at = wpa->rsn_length;
+		data[at++] = 0xdd;
+		data[at++] = 6 + 16;
+		data[at++] = 0x00;
+		data[at++] = 0x0f;
+		data[at++] = 0xac;
+		data[at++] = 1;				/* the group key */
+		data[at++] = (uint8_t)(wpa->group_index & 3);
+		data[at++] = 0;
+		memcpy(data + at, wpa->group, 16);
+		at += 16;
+		if (at % 8 != 0 || at < 16) {
+			data[at++] = 0xdd;			/* padding (IEEE 802.11-2020, 12.7.2 j) */
+			while (at % 8 != 0 || at < 16) {
+				data[at++] = 0;
+			}
+		}
+		{
+			uint8_t wrapped[104];
+
+			aes_wrap(wpa->kek, data, at, wrapped);
+			*reply_length = ap_message(wpa, 0x0002 | INFO_PAIRWISE | INFO_INSTALL | INFO_ACK | INFO_MIC | INFO_SECURE |
+			    INFO_ENCRYPTED, wrapped, at + 8, reply);
+			memset(wrapped, 0, sizeof(wrapped));
+		}
+		memset(data, 0, sizeof(data));
+		return (LX_WPA_ANSWER);
+	}
+	/* message 4: nothing but its MIC; then both keys are to be used */
+	if (!wpa->have_keys) {
+		*why = "message 4 before message 2";
+		return (LX_WPA_BAD);
+	}
+	mic_of(wpa, message, AT_DATA + data_length, mic);
+	if (memcmp(mic, message + AT_MIC, 16) != 0) {
+		*why = "message 4's MIC is wrong";
+		return (LX_WPA_BAD);
+	}
+	return (LX_WPA_KEYS);
+}

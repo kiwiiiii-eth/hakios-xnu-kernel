@@ -258,6 +258,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -fobjc-arc -framework Foundation -framework MobileCoreServices -o obj/lsplugins src/lsplugins.m &&
 			{ ${LDID:-ldid} -Ssrc/lsplugins.entitlements obj/lsplugins 2>/dev/null ||
 			  echo "build.sh: no ldid: lsplugins is unsigned, and lsd will refuse it"; }
+		# the hotspot on and off (src/hotspot.c, kern.hakios.hotspot*)
+		$DYN -o obj/hotspot src/hotspot.c
 		$DYN -fobjc-arc -framework Foundation -o obj/logdump src/logdump.m &&
 			{ ${LDID:-ldid} -Ssrc/logdump.entitlements obj/logdump 2>/dev/null ||
 			  echo "build.sh: no ldid: logdump is unsigned, and logd will not let it read"; }
@@ -417,6 +419,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/logdump ] && cp obj/logdump root/bin/
 	[ -f obj/lsplugins ] && cp obj/lsplugins root/bin/
 	[ -f obj/devname ] && cp obj/devname root/bin/
+	[ -f obj/hotspot ] && cp obj/hotspot root/bin/
 	[ -f obj/stacks ] && cp obj/stacks root/bin/
 	[ -f obj/varsaver ] && cp obj/varsaver root/bin/
 	[ -f obj/rtcclock ] && cp obj/rtcclock root/bin/
@@ -527,6 +530,13 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			printf 'f\t600\t0\t0\t/private/var/root/.ssh/%s\t/var/root/.ssh/%s\n' $k $k >> root/etc/var.skel
 		done
 	fi
+	# The hotspot's name and passphrase, when there are some: ssh/hotspot (two lines), never in the repository; src/hotspot.c
+	# reads them from /private/var/root/hakios-hotspot. SHARE=1 leaves them out, as the keys
+	if [ -z "$SHARE" ] && [ -f ../ssh/hotspot ]; then
+		mkdir -p root/var/root
+		cp ../ssh/hotspot root/var/root/hakios-hotspot
+		printf 'f\t600\t0\t0\t/private/var/root/hakios-hotspot\t/var/root/hakios-hotspot\n' >> root/etc/var.skel
+	fi
 	cp ${RC:-rc.launchd} root/etc/rc
 	cp ${RC_JOBS:-rc.jobs} root/etc/rc.jobs
 	# QUIET=1: launchd's own standard error goes nowhere (src/init.c). It says a few thousand
@@ -632,6 +642,7 @@ secrets=
 [ -f root/fw/network ] && secrets="$secrets fw/network (the name and passphrase of your Wi-Fi)"
 [ -f root/var/root/.ssh/ssh_host_ed25519_key ] &&
 	secrets="$secrets /var/root/.ssh/ssh_host_ed25519_key (a private key)"
+[ -f root/var/root/hakios-hotspot ] && secrets="$secrets /var/root/hakios-hotspot (the hotspot's passphrase)"
 if [ -n "$secrets" ]; then
 	echo "build.sh: this image carries:$secrets"
 	echo "build.sh: do not pass it on as it is; SHARE=1 builds the same image without them."

@@ -1,0 +1,11 @@
+# (2026-11-24) The hotspot, step 2 (r277): a minute after the start the radio becomes an access point (src/hotspot.c, the
+# name and passphrase from /private/var/root/hakios-hotspot, which build.sh takes from ssh/hotspot), for a phone or tablet
+# to join; the kernel's log has the authentication, the association and the handshake.
+/redwood/bin/quietboot &
+/var/jb/usr/bin/sleep 60
+/redwood/bin/hotspot on
+/var/jb/usr/bin/sleep 5
+/redwood/bin/hotspot status
+/var/jb/usr/bin/sleep 300
+/redwood/bin/hotspot status
+/var/jb/usr/bin/sleep 36000

@@ -99,6 +99,27 @@ struct lx_radio {
 	volatile bool ap_on;			/* it is up and beaconing */
 	struct hakios_sta_ap ap;		/* its name, passphrase and channel */
 	unsigned ap_probes, ap_auths, ap_assocs, ap_others;	/* what stations around have asked of it */
+	struct lx_client {
+		bool used;
+		uint8_t address[ETH_ALEN];
+		uint16_t aid;
+		int reached;			/* IEEE80211_STA_... */
+		void *sta_memory;
+		struct ieee80211_sta *sta;
+		struct lx_wpa wpa;		/* the handshake, the access point's side */
+		int step;			/* 0: none, 1: message 1 sent, 3: message 3 sent, 4: keys in use */
+		unsigned tries;
+		unsigned long long sent_at;
+		struct ieee80211_key_conf *pairwise_key;
+		unsigned received, sent;
+	} clients[8];
+	uint8_t ap_gtk[16];			/* the group key every station is given */
+	struct ieee80211_key_conf *ap_group_key;
+	struct work_struct ap_work;		/* what stations ask, dealt with where the driver may sleep */
+	struct delayed_work ap_tick;		/* a handshake message unanswered, sent again */
+	bool ap_works_ready;
+	struct { uint16_t length; uint8_t bytes[400]; } ap_queue[16];
+	unsigned ap_queue_head, ap_queue_count, ap_queue_lost;
 
 	/* the network joined */
 	struct ieee80211_sta *sta;		/* its access point, as the driver knows it */
@@ -1088,9 +1109,15 @@ handshake_message(struct lx_radio *radio, const uint8_t *frame, unsigned length)
 }
 
 /* An Ethernet frame the radio has received. */
+static void ap_ethernet_received(struct lx_radio *radio, struct sk_buff *skb);
+
 static void
 ethernet_received(struct lx_radio *radio, struct sk_buff *skb)
 {
+	if (radio->ap_on) {
+		ap_ethernet_received(radio, skb);
+		return;
+	}
 	if (skb->len >= 14 && skb->data[12] == 0x88 && skb->data[13] == 0x8e) {
 		handshake_message(radio, skb->data, skb->len);
 	} else if (radio->joined && skb->len >= 14) {
@@ -2331,26 +2358,495 @@ linuxkpi_ieee80211_proberesp_get(struct ieee80211_hw *hw, struct ieee80211_vif *
 	return (skb);
 }
 
-/* A management frame a station sends the access point: counted, and the first of each kind said (nothing answered yet). */
+/* A frame a station sends the access point (management, or the handshake's in Ethernet): kept for ap_run(), which may sleep. */
+static void
+ap_queue_frame(struct lx_radio *radio, const uint8_t *f, unsigned length, unsigned kind)
+{
+	lx_os_lock();
+	if (radio->ap_queue_count < 16 && length + 1 <= sizeof(radio->ap_queue[0].bytes)) {
+		unsigned at = (radio->ap_queue_head + radio->ap_queue_count) % 16;
+
+		radio->ap_queue[at].bytes[0] = (uint8_t)kind;		/* 0: management, 1: an EAPOL frame in Ethernet */
+		memcpy(radio->ap_queue[at].bytes + 1, f, length);
+		radio->ap_queue[at].length = (uint16_t)(length + 1);
+		radio->ap_queue_count++;
+	} else {
+		radio->ap_queue_lost++;
+	}
+	lx_os_unlock();
+	if (radio->ap_works_ready) {
+		queue_work(radio->work, &radio->ap_work);
+	}
+}
+
 static void
 ap_management(struct lx_radio *radio, const uint8_t *f, unsigned length)
 {
 	unsigned kind = f[0] & 0xf0, *count = kind == 0x40 ? &radio->ap_probes : kind == 0xb0 ? &radio->ap_auths :
 	    (kind == 0x00 || kind == 0x20) ? &radio->ap_assocs : &radio->ap_others;
 
-	if (kind == 0x80 || kind == 0x50) {
-		return;					/* (other networks' beacons and answers) */
+	if (kind == 0x80 || kind == 0x50 || kind == 0x40) {
+		if (kind == 0x40) {
+			(*count)++;			/* (a probe: the firmware answers it from the template) */
+		}
+		return;
 	}
-	if (kind == 0x40 && length >= 26 && f[24] == 0 && f[25] != 0 &&
-	    (f[25] != radio->ap.ssid_length || length < 26u + f[25] || memcmp(f + 26, radio->ap.ssid, f[25]) != 0)) {
-		return;					/* (a probe for another network by name) */
+	if (memcmp(f + 4, radio->vif->addr, ETH_ALEN) != 0) {
+		return;					/* (not to us) */
 	}
 	(*count)++;
-	if (*count <= 4 || (*count & (*count - 1)) == 0) {
-		lx_tell("lx: access point: %s from ..:%02x:%02x (%u so far, %u bytes)\n", kind == 0x40 ? "a probe" : kind == 0xb0 ?
-		    "AN AUTHENTICATION REQUEST" : kind == 0x00 ? "AN ASSOCIATION REQUEST" : kind == 0x20 ? "A REASSOCIATION REQUEST" :
-		    kind == 0xc0 ? "a deauthentication" : kind == 0xa0 ? "a disassociation" : "a management frame", f[14], f[15],
-		    *count, length);
+	ap_queue_frame(radio, f, length, 0);
+}
+
+/* ---- the stations of the access point ---- */
+
+static struct lx_client *
+ap_client(struct lx_radio *radio, const uint8_t *address, bool make)
+{
+	struct lx_client *free = NULL;
+
+	for (unsigned i = 0; i < 8; i++) {
+		struct lx_client *c = &radio->clients[i];
+
+		if (c->used && memcmp(c->address, address, ETH_ALEN) == 0) {
+			return (c);
+		}
+		if (!c->used && free == NULL) {
+			free = c;
+		}
+	}
+	if (!make || free == NULL) {
+		return (NULL);
+	}
+	bzero(free, sizeof(*free));
+	free->sta_memory = kzalloc(64 + sizeof(*free->sta) + radio->hw.sta_data_size, GFP_KERNEL);
+	if (free->sta_memory == NULL) {
+		return (NULL);
+	}
+	free->used = true;
+	memcpy(free->address, address, ETH_ALEN);
+	free->aid = (uint16_t)(free - radio->clients + 1);
+	free->sta = (struct ieee80211_sta *)roundup2((uintptr_t)free->sta_memory, 64);
+	memcpy(free->sta->addr, address, ETH_ALEN);
+	memcpy(free->sta->deflink.addr, address, ETH_ALEN);
+	free->sta->deflink.sta = free->sta;
+	free->sta->link[0] = &free->sta->deflink;
+	free->sta->aid = free->aid;
+	free->sta->deflink.rx_nss = 1;
+	free->sta->deflink.bandwidth = IEEE80211_STA_RX_BW_20;
+	free->reached = IEEE80211_STA_NOTEXIST;
+	return (free);
+}
+
+static int
+ap_client_state(struct lx_radio *radio, struct lx_client *c, enum ieee80211_sta_state to)
+{
+	int ret = 0;
+
+	mutex_lock(&radio->wiphy->mtx);
+	while (ret == 0 && c->reached != (int)to) {
+		int next = c->reached < (int)to ? c->reached + 1 : c->reached - 1;
+
+		ret = radio->ops->sta_state(&radio->hw, radio->vif, c->sta, c->reached, next);
+		if (ret == 0 || next < c->reached) {
+			c->reached = next;		/* (going down, on whatever the driver says) */
+		}
+	}
+	mutex_unlock(&radio->wiphy->mtx);
+	return (ret);
+}
+
+static void
+ap_client_gone(struct lx_radio *radio, struct lx_client *c, const char *why)
+{
+	if (!c->used) {
+		return;
+	}
+	if (c->pairwise_key != NULL) {
+		mutex_lock(&radio->wiphy->mtx);
+		radio->ops->set_key(&radio->hw, DISABLE_KEY, radio->vif, c->sta, c->pairwise_key);
+		mutex_unlock(&radio->wiphy->mtx);
+		explicit_bzero(c->pairwise_key->key, 16);
+		kfree(c->pairwise_key);
+	}
+	(void)ap_client_state(radio, c, IEEE80211_STA_NOTEXIST);
+	lx_tell("lx: access point: station ..:%02x:%02x (number %u) is gone: %s (%u frames from it, %u to it)\n", c->address[4],
+	    c->address[5], c->aid, why, c->received, c->sent);
+	kfree(c->sta_memory);
+	explicit_bzero(c, sizeof(*c));
+}
+
+/* A management frame to a station: the 24 bytes, to it, from us (the network's address is ours). */
+static struct sk_buff *
+ap_management_new(struct lx_radio *radio, const struct lx_client *c, unsigned kind, unsigned body, uint8_t **bytes)
+{
+	struct sk_buff *skb = frame_new(radio, 24 + body, bytes);
+
+	if (skb != NULL) {
+		bzero(*bytes, 24 + body);
+		(*bytes)[0] = (uint8_t)kind;
+		memcpy(*bytes + 4, c->address, ETH_ALEN);
+		memcpy(*bytes + 10, radio->vif->addr, ETH_ALEN);
+		memcpy(*bytes + 16, radio->vif->addr, ETH_ALEN);
+		*bytes += 24;
+	}
+	return (skb);
+}
+
+static void
+ap_send(struct lx_radio *radio, struct lx_client *c, struct sk_buff *skb)
+{
+	struct ieee80211_tx_control control = { .sta = c != NULL && c->reached >= IEEE80211_STA_NONE ? c->sta : NULL };
+
+	lx_tx_given++;
+	if (c != NULL) {
+		c->sent++;
+	}
+	radio->ops->tx(&radio->hw, &control, skb);
+}
+
+/* An Ethernet frame (from us, of the access point, or forwarded) to a station, as the 802.11 data frame from the network. */
+static bool
+ap_ethernet_to(struct lx_radio *radio, struct lx_client *c, const uint8_t *frame, unsigned length)
+{
+	struct sk_buff *skb;
+	uint8_t *bytes;
+	unsigned header = 24 + 8;
+
+	if (length < 14 || (skb = frame_new(radio, length - 14 + header, &bytes)) == NULL) {
+		return (false);
+	}
+	bzero(bytes, header);
+	bytes[0] = 0x08;				/* data */
+	bytes[1] = 0x02 | (c->pairwise_key != NULL ? 0x40 : 0);	/* from the distribution system; protected */
+	memcpy(bytes + 4, c->address, ETH_ALEN);		/* the station */
+	memcpy(bytes + 10, radio->vif->addr, ETH_ALEN);	/* the network */
+	memcpy(bytes + 16, frame + 6, ETH_ALEN);		/* who sent it */
+	bytes[header - 8] = 0xaa;
+	bytes[header - 7] = 0xaa;
+	bytes[header - 6] = 0x03;
+	bytes[header - 2] = frame[12];
+	bytes[header - 1] = frame[13];
+	memcpy(bytes + header, frame + 14, length - 14);
+	IEEE80211_SKB_CB(skb)->control.hw_key = c->pairwise_key;
+	ap_send(radio, c, skb);
+	return (true);
+}
+
+/* A message of the handshake to a station (message 1 or 3), in an Ethernet frame of type 0x888e. */
+static void
+ap_handshake_send(struct lx_radio *radio, struct lx_client *c, const uint8_t *message, unsigned length)
+{
+	uint8_t frame[14 + LX_WPA_REPLY_MOST];
+
+	memcpy(frame, c->address, ETH_ALEN);
+	memcpy(frame + 6, radio->vif->addr, ETH_ALEN);
+	frame[12] = 0x88;
+	frame[13] = 0x8e;
+	memcpy(frame + 14, message, length);
+	(void)ap_ethernet_to(radio, c, frame, 14 + length);
+	c->sent_at = lx_os_nanoseconds();
+}
+
+static void
+ap_handshake_begin(struct lx_radio *radio, struct lx_client *c)
+{
+	static const uint8_t rsn[22] = { 48, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 2,
+		                         0, 0 };
+	uint8_t message[LX_WPA_REPLY_MOST];
+	unsigned length;
+
+	bzero(&c->wpa, sizeof(c->wpa));
+	memcpy(c->wpa.pmk, radio->wpa.pmk, 32);
+	memcpy(c->wpa.own, radio->vif->addr, ETH_ALEN);
+	memcpy(c->wpa.peer, c->address, ETH_ALEN);
+	get_random_bytes(c->wpa.own_nonce, sizeof(c->wpa.own_nonce));
+	c->wpa.rsn = rsn;
+	c->wpa.rsn_length = sizeof(rsn);
+	memcpy(c->wpa.group, radio->ap_gtk, 16);
+	c->wpa.group_length = 16;
+	c->wpa.group_index = 1;
+	length = lx_wpa_ap_first(&c->wpa, message);
+	c->step = 1;
+	c->tries = 1;
+	ap_handshake_send(radio, c, message, length);
+}
+
+/* An authentication request (open system, step 1): the station made known to the driver, and accepted. */
+static void
+ap_authentication(struct lx_radio *radio, const uint8_t *f, unsigned length)
+{
+	struct lx_client *c;
+	struct sk_buff *skb;
+	uint8_t *body;
+	unsigned algorithm = f[24] | f[25] << 8, step = f[26] | f[27] << 8, status = 0;
+
+	if (length < 30 || step != 1) {
+		return;
+	}
+	if ((c = ap_client(radio, f + 10, false)) != NULL) {
+		ap_client_gone(radio, c, "it authenticates again");
+	}
+	c = algorithm == 0 ? ap_client(radio, f + 10, true) : NULL;
+	if (c == NULL) {
+		status = algorithm != 0 ? 13 : 17;	/* an algorithm we do not do; too many stations */
+	} else if (ap_client_state(radio, c, IEEE80211_STA_NONE) != 0) {
+		status = 1;
+	}
+	if ((skb = ap_management_new(radio, c != NULL ? c : &(struct lx_client){ .used = true }, 0xb0, 6, &body)) != NULL) {
+		if (c == NULL) {
+			memcpy(skb->data + 4, f + 10, ETH_ALEN);
+		}
+		body[0] = (uint8_t)algorithm;
+		body[1] = (uint8_t)(algorithm >> 8);
+		body[2] = 2;
+		body[4] = (uint8_t)status;
+		body[5] = (uint8_t)(status >> 8);
+		ap_send(radio, c, skb);
+	}
+	if (status == 0 && ap_client_state(radio, c, IEEE80211_STA_AUTH) != 0) {
+		status = 1;
+	}
+	lx_tell("lx: access point: AUTHENTICATION of ..:%02x:%02x: %s (status %u)\n", f[14], f[15], status == 0 ? "accepted" :
+	    "REFUSED", status);
+	if (status != 0 && c != NULL) {
+		ap_client_gone(radio, c, "its authentication failed");
+	}
+}
+
+/* An association request: what it can do, and that it wants WPA2 with CCMP and a passphrase; accepted, and the handshake begun. */
+static void
+ap_association(struct lx_radio *radio, const uint8_t *f, unsigned length, bool again)
+{
+	struct ieee80211_supported_band *band = radio->wiphy->bands[NL80211_BAND_2GHZ];
+	struct lx_client *c = ap_client(radio, f + 10, false);
+	unsigned at = 24 + 4 + (again ? 6 : 0), status = 0;
+	const uint8_t *rates = NULL, *more = NULL, *rsn = NULL;
+	uint32_t basic = 0, has = 0;
+	struct sk_buff *skb;
+	uint8_t *body;
+
+	if (c == NULL || c->reached < IEEE80211_STA_AUTH) {
+		lx_tell("lx: access point: an association request from ..:%02x:%02x, which has not authenticated\n", f[14], f[15]);
+		return;
+	}
+	for (; at + 2 <= length && at + 2 + f[at + 1] <= length; at += 2 + f[at + 1]) {
+		if (f[at] == 1) {
+			rates = f + at;
+		} else if (f[at] == 50) {
+			more = f + at;
+		} else if (f[at] == 48) {
+			rsn = f + at;
+		}
+	}
+	/* WPA2: a group cipher of CCMP, CCMP among the pairwise ones, PSK as the key management */
+	if (rsn == NULL || rsn[1] < 18 || memcmp(rsn + 4, "\x00\x0f\xac\x04", 4) != 0 || memcmp(rsn + 10, "\x00\x0f\xac\x04", 4) != 0 ||
+	    memcmp(rsn + 16, "\x00\x0f\xac\x02", 4) != 0) {
+		status = rsn == NULL ? 1 : 43;		/* unspecified; an AKM we do not do */
+	}
+	if (rates != NULL) {
+		has |= rates_of(band, rates + 2, rates[1], &basic);
+	}
+	if (more != NULL) {
+		has |= rates_of(band, more + 2, more[1], &basic);
+	}
+	if (has == 0 && status == 0) {
+		status = 18;				/* no rate in common */
+	}
+	if (status == 0) {
+		c->sta->deflink.supp_rates[NL80211_BAND_2GHZ] = has;
+		c->sta->wme = false;
+		c->sta->aid = c->aid;
+		if (ap_client_state(radio, c, IEEE80211_STA_ASSOC) != 0) {
+			status = 1;
+		}
+	}
+	if ((skb = ap_management_new(radio, c, again ? 0x30 : 0x10, 6 + 10 + 6, &body)) != NULL) {
+		static const uint8_t rate_elements[] = { 1, 8, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24, 50, 4, 0x30, 0x48,
+			                                 0x60, 0x6c };
+
+		body[0] = 0x31;
+		body[1] = 0x04;
+		body[2] = (uint8_t)status;
+		body[3] = (uint8_t)(status >> 8);
+		body[4] = (uint8_t)c->aid;
+		body[5] = (uint8_t)(0xc0 | c->aid >> 8);
+		memcpy(body + 6, rate_elements, sizeof(rate_elements));
+		ap_send(radio, c, skb);
+	}
+	lx_tell("lx: access point: ASSOCIATION of ..:%02x:%02x: %s (status %u); station number %u, rates %#x\n", f[14], f[15],
+	    status == 0 ? "ACCEPTED" : "REFUSED", status, c->aid, has);
+	if (status != 0) {
+		ap_client_gone(radio, c, "its association was refused");
+		return;
+	}
+	lx_pause_ms(20);			/* (the answer out first) */
+	ap_handshake_begin(radio, c);
+}
+
+/* A message of the handshake from a station (an Ethernet frame of type 0x888e). */
+static void
+ap_handshake_received(struct lx_radio *radio, const uint8_t *frame, unsigned length)
+{
+	struct lx_client *c = ap_client(radio, frame + 6, false);
+	uint8_t reply[LX_WPA_REPLY_MOST];
+	unsigned reply_length = 0;
+	const char *why = "";
+	int said;
+
+	if (c == NULL || c->step == 0 || length < 14) {
+		return;
+	}
+	said = lx_wpa_ap_message(&c->wpa, frame + 14, length - 14, reply, &reply_length, &why);
+	if (said == LX_WPA_ANSWER) {
+		c->step = 3;
+		c->tries = 1;
+		ap_handshake_send(radio, c, reply, reply_length);
+		lx_tell("lx: access point: the handshake with ..:%02x:%02x: message 2 is SIGNED WITH OUR KEY (the passphrase is right); "
+		    "message 3 sent\n", c->address[4], c->address[5]);
+	} else if (said == LX_WPA_KEYS && c->step == 3) {
+		int error = 0;
+
+		lx_pause_ms(10);
+		c->pairwise_key = kzalloc(sizeof(*c->pairwise_key) + 16, GFP_KERNEL);
+		if (c->pairwise_key != NULL) {
+			struct ieee80211_key_conf *k = c->pairwise_key;
+
+			k->cipher = WLAN_CIPHER_SUITE_CCMP;
+			k->keyidx = 0;
+			k->keylen = 16;
+			k->iv_len = 8;
+			k->icv_len = 8;
+			k->flags = IEEE80211_KEY_FLAG_PAIRWISE;
+			k->link_id = -1;
+			memcpy(k->key, c->wpa.pairwise, 16);
+			mutex_lock(&radio->wiphy->mtx);
+			error = radio->ops->set_key(&radio->hw, SET_KEY, radio->vif, c->sta, k);
+			mutex_unlock(&radio->wiphy->mtx);
+		}
+		if (radio->ap_group_key == NULL && error == 0) {
+			struct lx_radio *r = radio;
+			struct ieee80211_sta *keep = r->sta;
+
+			r->sta = NULL;
+			r->ap_group_key = key_set(r, r->ap_gtk, 1, false, &error);
+			r->sta = keep;
+		}
+		if (error == 0) {
+			error = ap_client_state(radio, c, IEEE80211_STA_AUTHORIZED);
+		}
+		c->step = 4;
+		explicit_bzero(&c->wpa, sizeof(c->wpa));
+		lx_tell("lx: access point: A STATION HAS JOINED: ..:%02x:%02x, station number %u: the keys are given to the driver, "
+		    "%s (%d)\n", c->address[4], c->address[5], c->aid, error == 0 ? "frames can pass" : "BUT THE DRIVER REFUSED THEM",
+		    error);
+	} else if (said == LX_WPA_BAD) {
+		lx_tell("lx: access point: the handshake with ..:%02x:%02x: %s\n", c->address[4], c->address[5], why);
+		if (strncmp(why, "message 2's MIC", 15) == 0) {          /* (a wrong passphrase) */
+			ap_client_gone(radio, c, "a wrong passphrase");
+		}
+	}
+}
+
+static void
+ap_run(struct work_struct *work)
+{
+	struct lx_radio *radio = __containerof(work, struct lx_radio, ap_work);
+	static uint8_t f[400];					/* (one work at a time) */
+
+	for (;;) {
+		unsigned length;
+
+		lx_os_lock();
+		if (radio->ap_queue_count == 0) {
+			lx_os_unlock();
+			break;
+		}
+		length = radio->ap_queue[radio->ap_queue_head].length;
+		memcpy(f, radio->ap_queue[radio->ap_queue_head].bytes, length);
+		radio->ap_queue_head = (radio->ap_queue_head + 1) % 16;
+		radio->ap_queue_count--;
+		lx_os_unlock();
+		if (!radio->ap_on || length < 2) {
+			continue;
+		}
+		if (f[0] == 1) {
+			ap_handshake_received(radio, f + 1, length - 1);
+			continue;
+		}
+		switch (f[1] & 0xf0) {
+		case 0xb0:
+			ap_authentication(radio, f + 1, length - 1);
+			break;
+		case 0x00:
+		case 0x20:
+			ap_association(radio, f + 1, length - 1, (f[1] & 0xf0) == 0x20);
+			break;
+		case 0xc0:
+		case 0xa0: {
+			struct lx_client *c = ap_client(radio, f + 1 + 10, false);
+
+			if (c != NULL) {
+				ap_client_gone(radio, c, (f[1] & 0xf0) == 0xc0 ? "it deauthenticated" : "it disassociated");
+			}
+			break;
+		}
+		default:
+			break;
+		}
+	}
+}
+
+/* Every second: a handshake message unanswered for a second sent again, three times; then the station is let go. */
+static void
+ap_tick_run(struct work_struct *work)
+{
+	struct lx_radio *radio = __containerof(work, struct lx_radio, ap_tick.work);
+
+	if (!radio->ap_on) {
+		return;
+	}
+	for (unsigned i = 0; i < 8; i++) {
+		struct lx_client *c = &radio->clients[i];
+
+		if (!c->used || (c->step != 1 && c->step != 3) || lx_os_nanoseconds() - c->sent_at < 1000000000ull) {
+			continue;
+		}
+		if (c->tries >= 4) {
+			ap_client_gone(radio, c, c->step == 1 ? "no answer to message 1" : "no answer to message 3");
+			continue;
+		}
+		c->tries++;
+		if (c->step == 1) {
+			uint8_t message[LX_WPA_REPLY_MOST];
+			unsigned length = lx_wpa_ap_first(&c->wpa, message);	/* (the same nonce, the next counter) */
+
+			ap_handshake_send(radio, c, message, length);
+		}
+		/* (message 3 again would need its reply kept: a station that lost it starts again with a new message 2 anyway) */
+	}
+	queue_delayed_work(radio->work, &radio->ap_tick, msecs_to_jiffies(1000));
+}
+
+/* An Ethernet frame from a station (the driver's 802.11 data frame made into one): the handshake's, or traffic. */
+static void
+ap_ethernet_received(struct lx_radio *radio, struct sk_buff *skb)
+{
+	struct lx_client *c;
+
+	if (skb->len < 14) {
+		return;
+	}
+	if (skb->data[12] == 0x88 && skb->data[13] == 0x8e) {
+		ap_queue_frame(radio, skb->data, skb->len, 1);
+		return;
+	}
+	if ((c = ap_client(radio, skb->data + 6, false)) != NULL && c->step == 4) {
+		c->received++;
+		if (c->received <= 4 || (c->received & (c->received - 1)) == 0) {
+			lx_tell("lx: access point: %u frames from station number %u so far (type %02x%02x)\n", c->received, c->aid,
+			    skb->data[12], skb->data[13]);
+		}
 	}
 }
 
@@ -2360,6 +2856,23 @@ ap_stop(struct lx_radio *radio)
 	struct ieee80211_hw *hw = &radio->hw;
 	struct ieee80211_vif *vif = radio->vif;
 
+	if (radio->ap_works_ready) {
+		radio->ap_on = false;
+		cancel_delayed_work_sync(&radio->ap_tick);
+		cancel_work_sync(&radio->ap_work);
+	}
+	for (unsigned i = 0; vif != NULL && i < 8; i++) {
+		ap_client_gone(radio, &radio->clients[i], "the access point stops");
+	}
+	if (radio->ap_group_key != NULL) {
+		struct ieee80211_sta *keep = radio->sta;
+
+		radio->sta = NULL;
+		key_drop(radio, &radio->ap_group_key, false);
+		radio->sta = keep;
+	}
+	explicit_bzero(radio->ap_gtk, sizeof(radio->ap_gtk));
+	explicit_bzero(radio->wpa.pmk, sizeof(radio->wpa.pmk));
 	if (vif != NULL && radio->ap_wanted) {
 		if (vif->bss_conf.enable_beacon) {
 			vif->bss_conf.enable_beacon = false;
@@ -2414,6 +2927,20 @@ ap_start(struct lx_radio *radio, const struct hakios_sta_ap *what)
 	}
 	radio->ap = *what;
 	radio->ap.frequency = (uint16_t)frequency;
+	{
+		unsigned long long began = lx_os_nanoseconds();
+
+		lx_wpa_pmk(radio->ap.passphrase, radio->ap.passphrase_length, radio->ap.ssid, radio->ap.ssid_length, radio->wpa.pmk);
+		get_random_bytes(radio->ap_gtk, sizeof(radio->ap_gtk));
+		printf("lx: access point: the key of the name and the passphrase is there: %llu ms\n",
+		    (lx_os_nanoseconds() - began) / 1000000ull);
+	}
+	if (!radio->ap_works_ready) {
+		INIT_WORK(&radio->ap_work, ap_run);
+		INIT_DELAYED_WORK(&radio->ap_tick, ap_tick_run);
+		radio->ap_works_ready = true;
+	}
+	radio->ap_queue_head = radio->ap_queue_count = radio->ap_queue_lost = 0;
 	radio->ap_probes = radio->ap_auths = radio->ap_assocs = radio->ap_others = 0;
 	radio->ap_wanted = true;
 	if ((ret = station_up(radio)) != 0 || (vif = radio->vif) == NULL) {
@@ -2459,6 +2986,7 @@ ap_start(struct lx_radio *radio, const struct hakios_sta_ap *what)
 	bss_changed(radio, BSS_CHANGED_SSID | BSS_CHANGED_BEACON_INT | BSS_CHANGED_BASIC_RATES | BSS_CHANGED_ERP_SLOT |
 	    BSS_CHANGED_ERP_PREAMBLE | BSS_CHANGED_BEACON | BSS_CHANGED_BEACON_ENABLED);
 	radio->ap_on = true;
+	queue_delayed_work(radio->work, &radio->ap_tick, msecs_to_jiffies(1000));
 	lx_tell("lx: THE ACCESS POINT IS UP: a network of %u bytes' name, WPA2 with a passphrase (%u characters), channel %u; "
 	    "beacons every %u TU\n", radio->ap.ssid_length, radio->ap.passphrase_length, ap_channel_number(radio), AP_BEACON_INTERVAL);
 	return (0);

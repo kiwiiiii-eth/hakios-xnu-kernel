@@ -22,7 +22,7 @@
  *           address with 0xfc14. The files are the phone's own, from its partition "bluetooth" (IMAGE/CRBTFW21.TLV and
  *           IMAGE/CRNV21.BIN), put by BT=1 userland/build.sh into /fw of the system image from ../fw-bt/ (lower case), read once the root is mounted.
  *   NVM     tag 17 (HCI transport): its in-band sleep bit (0x80 of the first byte) cleared and its third byte, the UART
- *           speed, set to this driver's (0, 115200); tag 27 (deep sleep): bit 0 cleared. Linux sets both: it has
+ *           speed, set to this driver's (its index: 17 for 3200000, 0 for 115200); tag 27 (deep sleep): bit 0 cleared. Linux sets both: it has
  *           Qualcomm's in-band sleep protocol (bytes 0xfc 0xfd 0xfe between packets); this driver has not.
  *
  * Levels (bt=N), each said in the log before it is made:
@@ -33,7 +33,8 @@
  *      and the bridge to bluetoothd (hakios.bthci.c); it stays on
  *
  * Boot-args: bt=N; bt_after=S (the start, this many seconds after boot: 30); bt_mac=aa:bb:cc:dd:ee:ff (the address;
- * else the Wi-Fi's, wifi_mac, plus one in its last byte; else the NVM's)
+ * else the Wi-Fi's, wifi_mac, plus one in its last byte; else the NVM's); bt_baud=N (the UART's speed once the chip is on:
+ * 3200000, 3000000 or 115200; see uart_go_fast())
  *
  * Status: compiled only (11-13). Not run on the phone.
  */
@@ -109,6 +110,12 @@ static vm_offset_t gcc_pll, gcc_qup, gcc_vote;   /* three pages of the GCC, not 
 #define S6_CLOCK_HZ             7372800u
 #define S6_M                    384u
 #define S6_N                    15625u
+/* the fast speeds (bt_baud=N): the engine's clock, M/N of GPLL0's even 300 MHz, and the chip's index for the speed */
+static const struct { uint32_t baud, hz, m, n; uint8_t index; } fast_speeds[] = {
+	{ 3200000, 102400000, 128, 375, 17 },
+	{ 3000000,  96000000,   8,  25, 14 },
+};
+static uint32_t s6_hz = S6_CLOCK_HZ;
 
 static bool
 clocks_running(void)
@@ -125,6 +132,24 @@ say_clocks(const char *when)
 	    rd(GCC_QUP0_S6_M), rd(GCC_QUP0_S6_N), rd(GCC_QUP0_S6_D), clocks_running() ? "RUNNING" : "off");
 }
 
+/* engine 6's clock at GPLL0 even x m/n (hz) */
+static void
+s6_clock(uint32_t m, uint32_t n, uint32_t hz)
+{
+	uint32_t cfg;
+
+	wr(GCC_QUP0_S6_M, m);
+	wr(GCC_QUP0_S6_N, ~(n - m) & 0xffff);
+	wr(GCC_QUP0_S6_D, ~n & 0xffff);
+	cfg = rd(GCC_QUP0_S6_CFG);
+	wr(GCC_QUP0_S6_CFG, (cfg & ~(0x371fu | (1u << 20))) | 1u /* divided by 1 */ | 6u << 8 /* GPLL0 even */ | 2u << 12 /* M/N */);
+	wr(GCC_QUP0_S6_CMD, rd(GCC_QUP0_S6_CMD) | 3);
+	for (int i = 0; i < 1000 && (rd(GCC_QUP0_S6_CMD) & 1); i++) {
+		sleep_us(10);
+	}
+	s6_hz = hz;
+}
+
 static bool
 clocks_on(void)
 {
@@ -133,6 +158,7 @@ clocks_on(void)
 	say("clocks: the votes for QUP wrapper 0 and its engine 6, then engine 6 at %u Hz (GPLL0 even x %u/%u)\n", S6_CLOCK_HZ, S6_M, S6_N);
 	wr(GCC_VOTE, rd(GCC_VOTE) | VOTES);
 	sleep_us(50);
+	s6_hz = S6_CLOCK_HZ;
 	wr(GCC_QUP0_S6_M, S6_M);
 	wr(GCC_QUP0_S6_N, ~(S6_N - S6_M) & 0xffff);
 	wr(GCC_QUP0_S6_D, ~S6_N & 0xffff);
@@ -263,10 +289,14 @@ say_engine(const char *when)
 static bool
 uart_set_baud(uint32_t baud)
 {
-	uint32_t div = S6_CLOCK_HZ / (baud * OVERSAMPLING);
+	uint32_t div = s6_hz / (baud * OVERSAMPLING);
 
-	if (div == 0 || div > 0xfff || div * baud * OVERSAMPLING != S6_CLOCK_HZ) {
-		say("uart: %u baud cannot be made of %u Hz\n", baud, S6_CLOCK_HZ);
+	if (baud <= 115200 && s6_hz != S6_CLOCK_HZ) {
+		s6_clock(S6_M, S6_N, S6_CLOCK_HZ);      /* (the slow speeds, the chip's 2400-baud pulses among them, are made of it) */
+		div = s6_hz / (baud * OVERSAMPLING);
+	}
+	if (div == 0 || div > 0xfff || div * baud * OVERSAMPLING != s6_hz) {
+		say("uart: %u baud cannot be made of %u Hz\n", baud, s6_hz);
 		return false;
 	}
 	wr(se + SE_GENI_CLK_SEL, 0);
@@ -645,6 +675,66 @@ chip_on(void)
 	return chipver.soc != 0 && chipver.rom != 0;
 }
 
+/*
+ * The UART to a fast speed (bt_baud=N: 3200000 by default, the max-speed Linux's sdm845 trees give the WCN3990; 3000000;
+ * 115200 keeps it slow). At 115200 the link carries some 90 kbit/s, and an AirPods' AAC stream is 256 (r257: the clicks
+ * crackled and broke up). The chip is told with Qualcomm's vendor command 0xfc48 (the speed's index) at the old speed,
+ * the RFR line held "not ready" so that it sends nothing before engine 6 is at the new one; then the engine's clock and
+ * divider; then the version asked again at the new speed. When it does not answer, the caller switches the chip off and
+ * on again, at 115200.
+ */
+#define UART_MANUAL_RFR_EN      (1u << 31)
+#define UART_RFR_NOT_READY      (1u << 1)
+static uint32_t want_baud = 3200000;
+static uint8_t speed_index;                     /* the speed as the NVM is to say it (0: 115200) */
+
+static bool
+uart_go_fast(void)
+{
+	static const uint8_t ask_version[1] = { 0x19 };
+	unsigned which;
+	int n;
+
+	for (which = 0; which < sizeof(fast_speeds) / sizeof(fast_speeds[0]); which++) {
+		if (fast_speeds[which].baud == want_baud) {
+			break;
+		}
+	}
+	if (which == sizeof(fast_speeds) / sizeof(fast_speeds[0])) {
+		say("uart: bt_baud=%u is not a speed made here (3200000, 3000000): 115200\n", want_baud);
+		return false;
+	}
+	say("uart: to %u baud: the chip told (0xfc48, index %u), engine 6 at %u Hz (GPLL0 even x %u/%u)\n", want_baud,
+	    fast_speeds[which].index, fast_speeds[which].hz, fast_speeds[which].m, fast_speeds[which].n);
+	wr(se + SE_UART_MANUAL_RFR, UART_MANUAL_RFR_EN | UART_RFR_NOT_READY);
+	if (command(0xfc48, &fast_speeds[which].index, 1) != 0) {
+		wr(se + SE_UART_MANUAL_RFR, 0);
+		say("uart: the speed's command could not be sent\n");
+		return false;
+	}
+	sleep_us(10000);                                /* (Linux gives a WCN399x up to 10 ms) */
+	uart_stop_reading();
+	rx_head = rx_count = 0;
+	s6_clock(fast_speeds[which].m, fast_speeds[which].n, fast_speeds[which].hz);
+	if (!uart_set_baud(fast_speeds[which].baud)) {
+		return false;
+	}
+	uart_start_reading();
+	wr(se + SE_UART_MANUAL_RFR, 0);
+	n = bt_receive(packet, sizeof(packet), 200);    /* the chip's vendor event for the change (Linux drops it) */
+	if (n > 0) {
+		say_packet("uart: after the change", packet, (unsigned)n);
+	}
+	if (command(0xfc00, ask_version, 1) != 0 || (n = wait_event(true, 0x02, 0, 1000)) < 5 + 12) {
+		say("uart: no version at %u baud (%d bytes; %u waiting, %u skipped, %u lost)\n", want_baud, n, rx_count, rx_junk,
+		    rx_overflow);
+		return false;
+	}
+	say("uart: AT %u BAUD: the chip answers (the version again, %d bytes)\n", want_baud, n);
+	speed_index = fast_speeds[which].index;
+	return true;
+}
+
 /* one of Qualcomm's TLV files to the chip, in pieces of at most 243 bytes */
 static bool
 download(const char *what, const uint8_t *data, unsigned size, uint8_t mode)
@@ -854,7 +944,7 @@ chip_setup(uint8_t bt_address[6], bool *have_address)
 	if ((nvm = firmware(name, &nvm_size)) == NULL) {
 		return false;
 	}
-	ok = nvm_edit(nvm, (unsigned)nvm_size, 0 /* 115200 */) && download(name, nvm, (unsigned)nvm_size, 0);
+	ok = nvm_edit(nvm, (unsigned)nvm_size, speed_index) && download(name, nvm, (unsigned)nvm_size, 0);
 	kfree_data(nvm, (vm_size_t)nvm_size);
 	if (!ok) {
 		return false;
@@ -937,6 +1027,15 @@ bt_thread(__unused void *arg, __unused wait_result_t w)
 		chip_off();
 		goto out;
 	}
+	if (want_baud > 115200 && !uart_go_fast()) {
+		say("uart: the chip off and on again, to stay at 115200\n");
+		chip_off();
+		speed_index = 0;
+		if (!chip_on()) {
+			chip_off();
+			goto out;
+		}
+	}
 	if (!chip_setup(bt_address, &have_address)) {
 		chip_off();
 		goto out;
@@ -977,6 +1076,9 @@ bt3990_init(void)
 	}
 	if (PE_parse_boot_argn("bt_after", &value, sizeof(value)) && value <= 3600) {
 		after_seconds = value;
+	}
+	if (PE_parse_boot_argn("bt_baud", &value, sizeof(value))) {
+		want_baud = value;
 	}
 	start_call = thread_call_allocate(start, NULL);
 	clock_interval_to_deadline(after_seconds, NSEC_PER_SEC, &deadline);

@@ -302,6 +302,371 @@ measurePanel(__unused void * arg, __unused wait_result_t wr)
 	    "(frames are made at %u a second: fb_hz)\n", (on & 1) ? "on" : "OFF", second - first, refreshHz());
 }
 
+/*
+ * Boot-arg mdp_probe=1 (SDM845: the OnePlus 6T): how the boot loader left the display controller, read once a minute after
+ * the driver starts, in a thread of its own; reads only, nothing written. This driver only writes into the memory the
+ * controller scans; to let the controller scale and flip instead (as on the same SoC Bergamota's Poco F1 does: a VIG
+ * pipe's QSEED3 scaler, page flipping in the continuous splash region), what is there has to be known first: which CTL
+ * and layer mixer are in use, which pipe scans which address at what size and format, whether that pipe has a scaler,
+ * whether the panel is driven in video mode (INTF_1's timing engine) or command mode (a ping-pong block's auto-refresh),
+ * and whether the apps SMMU translates the display's streams (0x880, 0xc80) or lets them through. The addresses are
+ * Linux's sdm845 DPU catalogue's (mdp at 0x0ae01000; ctl +0x1000, sspp VIG0 +0x4000 and DMA0 +0x24000 every 0x2000,
+ * lm +0x44000, intf +0x6a000, pingpong +0x70000), only numbers.
+ */
+static TUNABLE(uint32_t, gMdpProbe, "mdp_probe", 0);
+extern "C" unsigned long long ml_phys_read_double_64(uint64_t paddr);
+
+static vm_offset_t
+mdpMap(uint64_t physical, uint32_t size)
+{
+	vm_offset_t va = ml_io_map((vm_offset_t) (physical & ~0x3fffULL), (size + (physical & 0x3fffULL) + 0x3fffULL) & ~0x3fffULL);
+
+	return va != 0 ? va + (vm_offset_t) (physical & 0x3fffULL) : 0;
+}
+
+#define MDPR(base, off) (*(volatile uint32_t *)((base) + (off)))
+
+static void
+mdpProbe(__unused void * arg, __unused wait_result_t wr)
+{
+	vm_offset_t low, dma, lm, intf, pp, smmu;
+	char version[128] = "";
+
+	IOSleep(60000);
+	if (!PE_parse_boot_argn("hakios_kver", version, sizeof(version)) || strnstr(version, "-sdm845-", sizeof(version)) == NULL) {
+		printf("MiniIOMobileFramebuffer: mdp_probe: not an SDM845 kernel: nothing read\n");
+		return;
+	}
+	low = mdpMap(0x0ae00000ULL, 0xc000);            /* MDSS, MDP top, CTL0..4, VIG0..3 */
+	dma = mdpMap(0x0ae24000ULL, 0x8000);            /* DMA0..3 */
+	lm = mdpMap(0x0ae44000ULL, 0x4000);             /* LM0..LM3 at 0x45000.. */
+	intf = mdpMap(0x0ae68000ULL, 0x8000);           /* INTF0..2 at 0x0ae6b000, every 0x800 */
+	pp = mdpMap(0x0ae70000ULL, 0x4000);             /* PINGPONG0..3 at 0x71000.. */
+	smmu = mdpMap(0x15000000ULL, 0x4000);           /* the apps SMMU's global registers */
+	if (low == 0 || dma == 0 || lm == 0 || intf == 0 || pp == 0) {
+		printf("MiniIOMobileFramebuffer: mdp_probe: could not map the display controller\n");
+		return;
+	}
+	printf("mdp_probe: MDSS version %#x, MDP top version %#x, DISP_INTF_SEL %#x, SPLIT %#x\n", MDPR(low, 0x0),
+	    MDPR(low, 0x1000), MDPR(low, 0x1004), MDPR(low, 0x12f4));
+	for (int c = 0; c < 5; c++) {
+		vm_offset_t ctl = low + 0x2000 + 0x200 * c;
+
+		printf("mdp_probe: CTL%d layer LM0..LM3 %#x %#x %#x %#x, layer ext %#x %#x, top %#x, flush %#x, start %#x\n", c,
+		    MDPR(ctl, 0x00), MDPR(ctl, 0x04), MDPR(ctl, 0x08), MDPR(ctl, 0x0c), MDPR(ctl, 0x40), MDPR(ctl, 0x44),
+		    MDPR(ctl, 0x14), MDPR(ctl, 0x18), MDPR(ctl, 0x1c));
+	}
+	for (int k = 0; k < 8; k++) {
+		vm_offset_t sspp = k < 4 ? low + 0x5000 + 0x2000 * k : dma + 0x1000 + 0x2000 * (k - 4);
+
+		printf("mdp_probe: %s%d src size %#x img %#x xy %#x, out size %#x xy %#x, addr %#x %#x, stride %#x %#x, format %#x, "
+		    "unpack %#x, op mode %#x, fetch %#x%s", k < 4 ? "VIG" : "DMA", k & 3, MDPR(sspp, 0x00), MDPR(sspp, 0x04),
+		    MDPR(sspp, 0x08), MDPR(sspp, 0x0c), MDPR(sspp, 0x10), MDPR(sspp, 0x14), MDPR(sspp, 0x18), MDPR(sspp, 0x24),
+		    MDPR(sspp, 0x28), MDPR(sspp, 0x30), MDPR(sspp, 0x34), MDPR(sspp, 0x38), MDPR(sspp, 0x6c), k < 4 ? "" : "\n");
+		if (k < 4) {
+			printf(", qseed3 version %#x op mode %#x, steps %#x %#x\n", MDPR(sspp, 0xa00), MDPR(sspp, 0xa04),
+			    MDPR(sspp, 0xa10), MDPR(sspp, 0xa14));
+		}
+	}
+	for (int m = 0; m < 4; m++) {
+		vm_offset_t mixer = lm + 0x1000 * (m + 1);        /* LM0 at 0x0ae45000 */
+
+		if (m >= 3) {
+			break;                          /* (LM0..LM2 in the mapped window) */
+		}
+		printf("mdp_probe: LM%d op mode %#x, out size %#x, border %#x %#x, stage0 op %#x\n", m, MDPR(mixer, 0x00),
+		    MDPR(mixer, 0x04), MDPR(mixer, 0x08), MDPR(mixer, 0x10), MDPR(mixer, 0x20));
+	}
+	for (int i = 0; i < 3; i++) {
+		vm_offset_t in = intf + 0x3000 + 0x800 * i;     /* INTF0 at 0x0ae6b000 */
+		uint32_t f1, f2;
+
+		f1 = MDPR(in, 0x0ac);
+		IOSleep(200);
+		f2 = MDPR(in, 0x0ac);
+		printf("mdp_probe: INTF%d timing engine %#x, frame count %u -> %u in 200 ms, line %u, mux %#x\n", i, MDPR(in, 0x000),
+		    f1, f2, MDPR(in, 0x0b0), MDPR(in, 0x2c));
+	}
+	for (int q = 0; q < 4; q++) {
+		vm_offset_t ping = pp + 0x1000 + 0x800 * q;
+		uint32_t l1, l2;
+
+		l1 = MDPR(ping, 0x02c);
+		IOSleep(5);
+		l2 = MDPR(ping, 0x02c);
+		printf("mdp_probe: PINGPONG%d tear check %#x, vsync %#x, height %#x, autorefresh %#x, line count %u then %u\n", q,
+		    MDPR(ping, 0x000), MDPR(ping, 0x004), MDPR(ping, 0x008), MDPR(ping, 0x030), l1, l2);
+	}
+	if (smmu != 0) {
+		uint32_t idr0 = MDPR(smmu, 0x20), groups = idr0 & 0xff;
+
+		printf("mdp_probe: apps SMMU: IDR0 %#x, %u stream match groups; the display's streams:\n", idr0, groups);
+		for (uint32_t n = 0; n < groups && n < 128; n++) {
+			uint32_t smr = MDPR(smmu, 0x800 + 4 * n), s2cr = MDPR(smmu, 0xc00 + 4 * n);
+			uint32_t id = smr & 0x7fff, mask = (smr >> 16) & 0x7fff;
+
+			if ((smr & 0x80000000u) && ((0x880 & ~mask) == (id & ~mask) || (0xc80 & ~mask) == (id & ~mask))) {
+				printf("mdp_probe:   SMR%u id %#x mask %#x -> S2CR %#x (type %u: %s, context bank %u)\n", n, id, mask, s2cr,
+				    (s2cr >> 16) & 3, ((s2cr >> 16) & 3) == 1 ? "BYPASS" : ((s2cr >> 16) & 3) == 0 ? "translate" : "fault",
+				    s2cr & 0xff);
+			}
+		}
+	}
+	if (smmu != 0) {
+		/*
+		 * The context bank the display's streams go through: its registers, and its page tables walked (reads of physical
+		 * memory only) over the continuous splash region, 0x9d400000 and 36 MiB, and a little past it: which of it the
+		 * display controller can fetch. A fetch the tables do not map is a fault, and may reset the SoC.
+		 */
+		uint32_t idr1 = MDPR(smmu, 0x24), page = (idr1 >> 31) ? 0x10000 : 0x1000, pages = 1u << (((idr1 >> 28) & 7) + 1);
+		uint32_t s2cr = MDPR(smmu, 0xc00), bank = s2cr & 0xff;
+		vm_offset_t gr1 = mdpMap(0x15000000ULL + page, 0x1000);
+		vm_offset_t cb = mdpMap(0x15000000ULL + (uint64_t) page * pages + (uint64_t) page * bank, 0x1000);
+
+		if (gr1 != 0 && cb != 0) {
+			uint32_t cbar = MDPR(gr1, 4 * bank), cba2r = MDPR(gr1, 0x800 + 4 * bank), sctlr = MDPR(cb, 0x00);
+			uint32_t tcr = MDPR(cb, 0x30), tcr2 = MDPR(cb, 0x10), mair0 = MDPR(cb, 0x38);
+			uint64_t ttbr0 = (uint64_t) MDPR(cb, 0x20) | (uint64_t) MDPR(cb, 0x24) << 32;
+			bool va64 = cba2r & 1;
+			uint32_t t0sz = va64 ? (tcr & 0x3f) : (tcr & 7), vabits = (va64 ? 64 : 32) - t0sz;
+
+			printf("mdp_probe: context bank %u (page %#x, %u global pages): CBAR %#x CBA2R %#x SCTLR %#x TCR %#x TCR2 %#x MAIR0 %#x "
+			    "TTBR0 %#llx, %s, %u-bit input\n", bank, page, pages, cbar, cba2r, sctlr, tcr, tcr2, mair0, ttbr0,
+			    va64 ? "AArch64 tables" : "LPAE tables", vabits);
+			if ((sctlr & 1) && ((va64 ? (tcr >> 14) & 3 : 0) == 0) && vabits >= 25 && vabits <= 39) {
+				uint64_t base = ttbr0 & 0x0000fffffffff000ULL;
+				uint64_t runVA = 0, runPA = 0, runLen = 0;
+				int start = vabits > 30 ? 1 : 2;
+
+				for (uint64_t va = 0x9d400000ULL; va < 0x9fc00000ULL; va += 0x1000) {
+					uint64_t table = base, pa = ~0ULL;
+
+					for (int level = start; level <= 3; level++) {
+						int shift = 39 - 9 * level;
+						uint64_t index = (va >> shift) & 0x1ff, d;
+
+						if (level == start) {
+							index = (va >> shift) & ((1ULL << (vabits - shift)) - 1);
+						}
+						d = ml_phys_read_double_64(table + 8 * index);
+						if (!(d & 1)) {
+							break;
+						}
+						if (level < 3 && (d & 2)) {
+							table = d & 0x0000fffffffff000ULL;
+							continue;
+						}
+						if (level == 3 && !(d & 2)) {
+							break;
+						}
+						pa = (d & 0x0000fffffffff000ULL & ~((1ULL << shift) - 1)) | (va & ((1ULL << shift) - 1));
+						break;
+					}
+					if (runLen != 0 && pa == runPA + runLen && va == runVA + runLen) {
+						runLen += 0x1000;
+						continue;
+					}
+					if (runLen != 0) {
+						printf("mdp_probe:   %#llx..%#llx -> %#llx (%llu KB)\n", runVA, runVA + runLen, runPA, runLen >> 10);
+					}
+					if (pa == ~0ULL) {
+						runLen = 0;
+						if ((va & 0xfffff) == 0) {
+							printf("mdp_probe:   %#llx: not mapped\n", va);
+						}
+						continue;
+					}
+					runVA = va;
+					runPA = pa;
+					runLen = 0x1000;
+				}
+				if (runLen != 0) {
+					printf("mdp_probe:   %#llx..%#llx -> %#llx (%llu KB)\n", runVA, runVA + runLen, runPA, runLen >> 10);
+				}
+			} else {
+				printf("mdp_probe:   tables not walked (translation off, a granule other than 4 KB, or an input size not handled)\n");
+			}
+		}
+	}
+	printf("mdp_probe: done\n");
+}
+
+
+/*
+ * Boot-arg fb_hw=1 (SDM845, the OnePlus 6T; off by default): the display controller scales and flips, not this driver.
+ * mdp_probe found the boot chain's picture on VIG0 (the one kind of pipe with a QSEED3 scaler) at 0x9d400000, 1080 x 2340,
+ * the panel in command mode with its ping-pong block's auto-refresh (the controller fetches the picture again at every
+ * refresh by itself), and the display's SMMU context with translation off (it fetches physical addresses); the boot
+ * firmware keeps 0x9d400000 and 36 MiB (the continuous splash) out of everything else's memory (DeviceMemoryMap.h).
+ * So: two buffers in that region past the boot picture hold the canvas (fWidth x fHeight, the iPhone's) 1:1; a frame is
+ * copied into the one not on the panel with memcpy, row by row (no scaling, no filtering: drawRows' unscaled road); VIG0
+ * is pointed at it and the CTL flushed; the controller takes the new address at its next refresh (the flush bits read
+ * back 0 then), and QSEED3 scales it, bilinear, to the panel. Until the flush is taken the other buffer is still being
+ * read and is not written. Was: every frame scaled onto the panel by the CPU, 8 to 11 ms for the slow ones with the
+ * Dynamic Island's 1179 x 2556 (r265), and the panel reading the memory being written (tearing).
+ * The registers are Linux's sdm845 DPU catalogue's and dpu_hw_sspp.c / dpu_hw_util.c's (numbers only; mdp at 0x0ae01000,
+ * VIG0 +0x4000, its QSEED3 +0xa00, CTL0 +0x1000), as Bergamota's notes for the same SoC have them.
+ */
+static TUNABLE(uint32_t, gHw, "fb_hw", 0);
+extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+#define HW_SPLASH_PA            0x9d400000ULL
+#define HW_SPLASH_END           (0x9d400000ULL + 0x02400000ULL)
+#define HW_BUFFER_PA0           0x9e000000ULL           /* past the boot picture (1080 x 2340 x 4 = 10.1 MB) */
+#define HW_BUFFER_PA1           0x9ec00000ULL
+#define HW_BUFFER_MAX           0x00c00000ULL           /* 12 MiB each */
+#define VIG0_PA                 0x0ae05000ULL
+#define CTL0_PA                 0x0ae02000ULL
+static vm_offset_t gHwVig, gHwCtl, gHwVA[2];
+static uint32_t gHwStride, gHwBack, gHwOn, gHwProgrammed;
+static uint64_t gHwFlips, gHwLatchWait, gHwLatchMax, gHwTimeouts, gHwCopy;
+
+static bool
+hwSetup(uint32_t width, uint32_t height, uint32_t panelWidth, uint32_t panelHeight)
+{
+	char version[128] = "";
+	uint64_t size;
+
+	if (gHw == 0) {
+		return false;
+	}
+	if (!PE_parse_boot_argn("hakios_kver", version, sizeof(version)) || strnstr(version, "-sdm845-", sizeof(version)) == NULL) {
+		IOLog("MiniIOMobileFramebuffer: fb_hw: not an SDM845 kernel: the CPU scales\n");
+		return false;
+	}
+	gHwStride = (width * 4 + 63) & ~63u;
+	size = (uint64_t) gHwStride * height;
+	if (width > 2560 || size > HW_BUFFER_MAX || HW_BUFFER_PA1 + size > HW_SPLASH_END || width * 4 > panelWidth * 4 * 4 ||
+	    height > panelHeight * 4) {
+		IOLog("MiniIOMobileFramebuffer: fb_hw: a canvas of %ux%u does not fit (stride %u, %llu bytes): the CPU scales\n", width,
+		    height, gHwStride, size);
+		return false;
+	}
+	gHwVig = ml_io_map((vm_offset_t) (VIG0_PA & ~0x3fffULL), 0x4000) + (vm_offset_t) (VIG0_PA & 0x3fffULL);
+	gHwCtl = ml_io_map((vm_offset_t) (CTL0_PA & ~0x3fffULL), 0x4000) + (vm_offset_t) (CTL0_PA & 0x3fffULL);
+	gHwVA[0] = ml_io_map_wcomb((vm_offset_t) HW_BUFFER_PA0, (vm_size_t) ((size + 0x3fff) & ~0x3fffULL));
+	gHwVA[1] = ml_io_map_wcomb((vm_offset_t) HW_BUFFER_PA1, (vm_size_t) ((size + 0x3fff) & ~0x3fffULL));
+	if (gHwVig < 0x4000 || gHwCtl < 0x4000 || gHwVA[0] == 0 || gHwVA[1] == 0) {
+		IOLog("MiniIOMobileFramebuffer: fb_hw: could not map the controller or the buffers: the CPU scales\n");
+		return false;
+	}
+	if (*(volatile uint32_t *)(gHwVig + 0x14) != (uint32_t) HW_SPLASH_PA || *(volatile uint32_t *)(gHwVig + 0xa00) < 0x1002) {
+		IOLog("MiniIOMobileFramebuffer: fb_hw: VIG0 scans %#x, its QSEED3 is version %#x: not the boot chain's picture on a "
+		    "scaling pipe, the CPU scales\n", *(volatile uint32_t *)(gHwVig + 0x14), *(volatile uint32_t *)(gHwVig + 0xa00));
+		return false;
+	}
+	bzero((void *) gHwVA[0], (size_t) size);
+	bzero((void *) gHwVA[1], (size_t) size);
+	IOLog("MiniIOMobileFramebuffer: fb_hw: the controller scales %ux%u (stride %u) to the panel's %ux%u and flips between "
+	    "%#llx and %#llx\n", width, height, gHwStride, panelWidth, panelHeight, HW_BUFFER_PA0, HW_BUFFER_PA1);
+	gHwOn = 1;
+	return true;
+}
+
+#define VIGW(off, value) (*(volatile uint32_t *)(gHwVig + (off)) = (value))
+
+/* VIG0 once: the canvas in, the panel out, QSEED3 bilinear between (Linux's dpu_hw_sspp_setup_rects, _pe_config, scaler3) */
+static void
+hwProgram(uint32_t width, uint32_t height, uint32_t panelWidth, uint32_t panelHeight)
+{
+	uint32_t src = height << 16 | width, dst = panelHeight << 16 | panelWidth;
+	uint32_t stepX = (uint32_t) (((uint64_t) width << 21) / panelWidth), stepY = (uint32_t) (((uint64_t) height << 21) / panelHeight);
+	uint32_t alpha = (*(volatile uint32_t *)(gHwVig + 0x30) & (1u << 8)) != 0;
+	uint32_t op = 1u /* on */ | 3u << 16 /* Y/RGB: bilinear */ | 1u << 14 /* not DX */ | 1u << 31 /* blend */ |
+	    (alpha ? (1u << 10 | 1u << 29) : 0) /* alpha on, bilinear */;
+
+	VIGW(0x00, src);                        /* SRC_SIZE */
+	VIGW(0x04, src);                        /* SRC_IMG_SIZE */
+	VIGW(0x08, 0);                          /* SRC_XY */
+	VIGW(0x0c, dst);                        /* OUT_SIZE */
+	VIGW(0x10, 0);                          /* OUT_XY */
+	VIGW(0x24, gHwStride);                  /* SRC_YSTRIDE0 */
+	for (uint32_t c = 0; c < 3; c++) {      /* pixel extension, none: what is fetched is the source */
+		VIGW(0x100 + 0x10 * c, 0);
+		VIGW(0x104 + 0x10 * c, 0);
+		VIGW(0x108 + 0x10 * c, src);
+	}
+	VIGW(0xa00 + 0x90, 0);                  /* PHASE_INIT Y_H, Y_V, UV_H, UV_V */
+	VIGW(0xa00 + 0x94, 0);
+	VIGW(0xa00 + 0x98, 0);
+	VIGW(0xa00 + 0x9c, 0);
+	VIGW(0xa00 + 0x10, stepX & 0xffffff);   /* PHASE_STEP Y_H, Y_V, UV_H, UV_V */
+	VIGW(0xa00 + 0x14, stepY & 0xffffff);
+	VIGW(0xa00 + 0x18, stepX & 0xffffff);
+	VIGW(0xa00 + 0x1c, stepY & 0xffffff);
+	VIGW(0xa00 + 0x20, 4u | 3u << 8 | 4u << 16 | 3u << 24);       /* PRELOAD: the default 4 across, 3 down */
+	VIGW(0xa00 + 0x40, src);                /* SRC_SIZE_Y_RGB_A */
+	VIGW(0xa00 + 0x44, src);                /* SRC_SIZE_UV */
+	VIGW(0xa00 + 0x48, dst);                /* DST_SIZE */
+	VIGW(0xa00 + 0x04, op);                 /* OP_MODE, last */
+	IOLog("MiniIOMobileFramebuffer: fb_hw: VIG0 programmed: %ux%u -> %ux%u, steps %#x %#x, QSEED3 op %#x\n", width, height,
+	    panelWidth, panelHeight, stepX, stepY, op);
+}
+
+/*
+ * Before a frame is written into the buffer the panel showed until the last flip: waited for until the controller has
+ * taken that flip (the flush bits read back 0 at the refresh that fetched the new address), at most 50 ms. The wait is
+ * at the flip itself by default (see hwFlip); with fb_hw_async=1 at the next frame, CoreAnimation drawing meanwhile.
+ */
+static uint32_t gHwPending;
+static TUNABLE(uint32_t, gHwAsync, "fb_hw_async", 0);
+
+static void
+hwWaitTaken(void)
+{
+	uint64_t began, until, waited;
+	uint32_t flush = 0;
+
+	if (!gHwPending) {
+		return;
+	}
+	began = mach_absolute_time();
+	nanoseconds_to_absolutetime(50 * NSEC_PER_MSEC, &until);
+	until += began;
+	while ((flush = *(volatile uint32_t *)(gHwCtl + 0x18)) != 0 && mach_absolute_time() < until) {
+		IODelay(100);
+	}
+	waited = mach_absolute_time() - began;
+	gHwPending = 0;
+	gHwLatchWait += waited;
+	gHwLatchMax = waited > gHwLatchMax ? waited : gHwLatchMax;
+	gHwTimeouts += flush != 0;
+	if ((gHwFlips & 1023) == 1 || flush != 0) {
+		uint64_t avg, max, copy;
+
+		absolutetime_to_nanoseconds(gHwLatchWait / gHwFlips, &avg);
+		absolutetime_to_nanoseconds(gHwLatchMax, &max);
+		absolutetime_to_nanoseconds(gHwCopy / gHwFlips, &copy);
+		IOLog("MiniIOMobileFramebuffer: fb_hw: %llu flips, the copy %llu us, the wait for the controller %llu us (at most %llu), "
+		    "%llu not taken in 50 ms%s\n", gHwFlips, copy / 1000, avg / 1000, max / 1000, gHwTimeouts,
+		    flush != 0 ? " (THIS ONE)" : "");
+	}
+}
+
+/* The buffer just written onto the panel: VIG0 at it and the CTL flushed; the controller takes it at its next refresh. */
+static void
+hwFlip(uint32_t width, uint32_t height, uint32_t panelWidth, uint32_t panelHeight)
+{
+	if (!gHwProgrammed) {
+		hwProgram(width, height, panelWidth, panelHeight);
+		gHwProgrammed = 1;
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");      /* (the write-combined rows out before the address) */
+	VIGW(0x14, (uint32_t) (gHwBack ? HW_BUFFER_PA1 : HW_BUFFER_PA0));
+	*(volatile uint32_t *)(gHwCtl + 0x18) = 1u << 0 /* VIG0 */ | 1u << 17 /* CTL */;
+	gHwPending = 1;
+	gHwFlips++;
+	gHwBack ^= 1;
+	/*
+	 * Waited for here, at the flip, by default (fb_hw_async=1: at the next frame instead). A frame that has left this
+	 * driver is then one on the panel, and CoreAnimation's swaps are held back to the panel's refreshes: r271, waited here,
+	 * 3% of the steps over 16.7 ms against 13% with the CPU scaling (r265); r272, waited at the next frame, could not be
+	 * measured the same way (the frames' times are then the flips', not the refreshes').
+	 */
+	if (!gHwAsync) {
+		hwWaitTaken();
+	}
+}
+
 static inline uint32_t
 refreshHz(void)
 {
@@ -574,11 +939,14 @@ IOMobileFramebuffer::start(IOService * provider)
 		    vinfo.v_depth);
 		return false;
 	}
-	if (gBeam != 0 && kernel_thread_start(beamProbeMain, this, &thread) == KERN_SUCCESS) {
+	if (gBeam != 0 && gHw == 0 && kernel_thread_start(beamProbeMain, this, &thread) == KERN_SUCCESS) {
 		thread_set_thread_name(thread, "the panel's scan: looked at");
 		thread_deallocate(thread);
 	}
 	if (gMeasure && kernel_thread_start(measurePanel, NULL, &thread) == KERN_SUCCESS) {
+		thread_deallocate(thread);
+	}
+	if (gMdpProbe && kernel_thread_start(mdpProbe, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}
 	fLock = IOLockAlloc();
@@ -647,8 +1015,10 @@ IOMobileFramebuffer::start(IOService * provider)
 			}
 		}
 	}
-	fColumn = IONewZero(uint32_t, fPanelWidth);
-	fColumnWeight = IONewZero(uint16_t, fPanelWidth);
+	/* (as wide as the canvas too: with fb_hw a frame is drawn into a buffer of the canvas's width) */
+	(void) hwSetup(fWidth, fHeight, fPanelWidth, fPanelHeight);    /* (the canvas and the panel known by now) */
+	fColumn = IONewZero(uint32_t, fWidth > fPanelWidth ? fWidth : fPanelWidth);
+	fColumnWeight = IONewZero(uint16_t, fWidth > fPanelWidth ? fWidth : fPanelWidth);
 	fDiff = gDiff != 0;
 	fDiffLeft = fDiffTop = ~0u;
 	IOLog("MiniIOMobileFramebuffer: display %ux%u on a panel of %ux%u (%u bytes per row)\n", fWidth, fHeight,
@@ -1395,7 +1765,7 @@ IOMobileFramebuffer::presenter(void)
 			show(swap, surfaces);
 			lastFrame = mach_absolute_time();
 		}
-		unsettled = gFilter == 2 && !fFilterFrame;
+		unsettled = gFilter == 2 && !fFilterFrame && !gHwOn;     /* (fb_hw: the controller filters every frame) */
 		/*
 		 * The surfaces are let go of as soon as their pixels are in the panel's memory, not when the next frame comes:
 		 * held, they were in use to CoreAnimation, which had no surface to draw the next frame into while that one
@@ -1461,7 +1831,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	if (fBeamIntf != 0) {
 		/* (on the panel when that scan reads it: that is the beat now, kept by the panel) */
 		fStatOnBeat++;
-	} else if (gOnTheBeat) {
+	} else if (gOnTheBeat && !gHwOn) {        /* (fb_hw: the controller's taking of a flip is the beat) */
 		uint64_t period, aim, next;
 
 		nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
@@ -1509,6 +1879,22 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		IOLog("MiniIOMobileFramebuffer: swap %u (#%u): surfaces %u %u %u %u, layers set 0x%x cleared 0x%x\n",
 		    swapWord(swap, SWAP_ID), fSwapsShown, swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)),
 		    swapWord(swap, SWAP_SURFACE(2)), swapWord(swap, SWAP_SURFACE(3)), set, swapWord(swap, SWAP_LAYERS_CLEARED));
+	}
+	uint8_t * panelBase = fBase;
+	uint32_t panelWidth = fPanelWidth, panelHeight = fPanelHeight, panelRowBytes = fRowBytes;
+	bool hw = gHwOn && fGraphics;
+
+	if (gHwOn && !fGraphics) {
+		/* (the first picture: the console is put away below, and from the next frame on the controller scales) */
+		hw = false;
+	}
+	if (hw) {
+		hwWaitTaken();                  /* (the buffer about to be written may still be the one on the panel) */
+		began = mach_absolute_time();
+		fBase = (uint8_t *) gHwVA[gHwBack];
+		fPanelWidth = fWidth;
+		fPanelHeight = fHeight;
+		fRowBytes = gHwStride;
 	}
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
@@ -1560,6 +1946,15 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		}
 	}
 	drawn = mach_absolute_time();
+	if (hw) {
+		gHwCopy += drawn - began;
+		fBase = panelBase;
+		fPanelWidth = panelWidth;
+		fPanelHeight = panelHeight;
+		fRowBytes = panelRowBytes;
+		hwFlip(fWidth, fHeight, fPanelWidth, fPanelHeight);
+		drawn = mach_absolute_time();
+	}
 	if (recorded != NULL) {
 		record(recorded);
 	}

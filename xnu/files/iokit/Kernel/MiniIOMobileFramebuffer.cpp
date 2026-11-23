@@ -510,15 +510,54 @@ mdpProbe(__unused void * arg, __unused wait_result_t wr)
 static TUNABLE(uint32_t, gHw, "fb_hw", 0);
 extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 #define HW_SPLASH_PA            0x9d400000ULL
-#define HW_SPLASH_END           (0x9d400000ULL + 0x02400000ULL)
-#define HW_BUFFER_PA0           0x9e000000ULL           /* past the boot picture (1080 x 2340 x 4 = 10.1 MB) */
-#define HW_BUFFER_PA1           0x9ec00000ULL
+/*
+ * The region's last megabyte but one, 0x9f700000, is hakios.dsibl.c's (its DSI command packets: PACKET_PHYS), and the
+ * buffers stay below it (r271-r273 had the second one at 0x9ec00000, 11.5 MB long: over the packets' megabyte).
+ */
+#define HW_SPLASH_END           (0x9d400000ULL + 0x02300000ULL)
+#define HW_BUFFER_PA0           0x9de00000ULL           /* past the boot picture (1080 x 2340 x 4 = 10.1 MB, to 0x9dda4000) */
+#define HW_BUFFER_PA1           0x9ea00000ULL
 #define HW_BUFFER_MAX           0x00c00000ULL           /* 12 MiB each */
 #define VIG0_PA                 0x0ae05000ULL
 #define CTL0_PA                 0x0ae02000ULL
 static vm_offset_t gHwVig, gHwCtl, gHwVA[2];
 static uint32_t gHwStride, gHwBack, gHwOn, gHwProgrammed;
 static uint64_t gHwFlips, gHwLatchWait, gHwLatchMax, gHwTimeouts, gHwCopy;
+
+/*
+ * A panic's text is drawn into the boot picture (0x9d400000, the console's), which with fb_hw the controller no longer
+ * scans. So VIG0's registers as the boot chain left them are kept before anything is written, and the panic hook
+ * (PE_arm_debug_panic_hook, a DEVELOPMENT kernel's) writes them back and flushes, with plain stores only (no lock, no
+ * allocation, no log), before the hook that was there: the panel shows the boot picture, and the text, from the next
+ * refresh on.
+ */
+static const uint16_t gHwSavedOffsets[] = { 0x00, 0x04, 0x08, 0x0c, 0x10, 0x14, 0x24, 0x100, 0x104, 0x108, 0x110, 0x114, 0x118,
+	                                    0x120, 0x124, 0x128, 0xa10, 0xa14, 0xa18, 0xa1c, 0xa20, 0xa40, 0xa44, 0xa48,
+	                                    0xa90, 0xa94, 0xa98, 0xa9c, 0xa04 /* (the scaler's mode last, as when it was set) */ };
+static uint32_t gHwSaved[sizeof(gHwSavedOffsets) / sizeof(gHwSavedOffsets[0])];
+extern "C" void (*PE_arm_debug_panic_hook)(const char *str);
+static void (*gHwPanicNext)(const char *str);
+
+static void
+hwRestore(void)
+{
+	for (unsigned i = 0; i < sizeof(gHwSavedOffsets) / sizeof(gHwSavedOffsets[0]); i++) {
+		*(volatile uint32_t *)(gHwVig + gHwSavedOffsets[i]) = gHwSaved[i];
+	}
+	*(volatile uint32_t *)(gHwCtl + 0x18) = 1u << 0 /* VIG0 */ | 1u << 17 /* CTL */;
+}
+
+static void
+hwPanicHook(const char *str)
+{
+	if (gHwProgrammed) {
+		gHwProgrammed = 0;
+		hwRestore();
+	}
+	if (gHwPanicNext != NULL) {
+		gHwPanicNext(str);
+	}
+}
 
 static bool
 hwSetup(uint32_t width, uint32_t height, uint32_t panelWidth, uint32_t panelHeight)
@@ -536,7 +575,7 @@ hwSetup(uint32_t width, uint32_t height, uint32_t panelWidth, uint32_t panelHeig
 	gHwStride = (width * 4 + 63) & ~63u;
 	size = (uint64_t) gHwStride * height;
 	if (width > 2560 || size > HW_BUFFER_MAX || HW_BUFFER_PA1 + size > HW_SPLASH_END || width * 4 > panelWidth * 4 * 4 ||
-	    height > panelHeight * 4) {
+	    height > panelHeight * 4 || HW_SPLASH_PA + (uint64_t) panelWidth * 4 * panelHeight > HW_BUFFER_PA0) {
 		IOLog("MiniIOMobileFramebuffer: fb_hw: a canvas of %ux%u does not fit (stride %u, %llu bytes): the CPU scales\n", width,
 		    height, gHwStride, size);
 		return false;
@@ -554,6 +593,11 @@ hwSetup(uint32_t width, uint32_t height, uint32_t panelWidth, uint32_t panelHeig
 		    "scaling pipe, the CPU scales\n", *(volatile uint32_t *)(gHwVig + 0x14), *(volatile uint32_t *)(gHwVig + 0xa00));
 		return false;
 	}
+	for (unsigned i = 0; i < sizeof(gHwSavedOffsets) / sizeof(gHwSavedOffsets[0]); i++) {
+		gHwSaved[i] = *(volatile uint32_t *)(gHwVig + gHwSavedOffsets[i]);
+	}
+	gHwPanicNext = PE_arm_debug_panic_hook;
+	PE_arm_debug_panic_hook = hwPanicHook;
 	bzero((void *) gHwVA[0], (size_t) size);
 	bzero((void *) gHwVA[1], (size_t) size);
 	IOLog("MiniIOMobileFramebuffer: fb_hw: the controller scales %ux%u (stride %u) to the panel's %ux%u and flips between "

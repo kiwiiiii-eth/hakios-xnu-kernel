@@ -1,0 +1,6 @@
+# (2026-11-23) The AirPods' sound read back (r262), from what r260 dumped into /private/var/root: 16:17:58-16:22 of r257,
+# after the AirPods' A2DP stream was set up (r261 stopped at its first 90 lines).
+/var/jb/usr/bin/sleep 20
+/var/jb/usr/bin/grep -m 120 -aiE -e ^16:(1[89]|2[0-2]).*(AVDTP|codec|AAC|SBC|bitpool|MTU|latency|skywalk|Skywalk|stream|Stream|underrun|overrun|drop|flush|credit|fail|error) /private/var/root/a2dp-bt3.txt
+/var/jb/usr/bin/grep -m 120 -aiE -e ^16:(1[89]|2[0-2]).*(skywalk|Skywalk|underrun|overrun|glitch|overload|drop|late|fail|error|Start|Stop|codec|AAC|SBC) /private/var/root/a2dp-ms3.txt
+/var/jb/usr/bin/sleep 36000

@@ -1,0 +1,8 @@
+# (2026-11-23) The AirPods' card read back (r254): in r253 (mobileassetd let in) the card was still empty. What
+# SharingViewService and mobileassetd said of the product's assets then, from the os_log store of the data volume.
+/var/jb/usr/bin/sleep 30
+/redwood/bin/logdump 1800 process=="SharingViewService" >> /private/var/root/card-svs2.txt
+/var/jb/usr/bin/grep -aiE -e Headphone -e ProductKit -e MobileAsset -e asset -e movie -e cloudkit -e Personalization /private/var/root/card-svs2.txt
+/redwood/bin/logdump 1800 process=="mobileassetd" >> /private/var/root/card-mad2.txt
+/var/jb/usr/bin/grep -aiE -e SharingViewService -e ProductKit -e Product -e Headphone -e catalog -e download -e fail -e error -e denied -e unactivated -e activation /private/var/root/card-mad2.txt
+/var/jb/usr/bin/sleep 36000

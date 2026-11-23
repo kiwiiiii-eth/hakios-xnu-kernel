@@ -219,7 +219,11 @@ DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'loca
         'obliterat', 'storage_mounter', 'com.apple.fud', 'sepd', 'seputil', 'camera', 'ReportCrash',
         'osanalytics', 'lockdown', 'audio', 'jetsamproperties',
         'purplebuddy', 'restore', 'usb', 'accessoryd',
-        'mobileassetd', 'bird',
+        # (mobileassetd was among them from the first day, with bird. It is let in since 23 November: without it the
+        # AirPods' card -- SharingViewService, ProductKit -- gets "assetNotFound" and stays empty, with no Connect (r251).
+        # It runs and stays up (r252), fetches over the cellular data too, and unzips once the kernel answers
+        # F_GETPROTECTIONCLASS (r256); the card's 12 MB then came in a few tries, and Connect paired the AirPods (r257).)
+        'bird',
         # these start, crash and are asked for again, over and over. (aggregated, which was among them, is where
         # Darwin userland 16 keeps its power log -- com.apple.powerlog.plxpclogger.xpc and the rest -- that Settings > Battery
         # waits for; it now runs through a session.)

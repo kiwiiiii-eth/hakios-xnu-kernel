@@ -1,0 +1,9 @@
+# (2026-11-23) mobileassetd let in (r252, ALLOW=mobileassetd): the AirPods' card (SharingViewService, ProductKit) asks it
+# for the product's pictures and movie and, with it denied since the first day, got "assetNotFound" and stayed empty (r251).
+# Seen here: whether it starts, stays up, and what it says.
+/var/jb/usr/bin/sleep 90
+/bin/ps -A
+/redwood/bin/logdump 300 process=="mobileassetd" >> /private/var/root/mad.txt
+/var/jb/usr/bin/grep -aicE -e . /private/var/root/mad.txt
+/var/jb/usr/bin/grep -aiE -e error -e fail -e crash -e download -e catalog -e cellular -e network -e started /private/var/root/mad.txt
+/var/jb/usr/bin/sleep 36000

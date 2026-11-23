@@ -1,0 +1,10 @@
+# (2026-11-23) MobileAsset's zips unzipped (r256): F_GETPROTECTIONCLASS answers class D on the data volume, which has no
+# data protection, instead of ENOTSUP, which StreamingZip's unzip service gave up on (r255: "Failed to get protection
+# class ... Operation not supported", every zip that mobileassetd fetched). Seen here: the unzip service and the results.
+/var/jb/usr/bin/sleep 150
+/redwood/bin/logdump 200 process=="com.apple.StreamingUnzipService" >> /private/var/root/unzip-s2.txt
+/var/jb/usr/bin/cat /private/var/root/unzip-s2.txt
+/redwood/bin/logdump 200 process=="mobileassetd" >> /private/var/root/unzip-m2.txt
+/var/jb/usr/bin/grep -aE -e MADownload[A-Za-z]* -e Extract -e extract /private/var/root/unzip-m2.txt
+/var/jb/usr/bin/find /private/var/MobileAsset/AssetsV2 -maxdepth 2 -name *.asset
+/var/jb/usr/bin/sleep 36000

@@ -1,8 +1,11 @@
-# (2026-11-23) The AirPods' card read back (r254): in r253 (mobileassetd let in) the card was still empty. What
-# SharingViewService and mobileassetd said of the product's assets then, from the os_log store of the data volume.
-/var/jb/usr/bin/sleep 30
-/redwood/bin/logdump 1800 process=="SharingViewService" >> /private/var/root/card-svs2.txt
-/var/jb/usr/bin/grep -aiE -e Headphone -e ProductKit -e MobileAsset -e asset -e movie -e cloudkit -e Personalization /private/var/root/card-svs2.txt
-/redwood/bin/logdump 1800 process=="mobileassetd" >> /private/var/root/card-mad2.txt
-/var/jb/usr/bin/grep -aiE -e SharingViewService -e ProductKit -e Product -e Headphone -e catalog -e download -e fail -e error -e denied -e unactivated -e activation /private/var/root/card-mad2.txt
+# (2026-11-23) The AirPods' card empty again (r264): in r257 its 12 MB (SharingDeviceAssets) came in and the card showed
+# Connect; in r263, paired again, it was empty. Seen here: the assets on the data volume, and what mobileassetd and
+# SharingViewService said in r263 (17:00 on).
+/var/jb/usr/bin/sleep 20
+/var/jb/usr/bin/find /private/var/MobileAsset/AssetsV2/com_apple_MobileAsset_SharingDeviceAssets -maxdepth 3
+/redwood/bin/logdump 2400 process=="mobileassetd" >> /private/var/root/card-mad3.txt
+/var/jb/usr/bin/grep -m 60 -aE -e ^17:.*(SharingViewService|SharingDeviceAssets.e5|MADownload|purge|Purge|garbage|delete|Removing) /private/var/root/card-mad3.txt
+/redwood/bin/logdump 2400 process=="SharingViewService" >> /private/var/root/card-svs3.txt
+/var/jb/usr/bin/grep -m 60 -aE -e ^17:.*(Headphone|ProductKit|asset|Asset|movie) /private/var/root/card-svs3.txt
+/var/jb/usr/bin/grep -m 40 -aE -e ^16:(1[0-9]|2[0-2]).*(Headphone|ProductKit:Requests|movie) /private/var/root/card-svs3.txt
 /var/jb/usr/bin/sleep 36000

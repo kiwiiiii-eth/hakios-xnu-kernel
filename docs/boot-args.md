@@ -2,13 +2,13 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **443 arguments**: 368 read by the kernel, 15 by the loader, 74 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **447 arguments**: 372 read by the kernel, 15 by the loader, 74 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (81)
+## GPU and display (84)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -30,6 +30,8 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `fb_ca_hz` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_CA_HZ` |  |
 | `fb_diff` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_DIFF` |  |
 | `fb_filter` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_FILTER` |  |
+| `fb_hw` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_HW` |  |
+| `fb_hw_async` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_HW_ASYNC` |  |
 | `fb_hz` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_HZ` |  |
 | `fb_intf` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_INTF` |  |
 | `fb_measure` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_MEASURE` |  |
@@ -80,6 +82,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `gpu_log` | K | `hakios.a630.c`, `hakios.adreno.c` | `CONFIG_GPU_LOG` |  |
 | `hakios_kver` | K | `MiniIOMobileFramebuffer.cpp`, `hakios.ufs.c`, `hakios.version.c` |  | the loader (from the payload's kernel.ver) |
 | `island` | KLU | `MiniIOMobileFramebuffer.cpp`, `init.c`, `loader.c` | `CONFIG_ISLAND` |  |
+| `mdp_probe` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_MDP_PROBE` |  |
 | `metal` | KU | `HakiosMetal.m`, `MiniIOMobileFramebuffer.cpp`, `inject_sb.c` | `CONFIG_METAL` |  |
 | `rec_mb` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_REC_MB` |  |
 | `rec_ring` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_REC_RING` |  |
@@ -426,7 +429,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (95)
+## User space (96)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -442,6 +445,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `bt_after` | K | `hakios.bt3990.c` | `CONFIG_BT_AFTER` |  |
 | `bt_again` | K | `hakios.bt.c` | `CONFIG_BT_AGAIN` |  |
 | `bt_allcmds` | K | `hakios.bthci.c` | `CONFIG_BT_ALLCMDS` |  |
+| `bt_baud` | K | `hakios.bt3990.c` | `CONFIG_BT_BAUD` |  |
 | `bt_extadv` | K | `hakios.bthci.c` | `CONFIG_BT_EXTADV` |  |
 | `bt_lines` | U | `inject_bt.c` | `CONFIG_BT_LINES` |  |
 | `bt_mac` | K | `hakios.bt3990.c` | `CONFIG_BT_MAC` |  |

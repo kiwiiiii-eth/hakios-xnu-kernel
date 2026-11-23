@@ -493,7 +493,8 @@ mdpProbe(__unused void * arg, __unused wait_result_t wr)
 
 
 /*
- * Boot-arg fb_hw=1 (SDM845, the OnePlus 6T; off by default): the display controller scales and flips, not this driver.
+ * fb_hw (SDM845, the OnePlus 6T; on by default since Beta 0.7, fb_hw=0 for the CPU): the display controller scales and
+ * flips, not this driver; on any other SoC, or a boot chain that left something else on VIG0, the CPU scales as before.
  * mdp_probe found the boot chain's picture on VIG0 (the one kind of pipe with a QSEED3 scaler) at 0x9d400000, 1080 x 2340,
  * the panel in command mode with its ping-pong block's auto-refresh (the controller fetches the picture again at every
  * refresh by itself), and the display's SMMU context with translation off (it fetches physical addresses); the boot
@@ -507,7 +508,7 @@ mdpProbe(__unused void * arg, __unused wait_result_t wr)
  * The registers are Linux's sdm845 DPU catalogue's and dpu_hw_sspp.c / dpu_hw_util.c's (numbers only; mdp at 0x0ae01000,
  * VIG0 +0x4000, its QSEED3 +0xa00, CTL0 +0x1000), as Bergamota's notes for the same SoC have them.
  */
-static TUNABLE(uint32_t, gHw, "fb_hw", 0);
+static TUNABLE(uint32_t, gHw, "fb_hw", 1);
 extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 #define HW_SPLASH_PA            0x9d400000ULL
 /*

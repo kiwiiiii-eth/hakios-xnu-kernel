@@ -80,6 +80,7 @@ bt	k
 bt_after	k
 bt_again	k
 bt_allcmds	k
+bt_baud	k
 bt_extadv	k
 bt_lines	u
 bt_mac	k
@@ -129,6 +130,8 @@ fb_beat	k
 fb_ca_hz	k
 fb_diff	k
 fb_filter	k
+fb_hw	k
+fb_hw_async	k
 fb_hz	k
 fb_intf	k
 fb_measure	k
@@ -206,6 +209,7 @@ island	klu
 loader_return_after	kl
 m2v_utrace	u
 machine_name	k
+mdp_probe	k
 membench	k
 metal	ku
 metal_all	u

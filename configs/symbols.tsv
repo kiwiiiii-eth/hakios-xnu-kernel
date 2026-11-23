@@ -75,6 +75,7 @@ BT	arg	bt	User space	k	hakios.bt.c,hakios.bt3990.c
 BT_AFTER	arg	bt_after	User space	k	hakios.bt3990.c	
 BT_AGAIN	arg	bt_again	User space	k	hakios.bt.c	the second look this many seconds later (0: no second look; 30)
 BT_ALLCMDS	arg	bt_allcmds	User space	k	hakios.bthci.c	
+BT_BAUD	arg	bt_baud	User space	k	hakios.bt3990.c	
 BT_EXTADV	arg	bt_extadv	User space	k	hakios.bthci.c	
 BT_LINES	arg	bt_lines	User space	u	inject_bt.c	
 BT_MAC	arg	bt_mac	User space	k	hakios.bt3990.c	
@@ -120,6 +121,8 @@ FB_BEAT	arg	fb_beat	GPU and display	k	MiniIOMobileFramebuffer.cpp
 FB_CA_HZ	arg	fb_ca_hz	GPU and display	k	MiniIOMobileFramebuffer.cpp	the refresh rate told to CoreAnimation (IOMFBDisplayRefresh) when it is not to be fb_hz's
 FB_DIFF	arg	fb_diff	GPU and display	k	MiniIOMobileFramebuffer.cpp	which pixels of the panel each frame changed (it costs: the panel's memory is slow to read)
 FB_FILTER	arg	fb_filter	GPU and display	k	MiniIOMobileFramebuffer.cpp	the picture is scaled to the panel nearest neighbour, as it once was
+FB_HW	arg	fb_hw	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+FB_HW_ASYNC	arg	fb_hw_async	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_HZ	arg	fb_hz	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_INTF	arg	fb_intf	GPU and display	k	MiniIOMobileFramebuffer.cpp	the registers of the display interface the panel is on, for a port
 FB_MEASURE	arg	fb_measure	GPU and display	k	MiniIOMobileFramebuffer.cpp	how often the panel is really refreshed
@@ -192,6 +195,7 @@ IPA_IRAM_LOOK	arg	ipa_iram_look	User space	k	hakios.mpss845.c
 ISLAND	arg	island	GPU and display	klu	MiniIOMobileFramebuffer.cpp,init.c,loader.c	the Dynamic Island. Darwin has no answer of its own for "this phone has one": SpringBoard, Spring
 M2V_UTRACE	arg	m2v_utrace	User space	u	HakiosMetalCA.m	Turnip's GPU trace of every render pass (u_trace) into a file, printed during the run
 MACHINE_NAME	arg	machine_name	CPU, memory and boot	k	GenericARMPE.cpp	
+MDP_PROBE	arg	mdp_probe	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 MEMBENCH	arg	membench	CPU, memory and boot	k	hakios.cpufreq.c	
 METAL	arg	metal	GPU and display	ku	HakiosMetal.m,MiniIOMobileFramebuffer.cpp,inject_sb.c	only the program metal_test (userland/src/metal_test.m): the safe level, for seeing what Metal does with the device
 METAL_ALL	arg	metal_all	User space	u	HakiosMetalCA.m	

@@ -152,18 +152,73 @@ h4_length(const uint8_t *b, unsigned have)
 	}
 }
 
+/*
+ * An LE advertising report (the legacy kind, subevent 02) with Apple's Proximity Pairing message -- manufacturer data
+ * 4c 00, type 07, what AirPods and Beats send while their case is open, and what iOS shows its card for: its address,
+ * signal and first bytes said, the first 30 (bt_said=N): whether the AirPods are heard at all.
+ */
+static void
+proximity_pairing(const uint8_t *bytes, unsigned length)
+{
+	static uint32_t said_pp;
+	unsigned at, end, data;
+
+	if (length < 15 || bytes[4] != 1 || said_pp >= 30) {
+		return;
+	}
+	data = bytes[13];
+	if (14 + data + 1 > length) {
+		return;
+	}
+	for (at = 14, end = 14 + data; at + 1 < end && bytes[at] != 0; at += 1 + bytes[at]) {
+		const unsigned ad = bytes[at];
+
+		if (at + 1 + ad > end || ad < 4 || bytes[at + 1] != 0xff || bytes[at + 2] != 0x4c || bytes[at + 3] != 0x00 ||
+		    bytes[at + 4] != 0x07) {
+			continue;
+		}
+		char text[3 * 12 + 1];
+		const unsigned n = ad - 3 < 12 ? ad - 3 : 12;
+
+		for (unsigned i = 0; i < n; i++) {
+			snprintf(text + 3 * i, 4, " %02x", bytes[at + 4 + i]);
+		}
+		text[3 * n] = 0;
+		said_pp++;
+		say("Proximity Pairing (AirPods, Beats) from %02x:%02x:%02x:%02x:%02x:%02x, %d dBm:%s\n", bytes[12], bytes[11],
+		    bytes[10], bytes[9], bytes[8], bytes[7], (int)(int8_t)bytes[end], text);
+		return;
+	}
+}
+
 static void
 dump(const char *direction, const uint8_t *bytes, unsigned length, uint32_t *counter)
 {
+	static uint32_t adverts, said_scans;
 	char text[3 * 32 + 1];
 	unsigned n = length < 32 ? length : 32;
 
 	/* (the 6T, runs 89-93: the LE advertising reports of everything around, many a second, used up bt_said before a
-	 * connection; scanning commands too. Neither is said, nor counted) */
+	 * connection; scanning commands too. So the reports are only counted, said at the 1st, 2nd, 4th, 8th ... one, and
+	 * the scanning commands said apart, the first 40 of them: r243 seemed to have none, and could not have shown them) */
 	if (length >= 4 && bytes[0] == 0x04 && bytes[1] == 0x3e && (bytes[3] == 0x02 || bytes[3] == 0x0d || bytes[3] == 0x0b)) {
+		adverts++;
+		if (said_max > 0 && (adverts & (adverts - 1)) == 0) {
+			say("LE advertising reports heard: %u (this one subevent %02x, %u bytes)\n", adverts, bytes[3], length);
+		}
+		if (said_max > 0 && bytes[3] == 0x02) {
+			proximity_pairing(bytes, length);
+		}
 		return;
 	}
 	if (length >= 3 && bytes[0] == 0x01 && bytes[2] == 0x20 && (bytes[1] == 0x0b || bytes[1] == 0x0c)) {
+		if (said_max > 0 && said_scans++ < 40) {
+			for (unsigned i = 0; i < n; i++) {
+				snprintf(text + 3 * i, 4, " %02x", bytes[i]);
+			}
+			text[3 * n] = 0;
+			say("%s LE Set Scan %s:%s\n", direction, bytes[1] == 0x0b ? "Parameters" : "Enable", text);
+		}
 		return;
 	}
 	if (length >= 6 && bytes[0] == 0x04 && bytes[1] == 0x0e && bytes[5] == 0x20 && (bytes[4] == 0x0b || bytes[4] == 0x0c)) {
@@ -237,7 +292,12 @@ vendor_answer(const uint8_t *command, unsigned length, uint8_t *answer)
 	if (cal) {
 		answer[7] = 0x51;                       /* the table's number (the MediaTek branch's guess, which bluetoothd took) */
 	}
-	if (said_vsc++ < 60) {
+	/* (Broadcom's Olympic LE Set Scan Enable, 0xfe29, and LE Set Scan Parameters MultiCore, 0xfe37, come later than the
+	 * first 60: said apart, the first 40, since a scan that goes as them is one the controller never makes) */
+	static uint32_t said_olympic;
+	const bool olympic = hi == 0xfe && (lo == 0x29 || lo == 0x37);
+
+	if (olympic ? said_olympic++ < 40 : said_vsc++ < 60) {
 		say("vendor command %02x%02x (%u bytes%s%02x) answered here as done, %u bytes of data\n", hi, lo, length,
 		    length >= 5 ? ", first parameter " : "", length >= 5 ? sub : 0, extra);
 	}

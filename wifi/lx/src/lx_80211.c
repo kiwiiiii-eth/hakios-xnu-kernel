@@ -162,6 +162,7 @@ struct lx_radio {
 
 static struct lx_radio *the_radio;
 static void ap_management(struct lx_radio *radio, const uint8_t *f, unsigned length);
+static int ap_output(struct lx_radio *radio, const uint8_t *frame, unsigned length);
 static const uint8_t no_network[ETH_ALEN];	/* the address of the network an interface has joined, while it has joined none */
 
 static struct lx_radio *
@@ -2239,6 +2240,10 @@ lx_station_send(const unsigned char *frame, unsigned long length)
 {
 	struct lx_radio *radio = the_radio;
 
+	if (radio != NULL && radio->ap_on) {
+		tx_wait();
+		return (ap_output(radio, frame, (unsigned)length));
+	}
 	if (radio == NULL || !radio->joined) {
 		return (ENETDOWN);
 	}
@@ -2462,6 +2467,9 @@ ap_client_gone(struct lx_radio *radio, struct lx_client *c, const char *why)
 	if (!c->used) {
 		return;
 	}
+	c->step = 0;					/* (no frame is sent to it from here on: ap_output() skips it) */
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	lx_pause_ms(5);
 	if (c->pairwise_key != NULL) {
 		mutex_lock(&radio->wiphy->mtx);
 		radio->ops->set_key(&radio->hw, DISABLE_KEY, radio->vif, c->sta, c->pairwise_key);
@@ -2531,6 +2539,29 @@ ap_ethernet_to(struct lx_radio *radio, struct lx_client *c, const uint8_t *frame
 	IEEE80211_SKB_CB(skb)->control.hw_key = c->pairwise_key;
 	ap_send(radio, c, skb);
 	return (true);
+}
+
+/*
+ * A frame of the hotspot's network (en0) out to its stations: to the one it is addressed to, or to every one that has joined
+ * when it is for everybody (a copy each, ciphered with its own key). 0, or an errno.
+ */
+static int
+ap_output(struct lx_radio *radio, const uint8_t *frame, unsigned length)
+{
+	bool all = (frame[0] & 1) != 0, any = false;
+
+	for (unsigned i = 0; i < 8; i++) {
+		struct lx_client *c = &radio->clients[i];
+
+		if (!c->used || c->step != 4 || (!all && memcmp(c->address, frame, ETH_ALEN) != 0)) {
+			continue;
+		}
+		any = ap_ethernet_to(radio, c, frame, length) || any;
+		if (!all) {
+			break;
+		}
+	}
+	return (any || all ? 0 : EHOSTUNREACH);
 }
 
 /* A message of the handshake to a station (message 1 or 3), in an Ethernet frame of type 0x888e. */
@@ -2847,6 +2878,7 @@ ap_ethernet_received(struct lx_radio *radio, struct sk_buff *skb)
 			lx_tell("lx: access point: %u frames from station number %u so far (type %02x%02x)\n", c->received, c->aid,
 			    skb->data[12], skb->data[13]);
 		}
+		lx_os_net_input(skb->data, skb->len);		/* (to the hotspot's network: en0, 172.20.10.1) */
 	}
 }
 
@@ -2856,6 +2888,9 @@ ap_stop(struct lx_radio *radio)
 	struct ieee80211_hw *hw = &radio->hw;
 	struct ieee80211_vif *vif = radio->vif;
 
+	if (radio->ap_on) {
+		lx_os_net_quiet(0);
+	}
 	if (radio->ap_works_ready) {
 		radio->ap_on = false;
 		cancel_delayed_work_sync(&radio->ap_tick);
@@ -2986,6 +3021,7 @@ ap_start(struct lx_radio *radio, const struct hakios_sta_ap *what)
 	bss_changed(radio, BSS_CHANGED_SSID | BSS_CHANGED_BEACON_INT | BSS_CHANGED_BASIC_RATES | BSS_CHANGED_ERP_SLOT |
 	    BSS_CHANGED_ERP_PREAMBLE | BSS_CHANGED_BEACON | BSS_CHANGED_BEACON_ENABLED);
 	radio->ap_on = true;
+	lx_os_net_quiet(1);
 	queue_delayed_work(radio->work, &radio->ap_tick, msecs_to_jiffies(1000));
 	lx_tell("lx: THE ACCESS POINT IS UP: a network of %u bytes' name, WPA2 with a passphrase (%u characters), channel %u; "
 	    "beacons every %u TU\n", radio->ap.ssid_length, radio->ap.passphrase_length, ap_channel_number(radio), AP_BEACON_INTERVAL);

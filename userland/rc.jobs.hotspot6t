@@ -3,7 +3,7 @@
 # to join; the kernel's log has the authentication, the association and the handshake.
 /redwood/bin/quietboot &
 /var/jb/usr/bin/sleep 60
-/redwood/bin/hotspot on
+/redwood/bin/hotspot on &
 /var/jb/usr/bin/sleep 5
 /redwood/bin/hotspot status
 /var/jb/usr/bin/sleep 300

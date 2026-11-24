@@ -55,6 +55,45 @@ static errno_t pdp_demux(ifnet_t ifp, mbuf_t packet, char *header,
     else return EPROTONOSUPPORT;
     return 0;
 }
+/*
+ * Forwarded packets (the hotspot's: a TTL that is not 64, 128 or 255, as no stack of this phone sends), the first dozen
+ * a boot, said: what they are, whether their source is pdp_ip0's own address, and whether the IP header's and the TCP
+ * or UDP checksums are right -- pf's NAT has rewritten them by then (25 November: 211 of them out, nothing back).
+ */
+static uint16_t pdp_sum(const uint8_t *b, size_t n, uint32_t sum)
+{
+    for(size_t i=0;i+1<n;i+=2)sum+=(uint32_t)(b[i]<<8|b[i+1]);
+    if(n&1)sum+=(uint32_t)b[n-1]<<8;
+    while(sum>>16)sum=(sum&0xffff)+(sum>>16);
+    return (uint16_t)sum;
+}
+static void pdp_say_forwarded(ifnet_t ifp, const uint8_t *b, size_t n)
+{
+    static unsigned said;
+    if(n<20 || (b[0]>>4)!=4 || b[8]==64 || b[8]==128 || b[8]==255 || said>=12)return;
+    size_t header=(size_t)(b[0]&15)*4;
+    if(header<20 || header>n)return;
+    said++;
+    bool ip_ok=pdp_sum(b,header,0)==0xffff, l4_ok=false, own=false;
+    unsigned total=(unsigned)(b[2]<<8|b[3]), sport=0, dport=0, flags=0;
+    if((b[9]==6 || b[9]==17) && total<=n && total>header+8) {
+        uint32_t pseudo=(uint32_t)(b[12]<<8|b[13])+(uint32_t)(b[14]<<8|b[15])+(uint32_t)(b[16]<<8|b[17])+(uint32_t)(b[18]<<8|b[19])+b[9]+(total-header);
+        l4_ok=pdp_sum(b+header,total-header,pseudo)==0xffff || (b[9]==17 && b[header+6]==0 && b[header+7]==0);
+        sport=(unsigned)(b[header]<<8|b[header+1]);dport=(unsigned)(b[header+2]<<8|b[header+3]);
+        if(b[9]==6 && total>header+13)flags=b[header+13];
+    }
+    ifaddr_t *addresses=NULL;
+    if(ifnet_get_address_list_family(ifp,&addresses,AF_INET)==0 && addresses!=NULL) {
+        for(int i=0;addresses[i]!=NULL;i++) {
+            struct sockaddr_in a;
+            if(ifaddr_address(addresses[i],(struct sockaddr *)&a,sizeof(a))==0 && memcmp(&a.sin_addr,b+12,4)==0)own=true;
+        }
+        ifnet_free_address_list(addresses);
+    }
+    printf("native-pdp: forwarded out %u: proto %u, TTL %u, %u bytes, source %s, IP sum %s, %s sum %s, ports %u->%u, TCP flags %#x\n",
+        said,b[9],b[8],total,own?"pdp_ip0's":"NOT pdp_ip0's",ip_ok?"ok":"BAD",b[9]==6?"TCP":b[9]==17?"UDP":"L4",l4_ok?"ok":"BAD",
+        sport,dport,flags);
+}
 static errno_t pdp_output(ifnet_t ifp, mbuf_t packet)
 {
     struct hakios_pdp_if *p=ifnet_softc(ifp);
@@ -62,7 +101,7 @@ static errno_t pdp_output(ifnet_t ifp, mbuf_t packet)
     bool sent=false;
     if(p && n>=20 && n<=sizeof(bytes) && (ifnet_flags(ifp)&IFF_UP) &&
        mbuf_copydata(packet,0,n,bytes)==0 && ((bytes[0]>>4)==4 || (bytes[0]>>4)==6))
-        sent=hakios_ipa_transmit((uint8_t)(p->unit+1),bytes,n);
+        {if(p->unit==0)pdp_say_forwarded(ifp,bytes,n);sent=hakios_ipa_transmit((uint8_t)(p->unit+1),bytes,n);}
     if(sent)ifnet_stat_increment_out(ifp,1,(u_int32_t)n,0);
     else ifnet_stat_increment_out(ifp,0,0,1);
     mbuf_freem(packet);

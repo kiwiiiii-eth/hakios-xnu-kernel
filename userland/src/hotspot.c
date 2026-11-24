@@ -36,6 +36,7 @@
 #include <net/bpf.h>
 #include <net/if_dl.h>
 #include <ifaddrs.h>
+#include <CommonCrypto/CommonDigest.h>
 #define PRIVATE 1
 #include <net/pfvar.h>
 
@@ -174,6 +175,26 @@ lan_nat(const char *wan)
  * en0. No address is printed.
  */
 static const char *stats_wan;
+static in_addr_t nat_wan_address;           /* WAN's IPv4 address when the NAT was last laid down (0: none then) */
+
+/* NAME's first IPv4 address, or 0 */
+static in_addr_t
+ipv4_of(const char *name)
+{
+	struct ifaddrs *all = NULL;
+	in_addr_t found = 0;
+
+	if (getifaddrs(&all) != 0) {
+		return 0;
+	}
+	for (struct ifaddrs *p = all; p != NULL && found == 0; p = p->ifa_next) {
+		if (p->ifa_addr != NULL && p->ifa_addr->sa_family == AF_INET && strcmp(p->ifa_name, name) == 0) {
+			found = ((struct sockaddr_in *)p->ifa_addr)->sin_addr.s_addr;
+		}
+	}
+	freeifaddrs(all);
+	return found;
+}
 
 static void
 link_counts(const char *name, char *out, size_t size)
@@ -249,6 +270,69 @@ stats(void)
 			}
 			if (count == 0) {
 				printf("hotspot: stats: NO NAT rule\n");
+			}
+			if (count != 0) {
+				struct pfioc_pooladdr pool;
+
+				memset(&pool, 0, sizeof(pool));
+				pool.r_action = PF_NAT;
+				pool.r_num = 0;
+				pool.ticket = rule.ticket;
+				if (ioctl(dev, DIOCGETADDRS, &pool) == 0 && pool.nr != 0) {
+					pool.nr = 0;
+					pool.ticket = rule.ticket;
+					if (ioctl(dev, DIOCGETADDR, &pool) == 0) {
+						/* (pf gives the number of addresses it took from the interface, not the addresses) */
+						printf("hotspot: stats: the NAT translates to %d of %s's addresses; %s has %s\n", pool.addr.addr.p.dyncnt,
+						    stats_wan, stats_wan, ipv4_of(stats_wan) != 0 ? "an IPv4 address" : "no IPv4 address");
+					} else {
+						printf("hotspot: stats: the NAT's address not read: %s\n", strerror(errno));
+					}
+				}
+			}
+		}
+		{
+			/*
+			 * The stations' connections in pf's state table (their inside address 172.20.10.0/28): how many, how many of them
+			 * NAT'd to WAN's address (gwy), and their packets each way -- out (from the station) and back (the answers). Back 0
+			 * with WAN's address: nothing answers what went out; back > 0 with en0 still silent: the way to en0 is wrong.
+			 */
+			static struct pfsync_state table[256];
+			struct pfioc_states states;
+			in_addr_t now = ipv4_of(stats_wan);
+			unsigned stations = 0, translated = 0, out = 0, back = 0;
+
+			memset(&states, 0, sizeof(states));
+			states.ps_len = sizeof(table);
+			states.ps_states = table;
+			if (ioctl(dev, DIOCGETSTATES, &states) == 0) {
+				for (unsigned i = 0; i < (unsigned)states.ps_len / sizeof(table[0]); i++) {
+					const struct pfsync_state *s = &table[i];
+
+					if (s->af_lan != AF_INET || (ntohl(s->lan.addr.v4addr.s_addr) & 0xfffffff0u) != 0xac140a00u) {
+						continue;
+					}
+					stations++;
+					translated += now != 0 && s->gwy.addr.v4addr.s_addr == now;
+					out += s->packets[0][1];
+					back += s->packets[1][1];
+				}
+				printf("hotspot: stats: the stations' connections: %u (%u NAT'd to %s's address), %u packets out, %u back\n",
+				    stations, translated, stats_wan, out, back);
+				for (unsigned i = 0; i < (unsigned)states.ps_len / sizeof(table[0]); i++) {
+					const struct pfsync_state *s = &table[i];
+					const unsigned char *g = (const unsigned char *)&s->gwy.addr.v4addr.s_addr, *w = (const unsigned char *)&now;
+
+					if (s->af_lan == AF_INET && (ntohl(s->lan.addr.v4addr.s_addr) & 0xfffffff0u) == 0xac140a00u) {
+						/* (the first such connection, its addresses cut to their first two parts) */
+						printf("hotspot: stats: a station's connection: NAT'd to %u.%u.x.x%s (%s's is %u.%u.x.x), nat rule %d, "
+						    "proto %u, direction %u\n", g[0], g[1], s->gwy.addr.v4addr.s_addr == s->lan.addr.v4addr.s_addr ?
+						    " = its own, not translated" : "", stats_wan, w[0], w[1], (int)s->nat_rule, s->proto, s->direction);
+						break;
+					}
+				}
+			} else {
+				printf("hotspot: stats: pf's states not read: %s\n", strerror(errno));
 			}
 		}
 		close(dev);
@@ -405,6 +489,22 @@ dhcp_serve(void)
 			printf("hotspot: the hotspot is off: the DHCP server stops\n");
 			return;
 		}
+		/*
+		 * WAN's address, as the NAT was laid down with: at boot Settings turns the hotspot on before CommCenter's data call
+		 * has an address, and the NAT so made sent the stations' packets out with none their answers came back to
+		 * (25 November: 211 packets out of pdp_ip0, almost nothing back). So when the address comes, or changes, the NAT
+		 * is laid down again.
+		 */
+		if (stats_wan != NULL) {
+			in_addr_t now = ipv4_of(stats_wan);
+
+			if (now != nat_wan_address) {
+				printf("hotspot: %s's address %s: the NAT laid down again\n", stats_wan, now == 0 ? "gone" :
+				    nat_wan_address == 0 ? "is there now" : "changed");
+				nat_wan_address = now;
+				(void)lan_nat(stats_wan);
+			}
+		}
 		if (stats_wan != NULL && time(NULL) - stats_at >= 30) {
 			stats_at = time(NULL);
 			stats();
@@ -496,6 +596,7 @@ network(void)
 	if (sysctlbyname("net.inet.ip.forwarding", NULL, NULL, &one, sizeof(one)) != 0) {
 		say("hotspot: %s: %s\n", "IP forwarding", errno);
 	}
+	nat_wan_address = ipv4_of(wan);
 	(void)lan_nat(wan);
 	stats_wan = wan;
 	fflush(stdout);
@@ -622,6 +723,20 @@ serve_off(void)
 	}
 }
 
+/* a passphrase's fingerprint: the first 4 hex digits of its SHA-256 -- enough to tell two apart, nothing to guess it by.
+ * Settings says the same of the one it shows (src/settings_ui.m), so a phone and its pane can be compared in a log. */
+static const char *
+fingerprint(const char *passphrase)
+{
+	static char hex[5];
+	unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+
+	CC_SHA256(passphrase, (CC_LONG)strlen(passphrase), digest);
+	snprintf(hex, sizeof(hex), "%02x%02x", digest[0], digest[1]);
+	memset(digest, 0, sizeof(digest));
+	return hex;
+}
+
 static void
 serve_apply(void)
 {
@@ -659,7 +774,8 @@ serve_apply(void)
 		memset(&c, 0, sizeof(c));
 		return;
 	}
-	printf("hotspot: on (Settings): \"%s\"\n", c.name);
+	printf("hotspot: on (Settings): \"%s\", a passphrase of %zu characters, fingerprint %s\n", c.name, strlen(c.password),
+	    fingerprint(c.password));
 	fflush(stdout);
 	if ((network_child = fork()) == 0) {
 		memset(&c, 0, sizeof(c));

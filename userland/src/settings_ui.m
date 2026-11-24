@@ -13,6 +13,7 @@
  * Nothing here touches MobileGestalt: hooks of it in the UI processes cost SIGBUSes in those runs.
  */
 #import <UIKit/UIKit.h>
+#import <CommonCrypto/CommonDigest.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <notify.h>
@@ -344,7 +345,18 @@ hotspot_switch_set(__unused id self, __unused SEL command, id value, __unused id
 static id
 hotspot_password_value(__unused id self, __unused SEL command, __unused id spec)
 {
-	return conf_read()[@"password"] ?: @"";
+	NSString *password = conf_read()[@"password"] ?: @"";
+	static NSString *said;
+	if (![said isEqualToString:password]) {        /* (once per passphrase: its fingerprint, as src/hotspot.c says it) */
+		unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+		const char *text = password.UTF8String;
+
+		CC_SHA256(text, (CC_LONG)strlen(text), digest);
+		say([NSString stringWithFormat:@"hotspot: Settings shows a passphrase of %lu characters, fingerprint %02x%02x",
+		    (unsigned long)password.length, digest[0], digest[1]]);
+		said = password;
+	}
+	return password;
 }
 
 static void
@@ -614,14 +626,26 @@ root_rows(id self, SEL command)
 			}
 		}
 	}
-	if (hotspot && index_of(rows, @"INTERNET_TETHERING") == NSNotFound) {
+	/*
+	 * Ours, also where iOS puts its own: with the native cellular data (bbdt=1 makes the device cellular) Settings shows
+	 * iOS's Personal Hotspot (WirelessModemSettings), whose switch and password go to MobileInternetSharing, which does
+	 * nothing here -- while src/hotspot.c, the hotspot that works, kept its own (25 November: the pane showed one
+	 * password, the network took another, and was on from the start). So iOS's row is replaced by ours, in its place.
+	 */
+	NSUInteger native_hotspot = index_of(rows, @"INTERNET_TETHERING");
+	if (hotspot && (native_hotspot == NSNotFound || ![property(rows[native_hotspot], @"HKHotspot") boolValue])) {
 		NSUInteger after = at_cellular != NSNotFound ? at_cellular : index_of(rows, @"Bluetooth");
 		id row = specifier(S(@"PERSONAL_HOTSPOT", @"Personal Hotspot"), self, NULL, NSSelectorFromString(@"hk_hotspotStatus:"),
 		    NSClassFromString(@"HKHotspotController"), LINK_LIST);
-		if (row != nil && after != NSNotFound) {
+		if (row != nil && (native_hotspot != NSNotFound || after != NSNotFound)) {
 			set_identifier(row, @"INTERNET_TETHERING");
+			set_property(row, @YES, @"HKHotspot");
 			set_property(row, icon(@"PersonalHotspot", @"personalhotspot", UIColor.systemGreenColor), @"iconImage");
-			[rows insertObject:row atIndex:after + 1];
+			if (native_hotspot != NSNotFound) {
+				rows[native_hotspot] = row;
+			} else {
+				[rows insertObject:row atIndex:after + 1];
+			}
 			changed = YES;
 		}
 	}

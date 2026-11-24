@@ -1,0 +1,15 @@
+# (2026-11-25) Screenshots of Settings with the native cellular data (as rc.jobs.cell6t; with boot-args rec_start=135
+# rec_secs=60 rec_interval_ms=2000 rec_mb=64): the main list, Cellular, Personal Hotspot.
+/redwood/bin/quietboot &
+/redwood/bin/rtcclock &
+/redwood/bin/celltz &
+/redwood/bin/gnssfeed &
+/redwood/bin/lsplugins
+/redwood/bin/cellnet_test 130
+/redwood/bin/rwtouch notify com.hakios.unlock wait 3 notify com.hakios.open.prefs wait 12
+/redwood/bin/battery_test open prefs:root=MOBILE_DATA_SETTINGS_ID
+/var/jb/usr/bin/sleep 15
+/redwood/bin/battery_test open prefs:root=INTERNET_TETHERING
+/var/jb/usr/bin/sleep 15
+/redwood/bin/cellnet_test
+/var/jb/usr/bin/sleep 36000

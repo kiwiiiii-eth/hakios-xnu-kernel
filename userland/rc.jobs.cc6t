@@ -1,0 +1,6 @@
+# (2026-11-24) Cellular the way Darwin does it, the first look (boot-arg bbdt=1: a /baseband in the device tree, so that
+# launchd loads com.apple.CommCenter, not the noncellular one; ALLOW=CommCenter): what CommCenter and abm-helper say last
+# before each of their deaths (EXTRA_SHARE=.../ccprobe: ccprobe.sh).
+/redwood/bin/quietboot &
+/var/jb/usr/bin/bash /redwood/share/ccprobe/ccprobe.sh
+/var/jb/usr/bin/sleep 36000

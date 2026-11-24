@@ -356,6 +356,14 @@ lx_os_net_link(int up)
 }
 
 void
+lx_os_net_quiet(int up)
+{
+	if (lx_link_attached) {
+		hakios_net_link_quiet(up != 0);
+	}
+}
+
+void
 lx_os_net_input(const unsigned char *frame, unsigned long length)
 {
 	if (lx_link_attached && length <= HAKIOS_NET_FRAME_MAX) {

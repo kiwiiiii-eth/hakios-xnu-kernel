@@ -334,6 +334,17 @@ hakios_net_link_state(bool up)
 	hakios_net_link_state_unit(0, up);
 }
 
+void
+hakios_net_link_quiet(bool up)
+{
+	struct net_if *n = net_if_unit(0);
+
+	if (n != NULL && n->up != up) {
+		n->up = up;
+		printf("net: en%u passes frames %s (the hotspot; no event)\n", n->unit, up ? "from now on" : "no more");
+	}
+}
+
 /* The interface's own thread: for a link that wants to be asked, and for the minute's line in the log. */
 static void
 net_thread(void *parameter, __unused wait_result_t result)

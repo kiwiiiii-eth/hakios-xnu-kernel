@@ -150,7 +150,8 @@ INJECT=${INJECT-"/redwood/lib/libhakios.dylib backboardd containermanagerd conta
 /redwood/lib/libhakios.sb.dylib SpringBoard
 /redwood/lib/libhakios.media.dylib mediaserverd
 /redwood/lib/libhakios.app.dylib Sileo
-/redwood/lib/libhakios.tweaks.dylib Preferences"}
+/redwood/lib/libhakios.tweaks.dylib Preferences
+/redwood/lib/libhakios.cc.dylib CommCenter"}
 [ -n "$BT" ] && INJECT="$INJECT
 /redwood/lib/libhakios.bt.dylib BlueTool bluetoothd"
 mkdir -p obj
@@ -196,6 +197,15 @@ for d in $EXTRA_SHARE; do
 	[ -d "$d" ] || { echo "build.sh: EXTRA_SHARE: $d is not a directory"; exit 1; }
 	cp -rL "$d" root/share/
 done
+# CARRIER=1: the IPSW's carrier bundles (../sysimage/carrier-bundles, taken from its root file system; never in the
+# repository) in this image, for a RAM boot whose system image was made before select-system.py kept them: init binds
+# them over /System/Library/Carrier Bundles, and CommCenter finds the SIM's carrier there (cellular, abb=1). -R keeps
+# the bundles' links (MCC-MNC names pointing at bundles).
+rm -rf root/carrier-bundles
+if [ -n "$CARRIER" ]; then
+	[ -d ../sysimage/carrier-bundles/iPhone ] || { echo "build.sh: CARRIER=1: no ../sysimage/carrier-bundles/iPhone"; exit 1; }
+	cp -R ../sysimage/carrier-bundles root/carrier-bundles
+fi
 # Metal's compiled shader stages from an earlier boot (tools/metal-cache-seed.sh puts them in
 # userland/hakios-metal-cache): the window server reads them from /redwood/share/hakios-metal-cache
 # (HakiosMetalCA.m: HM_CACHE_SEED) instead of compiling CoreAnimation's shaders during the first minute
@@ -258,6 +268,12 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -fobjc-arc -framework Foundation -framework MobileCoreServices -o obj/lsplugins src/lsplugins.m &&
 			{ ${LDID:-ldid} -Ssrc/lsplugins.entitlements obj/lsplugins 2>/dev/null ||
 			  echo "build.sh: no ldid: lsplugins is unsigned, and lsd will refuse it"; }
+		# the hotspot on and off (src/hotspot.c, kern.hakios.hotspot*)
+		# (pf's ioctls with the kernel's own structures: its net/pfvar.h, and the two headers it needs, from the tree)
+		mkdir -p obj/pfinc/net obj/pfinc/libkern
+		cp ../xnu-src/xnu-8796.121.2/bsd/net/pfvar.h ../xnu-src/xnu-8796.121.2/bsd/net/radix.h ../xnu-src/xnu-8796.121.2/bsd/net/bpf.h obj/pfinc/net/ 2>/dev/null
+		cp ../xnu-src/xnu-8796.121.2/libkern/libkern/tree.h obj/pfinc/libkern/ 2>/dev/null
+		$DYN -Iobj/pfinc -o obj/hotspot src/hotspot.c
 		$DYN -fobjc-arc -framework Foundation -o obj/logdump src/logdump.m &&
 			{ ${LDID:-ldid} -Ssrc/logdump.entitlements obj/logdump 2>/dev/null ||
 			  echo "build.sh: no ldid: logdump is unsigned, and logd will not let it read"; }
@@ -280,7 +296,9 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -o obj/vol_ls src/vol_ls.c
 		$DYN -framework CoreFoundation -framework CoreGraphics -framework ImageIO -o obj/snap_test src/snap_test.c
 		$DYN -framework CoreFoundation -framework CoreGraphics -framework CoreText -o obj/font_test src/font_test.c
-		$DYN -fobjc-arc -framework Foundation -framework SystemConfiguration -o obj/net_test src/net_test.m
+		$DYN -fobjc-arc -framework Foundation -framework SystemConfiguration -o obj/net_test src/net_test.m &&
+		# the native cellular interface's traffic, bound to pdp_ip0 (src/cellnet_test.c; abb=1 modem_native_pdp=1)
+		$DYN -Wall -Wextra -o obj/cellnet_test src/cellnet_test.c
 		# (with an entitlement for "battery_test open URL", if ldid is there: src/battery_test.c)
 		$DYN -framework CoreFoundation -framework IOKit -lsqlite3 -o obj/battery_test src/battery_test.c &&
 			{ ${LDID:-ldid} -Ssrc/battery_test.entitlements obj/battery_test 2>/dev/null ||
@@ -307,6 +325,18 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		# program either as the one library the kernel inserts or opened by a library of ours
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.tweaks.dylib -framework CoreFoundation -lobjc \
 			-o obj/libhakios.tweaks.dylib src/inject_tweaks.c
+		# ... which, in Settings, opens Settings' panes of this phone (src/settings_ui.m); and SpringBoard's library opens the
+		# power menu's and the volume HUD's (src/sb_ui.m)
+		$DYN -fobjc-arc -dynamiclib -install_name /redwood/lib/libhakios.settings.dylib -framework Foundation -framework UIKit \
+			-o obj/libhakios.settings.dylib src/settings_ui.m
+		$DYN -fobjc-arc -dynamiclib -install_name /redwood/lib/libhakios.sbui.dylib -framework Foundation -framework UIKit \
+			-o obj/libhakios.sbui.dylib src/sb_ui.m
+		# ... and inside CommCenter, with abb=1: the baseband manager told that the modem is booted already, its transport
+		# over /dev/hakios-qmuxN, and with cc_generic_modem_mode=1 its SIM, service and carrier model fed from this modem
+		# (src/inject_cc.c; src/inject_cc_dictionary.mm reads CommCenter's own CF dictionaries, in C++)
+		$DYN -fno-exceptions -fno-rtti -c -o obj/inject_cc_dictionary.o src/inject_cc_dictionary.mm &&
+		$DYN -dynamiclib -install_name /redwood/lib/libhakios.cc.dylib -framework CoreFoundation -lc++ \
+			-o obj/libhakios.cc.dylib src/inject_cc.c obj/inject_cc_dictionary.o
 		# ... and inside an application, to say what killed it (src/inject_app.c)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.app.dylib -lobjc \
 			-o obj/libhakios.app.dylib src/inject_app.c
@@ -417,6 +447,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/logdump ] && cp obj/logdump root/bin/
 	[ -f obj/lsplugins ] && cp obj/lsplugins root/bin/
 	[ -f obj/devname ] && cp obj/devname root/bin/
+	[ -f obj/hotspot ] && cp obj/hotspot root/bin/
 	[ -f obj/stacks ] && cp obj/stacks root/bin/
 	[ -f obj/varsaver ] && cp obj/varsaver root/bin/
 	[ -f obj/rtcclock ] && cp obj/rtcclock root/bin/
@@ -432,6 +463,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/metal_test ] && cp obj/metal_test root/bin/
 	[ -f obj/fps_info ] && cp obj/fps_info root/bin/
 	[ -f obj/net_test ] && cp obj/net_test root/bin/
+	[ -f obj/cellnet_test ] && cp obj/cellnet_test root/bin/
 	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
 	[ -f obj/keychain_test ] && cp obj/keychain_test root/bin/
 	[ -f obj/aks_restore ] && cp obj/aks_restore root/bin/
@@ -450,6 +482,9 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/libhakios.media.dylib ] && cp obj/libhakios.media.dylib root/lib/     # (as with cpu_test)
 	[ -f obj/libhakios.app.dylib ] && cp obj/libhakios.app.dylib root/lib/
 	[ -f obj/libhakios.tweaks.dylib ] && cp obj/libhakios.tweaks.dylib root/lib/
+	[ -f obj/libhakios.settings.dylib ] && cp obj/libhakios.settings.dylib root/lib/
+	[ -f obj/libhakios.sbui.dylib ] && cp obj/libhakios.sbui.dylib root/lib/
+	[ -f obj/libhakios.cc.dylib ] && cp obj/libhakios.cc.dylib root/lib/
 	if [ -n "$BT" ] && [ -f obj/libhakios.bt.dylib ]; then cp obj/libhakios.bt.dylib root/lib/; fi
 	if [ -f obj/HakiosAudio ]; then
 		mkdir -p root/lib/HakiosAudio.driver
@@ -527,6 +562,13 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			printf 'f\t600\t0\t0\t/private/var/root/.ssh/%s\t/var/root/.ssh/%s\n' $k $k >> root/etc/var.skel
 		done
 	fi
+	# The hotspot's name and passphrase, when there are some: ssh/hotspot (two lines), never in the repository; src/hotspot.c
+	# reads them from /private/var/root/hakios-hotspot. SHARE=1 leaves them out, as the keys
+	if [ -z "$SHARE" ] && [ -f ../ssh/hotspot ]; then
+		mkdir -p root/var/root
+		cp ../ssh/hotspot root/var/root/hakios-hotspot
+		printf 'f\t600\t0\t0\t/private/var/root/hakios-hotspot\t/var/root/hakios-hotspot\n' >> root/etc/var.skel
+	fi
 	cp ${RC:-rc.launchd} root/etc/rc
 	cp ${RC_JOBS:-rc.jobs} root/etc/rc.jobs
 	# QUIET=1: launchd's own standard error goes nowhere (src/init.c). It says a few thousand
@@ -540,6 +582,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# and not by what select-system.py extracted here (--root-volume; seven jobs turn on the difference,
 	# fairplayd among them).
 	cp com.hakios.demo.plist com.hakios.wifi.plist root/LaunchDaemons/
+	[ -f obj/hotspot ] && cp com.hakios.hotspot.plist root/LaunchDaemons/
 	VOLUME=""
 	[ -n "$FLASHBOOT" ] && [ -f $DARWIN/rootfs.slt ] && VOLUME="--root-volume $DARWIN/rootfs.slt"
 	[ -n "$DARWIN_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $DARWIN/rootfs root/LaunchDaemons $DARWIN_JOBS
@@ -632,6 +675,7 @@ secrets=
 [ -f root/fw/network ] && secrets="$secrets fw/network (the name and passphrase of your Wi-Fi)"
 [ -f root/var/root/.ssh/ssh_host_ed25519_key ] &&
 	secrets="$secrets /var/root/.ssh/ssh_host_ed25519_key (a private key)"
+[ -f root/var/root/hakios-hotspot ] && secrets="$secrets /var/root/hakios-hotspot (the hotspot's passphrase)"
 if [ -n "$secrets" ]; then
 	echo "build.sh: this image carries:$secrets"
 	echo "build.sh: do not pass it on as it is; SHARE=1 builds the same image without them."
@@ -842,6 +886,13 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	# our audio device, where the audio server looks for such plug-ins (and for no others: Apple's are left out)
 	mkdir -p sysroot/System/Library/Audio/Plug-Ins/HAL
 	ln -s /redwood/lib/HakiosAudio.driver sysroot/System/Library/Audio/Plug-Ins/HAL/HakiosAudio.driver
+	# TELEPHONY_LOG=1 (a test): the baseband IPC's info messages kept by logd (com.apple.telephony.ipc: libPCITransport and
+	# the Mav router say why an engage fails at that level only); the image's file is a link to the unpacked one, so a new one
+	if [ -n "${TELEPHONY_LOG:-}" ]; then
+		f=sysroot/System/Library/Preferences/Logging/Subsystems/com.apple.telephony.ipc.plist
+		rm -f "$f"
+		printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>DEFAULT-OPTIONS</key><dict><key>Enable</key><string>Info</string><key>Persist</key><string>Info</string></dict></dict></plist>\n' > "$f"
+	fi
 	# the plug-in Metal opens when the accelerator names it (boot-arg metal=1; without it nothing names this bundle)
 	rm -rf sysroot/usr/local/redwood
 	[ -d big ] && mkdir -p sysroot/usr/local && cp -a big sysroot/usr/local/redwood

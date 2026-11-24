@@ -1,0 +1,19 @@
+# (2026-11-24) LaunchServices' database made afresh on the kept data volume, as at a first boot (the user asked for it):
+# its records of the system applications had their names in English alone (lsplugins --names, r291: "Calendar" even
+# when asked in zh-Hant-TW), from the first boot, before Chinese was in the image; re-registering does not read the names
+# again (r282, r287, r289), a new database does (r286). The database removed, lsd started again to make it, SpringBoard
+# again; Files' extensions registered again (lsplugins, its mark removed); the names asked; the home screen recorded.
+/redwood/bin/quietboot &
+/var/jb/usr/bin/sleep 30
+/var/jb/usr/bin/find /private/var -name *.csstore -print
+/var/jb/usr/bin/find /private/var -name *.csstore -print -delete
+/var/jb/usr/bin/killall -9 lsd
+/var/jb/usr/bin/sleep 60
+/redwood/bin/lsplugins --names com.apple.mobilecal com.apple.Preferences com.apple.mobilesafari
+/var/jb/usr/bin/rm -f /private/var/db/hakios-lsplugins-1
+/redwood/bin/lsplugins
+/var/jb/usr/bin/killall -9 SpringBoard
+/var/jb/usr/bin/sleep 20
+/var/jb/usr/bin/find /private/var -name *.csstore -print
+/redwood/bin/rwtouch wait 5 swipe 0.5 0.985 0.5 0.3 250
+/var/jb/usr/bin/sleep 36000

@@ -1,3 +1,4 @@
+abb	k
 adreno	k
 adreno_blind	k
 adreno_dirty	k
@@ -75,6 +76,7 @@ battery_shared_pa	k
 battery_stop	k
 battery_stop_poll	k
 battmgr	k
+bbdt	lu
 bootcpu	kl
 bt	k
 bt_after	k
@@ -266,6 +268,7 @@ modem_mdata	k
 modem_meta_quiet	k
 modem_mpss_early	k
 modem_nas_wait	k
+modem_native_pdp	k
 modem_new	k
 modem_no_ipa_qmi	k
 modem_no_nav	k
@@ -297,6 +300,7 @@ pmic_list	k
 press_power	k
 press_power_ms	k
 privs	k
+qmux_wds	k
 rd	kl
 rec_mb	k
 rec_ring	k
@@ -411,6 +415,8 @@ wallpaper_cache	u
 wallpaper_freeze	u
 wifi	k
 wifi_again	k
+wifi_ap	k
+wifi_ap_mhz	k
 wifi_arp_quiet	k
 wifi_ask	k
 wifi_ba	k

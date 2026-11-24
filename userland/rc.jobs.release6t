@@ -1,0 +1,22 @@
+# v0.7.1 RAM check (not shipped): the installed jobs' start, then the speaker, three recordings in one boot (the second
+# and third are issue #2's case), the camera, and the network again.
+/redwood/bin/quietboot &
+/redwood/bin/rtcclock &
+/redwood/bin/celltz &
+/redwood/bin/gnssfeed &
+/redwood/bin/lsplugins
+/var/jb/usr/bin/sleep 40
+/redwood/bin/net_test show
+/redwood/bin/sound_test springboard route wait 2 tone 2
+/redwood/bin/record_test 6 vibrate 3
+/redwood/bin/rwtouch wait 3
+/redwood/bin/record_test 6 vibrate 3
+/redwood/bin/rwtouch wait 3
+/redwood/bin/record_test 6 vibrate 3
+/redwood/bin/rwtouch wait 3
+/redwood/bin/camera_avtest
+/var/jb/usr/bin/ls -la /private/var/mobile/Media/DCIM/100APPLE
+/redwood/bin/rwtouch notify com.hakios.unlock wait 3 notify com.hakios.open.camera wait 15 tap 0.5 0.894 wait 8 button home wait 3
+/var/jb/usr/bin/ls -la /private/var/mobile/Media/DCIM/100APPLE
+/redwood/bin/net_test show
+/var/jb/usr/bin/sleep 36000

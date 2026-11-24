@@ -3044,6 +3044,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	int more_cores = 0, battery_requested = 0, ufs_requested = 0;
 	/* "torch=N" (not 0) there too: the phone's flashlight is the kernel's (drivers/camera/hakios.torch.c) */
 	int torch_requested = 0;
+	int baseband_requested = 0;
 	/* "cam=5" there too: the phone's wide camera is Darwin's (drivers/camera/hakios.camera.c) */
 	int camera_requested = 0;
 	/* (the loader stays for run after run: what the last run's arguments said must not hold for this one) */
@@ -3071,6 +3072,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		camera_requested |= starts_with(c, "cam=5") && (c == pi.cmdline || c[-1] == ' ') && (c[5] == 0 || c[5] == ' ');
 		gamut_p3 |= starts_with(c, "gamut=p3") && (c == pi.cmdline || c[-1] == ' ');
 		island_requested |= starts_with(c, "island=1") && (c == pi.cmdline || c[-1] == ' ') && (c[8] == 0 || c[8] == ' ');
+		baseband_requested |= starts_with(c, "bbdt=1") && (c == pi.cmdline || c[-1] == ' ') && (c[6] == 0 || c[6] == ' ');
 		if (starts_with(c, "ufs=") && (c == pi.cmdline || c[-1] == ' ') && c[4] >= '1' && c[4] <= '2' &&
 		    (c[5] == 0 || c[5] == ' ')) {
 			ufs_requested = c[4] - '0';
@@ -3373,6 +3375,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	/* the product: screen class, artwork scale, name ... as on the real phone */
 	dt_begin(&w, "product");
 	dt_identity(&w, identity_product, sizeof(identity_product) / sizeof(identity_product[0]), identity_product_data);
+	if (baseband_requested) {
+		dt_prop_str(&w, "baseband-chipset", "mav17");
+	}
 	/*
 	 * and its haptics: "closed-loop" (MobileGestalt's DeviceSupportsClosedLoopHaptics) makes Darwin play
 	 * its vibrations and feedbacks as waveforms on the "Actuator" audio device (the audio plug-in
@@ -3407,6 +3412,18 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_begin(&w, "buttons");
 	dt_prop_u32(&w, "home-button-type", 2);
 	dt_end(&w);
+	/*
+	 * Boot-arg bbdt=1 (a test, the cellular way of Darwin): /baseband as the iPhone X (Qualcomm, iPhone10,3) has it --
+	 * device_type and compatible -- and /product baseband-chipset. launchd loads com.apple.CommCenter only where the
+	 * tree has a baseband (_LimitLoadToDeviceTree), and the noncellular CommCenter otherwise; nothing of the modem's
+	 * own (its GPIOs, PMU functions, PCIe port) is here: this phone's modem is not on PCIe.
+	 */
+	if (baseband_requested) {
+		dt_begin(&w, "baseband");
+		dt_prop_str(&w, "device_type", "baseband");
+		dt_prop_str(&w, "compatible", "baseband,n41");
+		dt_end(&w);
+	}
 
 	/* IOKit publishes its NVRAM object on this node; without it IOKit asserts. */
 	dt_begin(&w, "options");

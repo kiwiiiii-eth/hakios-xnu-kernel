@@ -46,4 +46,15 @@ enum {
 int lx_wpa_message(struct lx_wpa *wpa, const unsigned char *message, unsigned length, unsigned char *reply,
     unsigned *reply_length, const char **why);
 
+/*
+ * The access point's side (the hotspot), with the same struct: own is the access point's address, peer the station's,
+ * own_nonce its nonce (ANonce); rsn its own RSN element (as its beacons have it), and group, group_index the group key it
+ * gives every station. lx_wpa_ap_first() makes message 1 (to `out`, LX_WPA_REPLY_MOST bytes); lx_wpa_ap_message() takes a
+ * station's message: LX_WPA_ANSWER for message 2 (the passphrase proved: send message 3, the reply), LX_WPA_KEYS for message
+ * 4 (the pairwise key, `pairwise`, and the group key are to be used now), LX_WPA_BAD (*why), LX_WPA_NOTHING.
+ */
+unsigned lx_wpa_ap_first(struct lx_wpa *wpa, unsigned char *out);
+int lx_wpa_ap_message(struct lx_wpa *wpa, const unsigned char *message, unsigned length, unsigned char *reply,
+    unsigned *reply_length, const char **why);
+
 #endif

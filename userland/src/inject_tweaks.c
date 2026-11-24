@@ -269,5 +269,10 @@ hakios_tweaks_init(void)
 		return;
 	}
 	done = true;
+	/* Settings' panes of this phone: Personal Hotspot, Cellular (src/settings_ui.m) */
+	if (getprogname() != NULL && strcmp(getprogname(), "Preferences") == 0 &&
+	    dlopen("/redwood/lib/libhakios.settings.dylib", RTLD_NOW | RTLD_GLOBAL) == NULL) {
+		say("hakios: /redwood/lib/libhakios.settings.dylib: %s\n", dlerror());
+	}
 	load_the_tweaks();
 }

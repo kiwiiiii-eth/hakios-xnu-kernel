@@ -27,6 +27,22 @@
 #include <sys/hakios.input.h>
 #include <sys/hakios.sta.h>
 #include <sys/systm.h>
+#include <sys/sysctl.h>
+#include <sys/random.h>
+#include <pexpert/pexpert.h>
+
+/* (memory that held a passphrase, cleared so that the compiler cannot leave it out: the kernel has no explicit_bzero) */
+static void
+wipe(void *memory, size_t length)
+{
+	volatile uint8_t *p = memory;
+
+	while (length-- != 0) {
+		*p++ = 0;
+	}
+}
+
+static void hotspot_test_start(void);
 
 extern void thread_set_thread_name(thread_t thread, const char *name);
 
@@ -44,6 +60,9 @@ static bool sta_on;                             /* the radio's power, as last as
 
 /* what has been asked for and not begun */
 static bool asked_power, asked_power_on, asked_scan, asked_join, asked_leave;
+static bool asked_ap, asked_ap_on;              /* the hotspot on (with asked_ap_what) or off */
+static struct hakios_sta_ap asked_ap_what;
+static bool ap_running;                         /* the radio is an access point */
 static struct hakios_sta_scan asked_scan_what;
 static struct hakios_sta_join asked_join_what;
 static struct hakios_sta_join standing;        /* the network joined whenever the radio comes on (ssid_length 0: none) */
@@ -73,16 +92,23 @@ sta_runs(__unused void *parameter, __unused wait_result_t result)
 
 	for (;;) {
 		const struct hakios_sta_ops *ops;
-		bool power = false, power_on = false, leave = false, do_join = false, do_scan = false;
+		bool power = false, power_on = false, leave = false, do_join = false, do_scan = false, do_ap = false, ap_on = false;
+		static struct hakios_sta_ap ap;
 		int error = 0;
 
 		lck_mtx_lock(&sta_lock);
-		while (sta_ops == NULL || !(asked_power || asked_leave || asked_join || asked_scan)) {
+		while (sta_ops == NULL || !(asked_power || asked_leave || asked_join || asked_scan || asked_ap)) {
 			lck_mtx_sleep(&sta_lock, LCK_SLEEP_DEFAULT, (event_t)&sta_ops, THREAD_UNINT);
 		}
 		ops = sta_ops;
 		/* one thing at a time, in the order that makes sense when several wait */
-		if (asked_power) {
+		if (asked_ap) {
+			do_ap = true;
+			ap_on = asked_ap_on;
+			ap = asked_ap_what;
+			wipe(&asked_ap_what, sizeof(asked_ap_what));
+			asked_ap = false;
+		} else if (asked_power) {
 			power = true;
 			power_on = asked_power_on;
 			asked_power = false;
@@ -102,7 +128,24 @@ sta_runs(__unused void *parameter, __unused wait_result_t result)
 		sta_calls = true;
 		lck_mtx_unlock(&sta_lock);
 
-		if (power) {
+		if (do_ap) {
+			if (ops->ap == NULL) {
+				error = ENOTSUP;
+			} else {
+				error = ops->ap(ap_on ? &ap : NULL);
+			}
+			wipe(&ap, sizeof(ap));
+			lck_mtx_lock(&sta_lock);
+			ap_running = ap_on && error == 0;
+			/* the hotspot off: the radio a station again, and the standing network joined */
+			if (!ap_on && standing.ssid_length != 0 && !asked_join) {
+				asked_power = true;
+				asked_power_on = true;
+			}
+			lck_mtx_unlock(&sta_lock);
+			hakios_wifi_tell(ap_on ? (error == 0 ? "wifi: the hotspot is on\n" : "wifi: the hotspot did not start\n") :
+			    "wifi: the hotspot is off\n");
+		} else if (power) {
 			struct hakios_sta_state *state = kalloc_data(sizeof(*state), Z_WAITOK | Z_ZERO);
 			bool was_joined = false;
 
@@ -117,7 +160,7 @@ sta_runs(__unused void *parameter, __unused wait_result_t result)
 			}
 			hakios_apple80211_event(HAKIOS_STA_POWER, error == 0 ? power_on : !power_on);
 			lck_mtx_lock(&sta_lock);
-			if (error == 0 && power_on && standing.ssid_length != 0 && !asked_join) {
+			if (error == 0 && power_on && standing.ssid_length != 0 && !asked_join && !ap_running) {
 				asked_join_what = standing;
 				asked_join = true;
 			}
@@ -197,6 +240,7 @@ hakios_sta_attach(const struct hakios_sta_ops *ops)
 	lck_mtx_unlock(&sta_lock);
 	thread_wakeup((event_t)&sta_ops);
 	hakios_apple80211_event(HAKIOS_STA_POWER, 1);
+	hotspot_test_start();
 }
 
 void
@@ -301,6 +345,143 @@ hakios_sta_ask_join(const struct hakios_sta_join *what)
 	lck_mtx_unlock(&sta_lock);
 	thread_wakeup((event_t)&sta_ops);
 	return 0;
+}
+
+/*
+ * The hotspot: the radio an access point (what: its name, passphrase, channel), or a station again (NULL). While it is
+ * one, scans and joins are refused (EBUSY) and the standing network is not joined; turned off, the radio comes up as a
+ * station and joins it again.
+ */
+int
+hakios_sta_ask_ap(const struct hakios_sta_ap *what)
+{
+	lck_mtx_lock(&sta_lock);
+	if (sta_ops == NULL) {
+		lck_mtx_unlock(&sta_lock);
+		return ENXIO;
+	}
+	asked_ap = true;
+	asked_ap_on = what != NULL;
+	if (what != NULL) {
+		asked_ap_what = *what;
+	} else {
+		wipe(&asked_ap_what, sizeof(asked_ap_what));
+	}
+	asked_join = asked_scan = false;
+	bzero(&asked_join_what, sizeof(asked_join_what));
+	lck_mtx_unlock(&sta_lock);
+	thread_wakeup((event_t)&sta_ops);
+	return 0;
+}
+
+/*
+ * sysctl kern.hakios.hotspot (1: on, 0: off; reads whether it is on), kern.hakios.hotspot_name (the network's name) and
+ * kern.hakios.hotspot_password (8 to 63 characters; written only: a read gives nothing). Root's to write.
+ */
+static struct hakios_sta_ap hotspot_config;
+
+static int
+sysctl_hotspot SYSCTL_HANDLER_ARGS
+{
+	int value = ap_running ? 1 : 0, error = sysctl_handle_int(oidp, &value, 0, req);
+
+	if (error != 0 || req->newptr == USER_ADDR_NULL) {
+		return error;
+	}
+	if (value != 0) {
+		struct hakios_sta_ap what = hotspot_config;
+
+		error = hakios_sta_ask_ap(&what);
+		wipe(&what, sizeof(what));
+		return error;
+	}
+	return hakios_sta_ask_ap(NULL);
+}
+
+static int
+sysctl_hotspot_name SYSCTL_HANDLER_ARGS
+{
+	char name[33];
+	int error;
+
+	bzero(name, sizeof(name));
+	memcpy(name, hotspot_config.ssid, hotspot_config.ssid_length);
+	error = sysctl_handle_string(oidp, name, sizeof(name), req);
+	if (error == 0 && req->newptr != USER_ADDR_NULL) {
+		hotspot_config.ssid_length = (uint8_t)strnlen(name, 32);
+		bzero(hotspot_config.ssid, sizeof(hotspot_config.ssid));
+		memcpy(hotspot_config.ssid, name, hotspot_config.ssid_length);
+	}
+	return error;
+}
+
+static int
+sysctl_hotspot_password SYSCTL_HANDLER_ARGS
+{
+	char password[65];
+	int error;
+
+	bzero(password, sizeof(password));      /* (a read gives an empty string) */
+	error = sysctl_handle_string(oidp, password, sizeof(password), req);
+	if (error == 0 && req->newptr != USER_ADDR_NULL) {
+		size_t length = strnlen(password, 64);
+
+		if (length < 8 || length > 63) {
+			wipe(password, sizeof(password));
+			return EINVAL;
+		}
+		wipe(hotspot_config.passphrase, sizeof(hotspot_config.passphrase));
+		memcpy(hotspot_config.passphrase, password, length);
+		hotspot_config.passphrase_length = (uint8_t)length;
+	}
+	wipe(password, sizeof(password));
+	return error;
+}
+
+SYSCTL_DECL(_kern_hakios);
+SYSCTL_PROC(_kern_hakios, OID_AUTO, hotspot, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0, sysctl_hotspot, "I",
+    "the hotspot: 1 on, 0 off");
+SYSCTL_PROC(_kern_hakios, OID_AUTO, hotspot_name, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0, sysctl_hotspot_name,
+    "A", "the hotspot's network name");
+SYSCTL_PROC(_kern_hakios, OID_AUTO, hotspot_password, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0,
+    sysctl_hotspot_password, "A", "the hotspot's WPA2 passphrase (written only)");
+
+/*
+ * Boot-arg wifi_ap=1 (a test): the hotspot on as soon as the radio is there, named "HakiOS-6T" (or what
+ * kern.hakios.hotspot_name holds by then), with the passphrase that kern.hakios.hotspot_password holds, else a random
+ * one nobody knows (so its beacons can be seen, and nothing can join); wifi_ap_mhz=N its channel (2437).
+ */
+static void
+hotspot_test_start(void)
+{
+	static const char hex[] = "0123456789abcdef";
+	struct hakios_sta_ap what = hotspot_config;
+	uint32_t on = 0, mhz = 0;
+
+	if (!PE_parse_boot_argn("wifi_ap", &on, sizeof(on)) || on == 0) {
+		return;
+	}
+	if (what.ssid_length == 0) {
+		memcpy(what.ssid, "HakiOS-6T", 9);
+		what.ssid_length = 9;
+	}
+	if (what.passphrase_length == 0) {
+		uint8_t random[12];
+
+		read_random(random, sizeof(random));
+		for (unsigned i = 0; i < sizeof(random); i++) {
+			what.passphrase[2 * i] = (uint8_t)hex[random[i] >> 4];
+			what.passphrase[2 * i + 1] = (uint8_t)hex[random[i] & 15];
+		}
+		what.passphrase_length = 2 * sizeof(random);
+		wipe(random, sizeof(random));
+	}
+	if (PE_parse_boot_argn("wifi_ap_mhz", &mhz, sizeof(mhz))) {
+		what.frequency = (uint16_t)mhz;
+	}
+	hakios_wifi_tell("wifi: wifi_ap=1: the hotspot asked for as soon as the radio is there\n");
+	(void)hakios_sta_ask_ap(&what);
+	wipe(&what, sizeof(what));
 }
 
 int

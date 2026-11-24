@@ -23,6 +23,7 @@
 #include <pexpert/pexpert.h>
 #include <sys/kpi_mbuf.h>
 #include <sys/systm.h>
+#include <sys/sysctl.h>
 #include <sys/hakios.net.h>
 #include <sys/hakios.ipa.h>
 #include <kern/clock.h>
@@ -46,6 +47,8 @@ cell_say(const char *format, ...)
 }
 #define printf cell_say
 
+#include "hakios.native-pdp.h"
+
 #define CELL_UNIT               1
 #define CELL_MUX                1               /* the QMAP mux id the session is bound to (WDS Bind Mux Data Port) */
 
@@ -61,8 +64,73 @@ static struct {
 } session;
 static struct {
 	uint64_t        arp, dhcp, to_modem, from_modem, dropped_out, dropped_in, not_ip4;
+	uint64_t        bytes_out, bytes_in;
 } cell_count;
 static bool cell_attached, cell_trace;
+/* User data permission is independent of modem registration/session setup.
+ * Root controls it. While off, both directions and the direct DNS probe are
+ * blocked, and configd is told the en1 link is down. The radio stays online. */
+static bool cell_data_enabled = true;
+
+static int
+sysctl_cell_enabled SYSCTL_HANDLER_ARGS
+{
+    int requested, error; bool link_up, attached;
+    lck_mtx_lock(&cell_lock);
+    requested = __atomic_load_n(&cell_data_enabled, __ATOMIC_ACQUIRE);
+    lck_mtx_unlock(&cell_lock);
+    error = sysctl_handle_int(oidp, &requested, 0, req);
+    if (error || req->newptr == USER_ADDR_NULL) return error;
+    if (requested != 0 && requested != 1) return EINVAL;
+    lck_mtx_lock(&cell_lock);
+    __atomic_store_n(&cell_data_enabled, requested != 0, __ATOMIC_RELEASE);
+    link_up = session.up && cell_data_enabled;
+    attached = cell_attached;
+    lck_mtx_unlock(&cell_lock);
+    if (attached) hakios_net_link_state_unit(CELL_UNIT, link_up);
+    printf("cell-control: data permission=%d effective-link=%d\n", requested, link_up);
+    return 0;
+}
+
+static int
+sysctl_cell_bytes SYSCTL_HANDLER_ARGS
+{
+    quad_t value;
+    lck_mtx_lock(&cell_lock);
+    value = (quad_t)(arg2 ? __atomic_load_n(&cell_count.bytes_in, __ATOMIC_RELAXED) : __atomic_load_n(&cell_count.bytes_out, __ATOMIC_RELAXED));
+    lck_mtx_unlock(&cell_lock);
+    return sysctl_handle_quad(oidp, &value, 0, req);
+}
+
+SYSCTL_DECL(_kern_hakios);
+SYSCTL_PROC(_kern_hakios, OID_AUTO, cellular_enabled, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    NULL, 0, sysctl_cell_enabled, "I", "User data permission on en1; root writes 0 or 1, radio registration is retained");
+SYSCTL_PROC(_kern_hakios, OID_AUTO, cellular_tx_bytes, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED,
+    NULL, 0, sysctl_cell_bytes, "Q", "IPv4 bytes passed from en1 to the modem this boot; not carrier billing");
+SYSCTL_PROC(_kern_hakios, OID_AUTO, cellular_rx_bytes, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED,
+    NULL, 1, sysctl_cell_bytes, "Q", "IP bytes passed from the modem to en1 this boot; not carrier billing");
+
+/*
+ * What user space asks instead of the boot line: an argument kept inside the kernel (CONFIG_ARGS_BUILTIN) is not in
+ * kern.bootargs, and CommCenter's adapter (userland/src/inject_cc.c) and the hotspot go by these two. abb= (the baseband
+ * stand-ins and /dev/hakios-qmuxN) and modem_native_pdp= (pdp_ip0..15, CommCenter's own data calls), as PE_parse_boot_argn
+ * has them: the line first, then the kernel's own words.
+ */
+static int
+sysctl_cell_argument SYSCTL_HANDLER_ARGS
+{
+	uint32_t value = 0;
+	int answer;
+
+	(void)arg2;
+	PE_parse_boot_argn((const char *)arg1, &value, sizeof(value));
+	answer = (int)value;
+	return sysctl_handle_int(oidp, &answer, 0, req);
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, abb, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    (void *)(uintptr_t)"abb", 0, sysctl_cell_argument, "I", "abb=: the baseband stand-ins and the QMUX bridge for CommCenter");
+SYSCTL_PROC(_kern_hakios, OID_AUTO, native_pdp, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    (void *)(uintptr_t)"modem_native_pdp", 0, sysctl_cell_argument, "I", "modem_native_pdp=: CommCenter's own data calls on pdp_ip0..15");
 
 
 static inline uint32_t
@@ -119,7 +187,7 @@ cell_probe(void)
 	uint32_t off = 1;
 	uint64_t now;
 
-	if (!session.up || session.dns1 == 0 || probes_answered != 0 || probes_sent >= 6) {
+	if (!cell_data_enabled || !session.up || session.dns1 == 0 || probes_answered != 0 || probes_sent >= 6) {
 		return;
 	}
 	PE_parse_boot_argn("modem_cell_probe", &off, sizeof(off));
@@ -310,6 +378,11 @@ cell_transmit(mbuf_t packet, size_t length)
 	}
 	type = (uint32_t)frame[12] << 8 | frame[13];
 	lck_mtx_lock(&cell_lock);
+    if (!cell_data_enabled || !session.up) {
+        cell_count.dropped_out++;
+        lck_mtx_unlock(&cell_lock);
+        return false;
+    }
 	if (type == 0x0806) {
 		ok = arp_answer(frame, length);
 	} else if (type == 0x0800 && dhcp_request(frame, length, &udp)) {
@@ -318,6 +391,7 @@ cell_transmit(mbuf_t packet, size_t length)
 		ok = session.up && hakios_ipa_transmit(CELL_MUX, frame + 14, length - 14);
 		if (ok) {
 			cell_count.to_modem++;
+            __atomic_fetch_add(&cell_count.bytes_out, length - 14, __ATOMIC_RELAXED);
 		} else {
 			cell_count.dropped_out++;
 		}
@@ -340,6 +414,15 @@ cell_receive(uint8_t mux, const uint8_t *packet, size_t length)
 		cell_count.dropped_in++;
 		return;
 	}
+    /* IPA calls receive with ipa_lock held. Never take cell_lock here:
+     * transmit already takes cell_lock -> ipa_lock. Atomic gate/counters
+     * preserve that lock order and allow a bounded in-flight receive. */
+    if (!__atomic_load_n(&cell_data_enabled, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&session.up, __ATOMIC_ACQUIRE)) {
+        cell_count.dropped_in++;
+        return;
+    }
+    __atomic_fetch_add(&cell_count.bytes_in, length, __ATOMIC_RELAXED);
 	if (cell_trace) {
 		printf("cell: %zu bytes from the modem on mux %u (IPv%u)\n", length, mux, version);
 	}
@@ -373,7 +456,9 @@ cell_poll(void)
 	static unsigned ticks;
 	unsigned got = hakios_ipa_poll(cell_receive);
 
+	lck_mtx_lock(&cell_lock);
 	cell_probe();
+	lck_mtx_unlock(&cell_lock);
 
 	if (++ticks % 30000 == 0 && (cell_count.to_modem != 0 || cell_count.from_modem != 0 || cell_count.dropped_out != 0)) {
 		char line[256];
@@ -416,7 +501,7 @@ hakios_cell_session(bool up, uint32_t address, uint32_t mask, uint32_t gateway, 
 	session.dns1 = dns1;
 	session.dns2 = dns2;
 	session.mtu = mtu;
-	session.up = up && address != 0;
+	__atomic_store_n(&session.up, up && address != 0, __ATOMIC_RELEASE);
 	lck_mtx_unlock(&cell_lock);
 	printf("cell: the data session is %s: %u.%u.%u.%u (the modem's mask %u.%u.%u.%u and gateway %u.%u.%u.%u; en1 is told /24 and router "
 	    "%u.%u.%u.%u), DNS %u.%u.%u.%u %u.%u.%u.%u, MTU %u%s\n", session.up ? "UP" : "down",
@@ -427,13 +512,16 @@ hakios_cell_session(bool up, uint32_t address, uint32_t mask, uint32_t gateway, 
 	    dns1 >> 24, (dns1 >> 16) & 0xff, (dns1 >> 8) & 0xff, dns1 & 0xff, dns2 >> 24, (dns2 >> 16) & 0xff, (dns2 >> 8) & 0xff, dns2 & 0xff,
 	    mtu, cell_attached ? "" : " (no en1: the IPA's data path is not up)");
 	if (cell_attached) {
-		hakios_net_link_state_unit(CELL_UNIT, session.up);
+		hakios_net_link_state_unit(CELL_UNIT, session.up && cell_data_enabled);
 	}
 }
 
 void
 hakios_cell_attach(void)
 {
+    uint32_t native_pdp=0;
+    PE_parse_boot_argn("modem_native_pdp",&native_pdp,sizeof(native_pdp));
+    if(native_pdp){hakios_native_pdp_attach();return;}
 	uint32_t t = 0;
 
 	if (cell_attached || !hakios_ipa_data_ready()) {
@@ -442,7 +530,7 @@ hakios_cell_attach(void)
 	PE_parse_boot_argn("modem_ipa_data_trace", &t, sizeof(t));
 	cell_trace = t != 0;
 	cell_attached = hakios_net_attach(&cell_link);
-	if (cell_attached && session.up) {
+	if (cell_attached && session.up && cell_data_enabled) {
 		hakios_net_link_state_unit(CELL_UNIT, true);
 	}
 }

@@ -155,3 +155,7 @@ void hakios_torch_quiesce(void) {}
 void hakios_camera_init(void) {}
 void hakios_camera_quiesce(void) {}
 #endif
+
+#ifndef HAKIOS_BASEBAND
+void HakiosBasebandPublish(void) {}
+#endif

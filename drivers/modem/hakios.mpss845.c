@@ -3642,7 +3642,7 @@ struct hakios_qrtr_port {
 
 static LCK_MTX_DECLARE(qrtr_lock, &mpss_lock_group);    /* the tables below */
 static LCK_MTX_DECLARE(qrtr_calling, &mpss_lock_group); /* held by the link's thread around a callback */
-static struct hakios_qrtr_port qrtr_ports[16];
+static struct hakios_qrtr_port qrtr_ports[160];       /* 128 QMux clients plus the kernel modem/GNSS services. */
 static struct {
 	uint32_t service, instance, node, port;
 	bool there;
@@ -7030,13 +7030,19 @@ wds_open(void)
 {
 	/* (the 6T: the data path, the IPA, is not made yet; modem_data=1 asks for the session all the same) */
 	/* (ipa8=10: the IPA's data path, the modem online and its data asked for: the three in one boot-arg, for room) */
-	if (wds_port == NULL && !option("modem_data_off") && (option("modem_data") || ipa8_asked() >= 10)) {
+	/*
+	 * (modem_native_pdp=1: CommCenter opens the data calls itself, over QMUX -- hakios.qmux.c -- on pdp_ip0..15. A session of
+	 * ours on the same APN takes the IPv4 side, and CommCenter's own IPv4 start is refused, POLICY_MISMATCH (cc-native-46);
+	 * so here no WDS client at all. DPM and WDA, the port mapping and the data format, stay ours: CommCenter asks neither.)
+	 */
+	if (wds_port == NULL && !option("modem_data_off") && !option("modem_native_pdp") && (option("modem_data") || ipa8_asked() >= 10)) {
 		wds_port = qrtr_open(wds_receive, wds_server, NULL);
 		if (wds_port != NULL) {
 			qrtr_lookup(wds_port, QMI_WDS, 0, 0);
 		}
 	}
-	if (dsd_port == NULL && wds_port != NULL) {
+	/* (DSD with our WDS, and in modem_native_pdp=1 without it: dsd_write() below is what turns the modem's data on) */
+	if (dsd_port == NULL && (wds_port != NULL || option("modem_native_pdp"))) {
 		dsd_port = qrtr_open(dsd_receive, dsd_server, NULL);
 		if (dsd_port != NULL) {
 			qrtr_lookup(dsd_port, QMI_DSD, 0, 0);
@@ -7567,6 +7573,14 @@ step_nas(void)
 				wlfw_rails_line("NAS registered");
 				data_deadline = now_us() + (uint64_t)data_wait * 1000000ull;
 				tell("mpss: nas: registered; the data session is given up to %u s to come up\n", data_wait);
+			}
+			/*
+			 * (modem_native_pdp=1: no session of ours is refused, which is when dsd_write() is called otherwise; without it
+			 * the modem's data switch stays off and the default data subscription the secondary, and CommCenter's own calls
+			 * end "no service", reason 3 (cc-native-49). So here, once registered: idempotent.)
+			 */
+			if (option("modem_native_pdp")) {
+				dsd_write();
 			}
 			/* stay in the loop until the data session is up or the data deadline passes */
 			if (wds_up || option("modem_data_off") || now_us() > data_deadline) {

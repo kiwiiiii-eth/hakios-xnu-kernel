@@ -9,3 +9,36 @@
  	struct cfg80211_bss			*bss;
  	const uint8_t				*bssid;
  	uint8_t					addr[ETH_ALEN];
+@@ -1598,13 +1600,15 @@
+ 	return (linuxkpi_ieee80211_vif_to_wdev(vif));
+ }
+ 
++struct sk_buff *linuxkpi_ieee80211_beacon_get_template(struct ieee80211_hw *,
++    struct ieee80211_vif *, struct ieee80211_mutable_offsets *, uint32_t);
+ static __inline struct sk_buff *
+ ieee80211_beacon_get_template(struct ieee80211_hw *hw,
+     struct ieee80211_vif *vif, struct ieee80211_mutable_offsets *offs,
+     uint32_t link_id)
+ {
+-	TODO();
+-	return (NULL);
++	/* (wifi/lx: the access point's beacon, lx_80211.c) */
++	return (linuxkpi_ieee80211_beacon_get_template(hw, vif, offs, link_id));
+ }
+ 
+ static __inline void
+@@ -2178,11 +2182,12 @@
+ 	return (linuxkpi_ieee80211_pspoll_get(hw, vif));
+ }
+ 
++struct sk_buff *linuxkpi_ieee80211_proberesp_get(struct ieee80211_hw *, struct ieee80211_vif *);
+ static __inline struct sk_buff *
+ ieee80211_proberesp_get(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
+ {
+-	TODO();
+-	return (NULL);
++	/* (wifi/lx: the access point's answer to a probe, lx_80211.c) */
++	return (linuxkpi_ieee80211_proberesp_get(hw, vif));
+ }
+ 
+ static __inline struct sk_buff *

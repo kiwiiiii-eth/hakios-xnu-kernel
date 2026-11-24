@@ -2436,6 +2436,10 @@ hakios_springboard_init(void)
 	 * this one opens it, the way a jailbreak's own hook does.
 	 */
 	load_tweaks();
+	/* the power menu on power and volume down, and the volume HUD beside the 6T's buttons (src/sb_ui.m) */
+	if (dlopen("/redwood/lib/libhakios.sbui.dylib", RTLD_NOW | RTLD_GLOBAL) == NULL) {
+		say("hakios: /redwood/lib/libhakios.sbui.dylib: %s\n", dlerror());
+	}
 	slide = (uintptr_t)_dyld_get_shared_cache_range(&length) - CACHE_BASE;
 	activation = replace_method("SBLockdownManager", "_setupActivationState", 0x1c4bc8dfcUL, (IMP)setup_activation_state);
 	original_set_setup_required_reason = (void (*)(id, SEL, long))replace_method("SBSetupManager",

@@ -67,6 +67,7 @@ int	 lx_os_network(unsigned char *name, unsigned *name_length, unsigned char *pa
 /* ---- frames: the radio as what carries the machine's network interface ---- */
 void	 lx_os_net_attach(const unsigned char *address);	/* there is a radio, and this is its address */
 void	 lx_os_net_link(int up);				/* frames can pass now (a network is joined) / no longer */
+void	 lx_os_net_quiet(int up);				/* ... the same for the hotspot, with nobody told */
 void	 lx_os_net_input(const unsigned char *frame, unsigned long length);	/* an Ethernet frame has arrived */
 
 /*

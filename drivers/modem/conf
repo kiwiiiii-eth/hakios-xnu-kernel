@@ -25,3 +25,10 @@ driver MPSS845
 	default n
 	help    the SDM845's modem (OnePlus 6T), the reference phone's driver copied and made the 6T's (modem_step=N); for the
 	help    Wi-Fi, whose firmware runs on it. Research; needs fw-modem/ from the phone
+
+driver BASEBAND
+	file    iokit/Kernel/hakios.baseband.cpp iokitcpp
+	file    bsd/dev/hakios.qmux.c
+	default n
+	help    Apple's baseband drivers as Darwin's telephony looks them up (AppleBaseband, AppleIPAppender), stand-ins that
+	help    answer every call and say what it was (abb=1, a test): CommCenter's way to the modem

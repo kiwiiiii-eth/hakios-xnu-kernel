@@ -56,6 +56,8 @@ void hakios_net_input(const uint8_t *frame, size_t length);
 void hakios_net_input_unit(unsigned unit, const uint8_t *frame, size_t length);
 /* Frames can pass now / can no longer pass (on en0 / on en<unit>). */
 void hakios_net_link_state(bool up);
+/* frames may pass (or not), and nobody is told: the link of a hotspot, which configd is not to take for a network joined */
+void hakios_net_link_quiet(bool up);
 void hakios_net_link_state_unit(unsigned unit, bool up);
 
 void hakios_net_init(void);            /* the links there are: each looks for its hardware (or its boot-arg) */

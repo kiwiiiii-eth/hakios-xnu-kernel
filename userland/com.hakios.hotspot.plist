@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.hakios.hotspot</string>
+	<!-- Settings' Personal Hotspot (src/settings_ui.m writes what it asks for, src/hotspot.c "serve" does it, as
+	     root, since kern.hakios.hotspot* are root's to write); with no Wi-Fi in the kernel it ends at once -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/redwood/bin/hotspot</string>
+		<string>serve</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/dev/console</string>
+	<key>StandardErrorPath</key>
+	<string>/dev/console</string>
+</dict>
+</plist>

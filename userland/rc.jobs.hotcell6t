@@ -1,0 +1,15 @@
+# (2026-11-25) The hotspot over the native cellular data (as rc.jobs.cell6t): pdp_ip0's traffic, then the hotspot on at
+# 2.5 minutes (src/hotspot.c: NAT out of pdp_ip0, and every 30 s where its traffic would go), and off at 5 minutes.
+/redwood/bin/quietboot &
+/redwood/bin/rtcclock &
+/redwood/bin/celltz &
+/redwood/bin/gnssfeed &
+/redwood/bin/lsplugins
+/redwood/bin/cellnet_test 135
+/var/jb/usr/bin/sleep 12
+/redwood/bin/hotspot on &
+/var/jb/usr/bin/sleep 140
+/redwood/bin/cellnet_test
+/redwood/bin/hotspot off
+/redwood/bin/net_test show
+/var/jb/usr/bin/sleep 36000

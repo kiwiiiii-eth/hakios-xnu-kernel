@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **447 arguments**: 372 read by the kernel, 15 by the loader, 74 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **453 arguments**: 377 read by the kernel, 16 by the loader, 75 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
@@ -103,12 +103,14 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 |---|---|---|---|---|
 | `privs` | K | `kern_minimac.c` | `CONFIG_PRIVS` |  |
 
-## Wi-Fi (35)
+## Wi-Fi (37)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
 | `wifi` | K | `hakios.mpss845.c`, `hakios.wifi.c`, `hakios.wifi10.c` | `CONFIG_WIFI` |  |
 | `wifi_again` | K | `hakios.wifi.c` | `CONFIG_WIFI_AGAIN` |  |
+| `wifi_ap` | K | `hakios.sta.c` | `CONFIG_WIFI_AP` |  |
+| `wifi_ap_mhz` | K | `hakios.sta.c` | `CONFIG_WIFI_AP_MHZ` |  |
 | `wifi_arp_quiet` | K | `lx_80211.c` | `CONFIG_WIFI_ARP_QUIET` |  |
 | `wifi_ask` | K | `hakios.wifi.c` | `CONFIG_WIFI_ASK` |  |
 | `wifi_ba` | K | `lx_80211.c` | `CONFIG_WIFI_BA` | implied by wifi=1 |
@@ -143,7 +145,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `wifi_watch` | K | `hakios.wifi.c`, `hakios.wifi10.c` | `CONFIG_WIFI_WATCH` |  |
 | `wifi_wide` | K | `lx_80211.c` | `CONFIG_WIFI_WIDE` | implied by wifi=1 |
 
-## Cellular (54)
+## Cellular (55)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -173,6 +175,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `modem_keep` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_KEEP` |  |
 | `modem_listen` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_LISTEN` |  |
 | `modem_nas_wait` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_NAS_WAIT` |  |
+| `modem_native_pdp` | K | `hakios.cell.c`, `hakios.mpss845.c` | `CONFIG_MODEM_NATIVE_PDP` |  |
 | `modem_new` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_NEW` |  |
 | `modem_no_ipa_qmi` | K | `hakios.mpss.c`, `hakios.mpss845.c` | `CONFIG_MODEM_NO_IPA_QMI` |  |
 | `modem_no_nav` | K | `hakios.mpss.c` | `CONFIG_MODEM_NO_NAV` |  |
@@ -404,7 +407,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `soc_rsc` | K | `hakios.cpufreq.c`, `hakios.rmi4.c` | `CONFIG_SOC_RSC` |  |
 | `syssleep` | K | `(patch)` | `CONFIG_SYSSLEEP` |  |
 | `systrace` | K | `(patch)`, `user_exception_trace.c` | `CONFIG_SYSTRACE` |  |
-| `systrace_name` | K | `(patch)` | `CONFIG_SYSTRACE_NAME` |  |
+| `systrace_name` | K | `(patch)`, `user_exception_trace.c` | `CONFIG_SYSTRACE_NAME` |  |
 | `xpcproxy_idversion` | K | `(patch)` | `CONFIG_XPCPROXY_IDVERSION` |  |
 
 ## Debugging (6)
@@ -418,10 +421,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ustacks_threads` | K | `user_exception_trace.c` | `CONFIG_USTACKS_THREADS` |  |
 | `ustacks_tname` | K | `user_exception_trace.c` | `CONFIG_USTACKS_TNAME` |  |
 
-## Loader (6)
+## Loader (7)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
+| `bbdt` | LU | `init.c`, `loader.c` | `CONFIG_BBDT` |  |
 | `cpumask` | L | `loader.c` | `CONFIG_CPUMASK` |  |
 | `cpus` | L | `loader.c` | `CONFIG_CPUS` |  |
 | `gamut` | L | `loader.c` | `CONFIG_GAMUT` |  |
@@ -429,10 +433,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (96)
+## User space (98)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
+| `abb` | K | `hakios.baseband.cpp`, `hakios.qmux.c` | `CONFIG_ABB` |  |
 | `adreno_keep_watch` | K | `hakios.a630.c` | `CONFIG_ADRENO_KEEP_WATCH` |  |
 | `aks_flags` | K | `MiniAppleKeyStore.cpp` | `CONFIG_AKS_FLAGS` |  |
 | `aks_keys` | K | `MiniAppleKeyStore.cpp` | `CONFIG_AKS_KEYS` |  |
@@ -509,6 +514,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `modem_wds_sub` | K | `hakios.mpss845.c` | `CONFIG_MODEM_WDS_SUB` |  |
 | `modem_wlfw_ready` | K | `hakios.mpss845.c` | `CONFIG_MODEM_WLFW_READY` |  |
 | `modem_wlfw_wait` | K | `hakios.mpss845.c` | `CONFIG_MODEM_WLFW_WAIT` |  |
+| `qmux_wds` | K | `hakios.qmux.c` | `CONFIG_QMUX_WDS` |  |
 | `rmi4` | K | `hakios.rmi4.c` | `CONFIG_RMI4` |  |
 | `rmi4_charger` | K | `hakios.rmi4.c` | `CONFIG_RMI4_CHARGER` |  |
 | `rmi4_hz` | K | `hakios.rmi4.c` | `CONFIG_RMI4_HZ` |  |

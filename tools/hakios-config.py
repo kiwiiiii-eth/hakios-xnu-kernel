@@ -655,7 +655,9 @@ def report(problems):
 # space (kern.bootargs: wifi, ca_vbl, gpu, haptic, ...) read the boot line itself, so those stay on it. An argument not named here
 # stays on the boot line, whoever reads it: a doubt is settled that way.
 BUILTIN_ARGS = frozenset("""cpufreq socinfo thermal buttons cpufreq_gov ddr dsibl fg_charge gic_vtimer modem_keep modem_step
-rmi4 wifi_ba wifi_mac wifi_station wifi_wide ufs_data_first""".split())
+rmi4 wifi_ba wifi_mac wifi_station wifi_wide ufs_data_first abb modem_native_pdp""".split())
+# (abb and modem_native_pdp since 25 November: user space asks the kernel for them, kern.hakios.abb and
+# kern.hakios.native_pdp, drivers/modem/hakios.cell.c, not the boot line)
 
 
 def builtin_on(config):

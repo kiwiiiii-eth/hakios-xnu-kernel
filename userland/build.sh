@@ -150,7 +150,8 @@ INJECT=${INJECT-"/redwood/lib/libhakios.dylib backboardd containermanagerd conta
 /redwood/lib/libhakios.sb.dylib SpringBoard
 /redwood/lib/libhakios.media.dylib mediaserverd
 /redwood/lib/libhakios.app.dylib Sileo
-/redwood/lib/libhakios.tweaks.dylib Preferences"}
+/redwood/lib/libhakios.tweaks.dylib Preferences
+/redwood/lib/libhakios.cc.dylib CommCenter"}
 [ -n "$BT" ] && INJECT="$INJECT
 /redwood/lib/libhakios.bt.dylib BlueTool bluetoothd"
 mkdir -p obj
@@ -319,6 +320,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			-o obj/libhakios.settings.dylib src/settings_ui.m
 		$DYN -fobjc-arc -dynamiclib -install_name /redwood/lib/libhakios.sbui.dylib -framework Foundation -framework UIKit \
 			-o obj/libhakios.sbui.dylib src/sb_ui.m
+		# ... and inside CommCenter, with abb=1: the baseband manager told that the modem is booted already (src/inject_cc.c)
+		$DYN -dynamiclib -install_name /redwood/lib/libhakios.cc.dylib -o obj/libhakios.cc.dylib src/inject_cc.c
 		# ... and inside an application, to say what killed it (src/inject_app.c)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.app.dylib -lobjc \
 			-o obj/libhakios.app.dylib src/inject_app.c
@@ -465,6 +468,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/libhakios.tweaks.dylib ] && cp obj/libhakios.tweaks.dylib root/lib/
 	[ -f obj/libhakios.settings.dylib ] && cp obj/libhakios.settings.dylib root/lib/
 	[ -f obj/libhakios.sbui.dylib ] && cp obj/libhakios.sbui.dylib root/lib/
+	[ -f obj/libhakios.cc.dylib ] && cp obj/libhakios.cc.dylib root/lib/
 	if [ -n "$BT" ] && [ -f obj/libhakios.bt.dylib ]; then cp obj/libhakios.bt.dylib root/lib/; fi
 	if [ -f obj/HakiosAudio ]; then
 		mkdir -p root/lib/HakiosAudio.driver

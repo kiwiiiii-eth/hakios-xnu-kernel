@@ -19,6 +19,8 @@
 #include <mach/exception_types.h>
 #include <mach/machine/thread_status.h>
 #include <string.h>
+#include <stdarg.h>
+#include <pexpert/pexpert.h>
 #include <vm/vm_map.h>
 #include <vm/vm_shared_region.h>
 
@@ -32,6 +34,33 @@ static bool
 plausible_user_address(uint64_t address)
 {
 	return address >= 0x100000000ULL && address < MACH_VM_MAX_ADDRESS;
+}
+
+extern void loader_log_line(const char *line);
+extern int vsnprintf(char *, size_t, const char *, va_list) __printflike(3, 0);
+
+/*
+ * Boot-arg systrace_name=NAME: only that program's exceptions, and each line in the loader's log as well (printf alone
+ * stays in the kernel's own): a crash of one daemon among the noise of a whole session (CommCenter, 24 November).
+ */
+static char systrace_name[32];
+static bool systrace_name_read;
+
+static void ut_say(const char *format, ...) __printflike(1, 2);
+
+static void
+ut_say(const char *format, ...)
+{
+	char line[256];
+	va_list list;
+
+	va_start(list, format);
+	vsnprintf(line, sizeof(line), format, list);
+	va_end(list);
+	printf("%s", line);
+	if (systrace_name[0] != 0) {
+		loader_log_line(line);
+	}
 }
 
 void
@@ -63,8 +92,15 @@ user_exception_trace(exception_type_t exception, mach_exception_data_t code, mac
 		vm_shared_region_deallocate(region);
 	}
 	proc = get_bsdtask_info(task);
+	if (!systrace_name_read) {
+		systrace_name_read = true;
+		(void)PE_parse_boot_arg_str("systrace_name", systrace_name, sizeof(systrace_name));
+	}
+	if (systrace_name[0] != 0 && (proc == NULL || strcmp(proc_name_address(proc), systrace_name) != 0)) {
+		return;
+	}
 
-	printf("usertrap: %s[%d] exception %d code 0x%llx 0x%llx: pc 0x%llx lr 0x%llx sp 0x%llx, shared cache slide 0x%x\n",
+	ut_say("usertrap: %s[%d] exception %d code 0x%llx 0x%llx: pc 0x%llx lr 0x%llx sp 0x%llx, shared cache slide 0x%x\n",
 	    proc ? proc_name_address(proc) : "?", proc ? proc_pid(proc) : -1, exception,
 	    count > 0 ? (unsigned long long)code[0] : 0, count > 1 ? (unsigned long long)code[1] : 0,
 	    (unsigned long long)get_saved_state_pc(state), (unsigned long long)get_saved_state_lr(state),
@@ -85,7 +121,7 @@ user_exception_trace(exception_type_t exception, mach_exception_data_t code, mac
 			printable = printable && text[c] >= 0x20 && text[c] < 0x7f;
 		}
 		if (printable) {
-			printf("usertrap:   x%u -> \"%s\"\n", message_registers[i], text);
+			ut_say("usertrap:   x%u -> \"%s\"\n", message_registers[i], text);
 		}
 	}
 
@@ -94,7 +130,7 @@ user_exception_trace(exception_type_t exception, mach_exception_data_t code, mac
 		if (copyin((user_addr_t)fp, frame, sizeof(frame)) != 0) {
 			break;
 		}
-		printf("usertrap:   called from 0x%llx\n", (unsigned long long)frame[1]);
+		ut_say("usertrap:   called from 0x%llx\n", (unsigned long long)frame[1]);
 		if (frame[0] <= fp) {
 			break;
 		}
@@ -179,7 +215,6 @@ static uint32_t ustacks_count;          /* boot-arg ustacks_count=N: so many tim
 static thread_call_t ustacks_call;
 
 extern void bsd_getthreadname(void *uth, char *buffer);
-extern void loader_log_line(const char *line);
 
 static void
 ustacks_say(const char *line)

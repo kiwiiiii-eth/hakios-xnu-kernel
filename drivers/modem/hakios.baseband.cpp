@@ -162,6 +162,36 @@ class AppleIPAppender : public IOService
 
 OSDefineMetaClassAndStructors(AppleIPAppender, IOService);
 
+/*
+ * ... and what libPCITransport's event listener matches when ABM has the modem booted (BootModule::changeState_sync ->
+ * pci::event::Listener::create): the converged IPC's control (acipcKernelControl, "IOABPControlClass": start, stop, an
+ * event callback) and its PDP manager (PDPListener: general interest). Without them the listener is not made, and its
+ * destructor, run on what was never made, takes CommCenter down (r311: SIGSEGV in ~Listener, every time).
+ */
+class IOAppleConvergedIPCControl : public IOService
+{
+	OSDeclareDefaultStructors(IOAppleConvergedIPCControl);
+};
+
+OSDefineMetaClassAndStructors(IOAppleConvergedIPCControl, IOService);
+
+class AppleConvergedIPCPDPManager : public IOService
+{
+	OSDeclareDefaultStructors(AppleConvergedIPCPDPManager);
+};
+
+OSDefineMetaClassAndStructors(AppleConvergedIPCPDPManager, IOService);
+
+/* (and the one whose presence says which kind of modem link this is: pci::transport::kernel::probeVariant() looks for
+ * AppleBasebandPCIControl, variant 1, or AppleConvergedIPCBBControl, variant 2 -- the converged IPC the two above are of;
+ * with neither, no variant, no listener, and the same crash, r312) */
+class AppleConvergedIPCBBControl : public IOService
+{
+	OSDeclareDefaultStructors(AppleConvergedIPCBBControl);
+};
+
+OSDefineMetaClassAndStructors(AppleConvergedIPCBBControl, IOService);
+
 static IOService *
 hakios_bb_publish(IOService * made, const char * name)
 {
@@ -208,4 +238,7 @@ HakiosBasebandPublish(void)
 	done = true;
 	(void) hakios_bb_publish(OSTypeAlloc(AppleBaseband), "AppleBaseband");
 	(void) hakios_bb_publish(OSTypeAlloc(AppleIPAppender), "AppleIPAppender");
+	(void) hakios_bb_publish(OSTypeAlloc(IOAppleConvergedIPCControl), "IOAppleConvergedIPCControl");
+	(void) hakios_bb_publish(OSTypeAlloc(AppleConvergedIPCPDPManager), "AppleConvergedIPCPDPManager");
+	(void) hakios_bb_publish(OSTypeAlloc(AppleConvergedIPCBBControl), "AppleConvergedIPCBBControl");
 }

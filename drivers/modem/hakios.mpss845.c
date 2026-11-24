@@ -3642,7 +3642,7 @@ struct hakios_qrtr_port {
 
 static LCK_MTX_DECLARE(qrtr_lock, &mpss_lock_group);    /* the tables below */
 static LCK_MTX_DECLARE(qrtr_calling, &mpss_lock_group); /* held by the link's thread around a callback */
-static struct hakios_qrtr_port qrtr_ports[16];
+static struct hakios_qrtr_port qrtr_ports[64];        /* (64: CommCenter's QMux clients, hakios.qmux.c, besides ours) */
 static struct {
 	uint32_t service, instance, node, port;
 	bool there;

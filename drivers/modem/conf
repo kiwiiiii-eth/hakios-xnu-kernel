@@ -28,6 +28,7 @@ driver MPSS845
 
 driver BASEBAND
 	file    iokit/Kernel/hakios.baseband.cpp iokitcpp
+	file    bsd/dev/hakios.qmux.c
 	default n
 	help    Apple's baseband drivers as Darwin's telephony looks them up (AppleBaseband, AppleIPAppender), stand-ins that
 	help    answer every call and say what it was (abb=1, a test): CommCenter's way to the modem

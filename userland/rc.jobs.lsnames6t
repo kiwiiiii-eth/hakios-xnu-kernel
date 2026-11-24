@@ -1,0 +1,6 @@
+# (2026-11-24) What LaunchServices calls the applications in Chinese and in English (lsplugins --names), for the home
+# screen's names that stay English on a kept data volume while a new one has them in Chinese (r286).
+/redwood/bin/quietboot &
+/var/jb/usr/bin/sleep 40
+/redwood/bin/lsplugins --names com.apple.mobilecal com.apple.mobilesafari com.apple.Preferences com.apple.mobilenotes
+/var/jb/usr/bin/sleep 36000

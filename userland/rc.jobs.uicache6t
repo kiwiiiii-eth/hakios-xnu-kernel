@@ -1,0 +1,13 @@
+# (2026-11-24) The home screen's names in the phone's language: LaunchServices' records of the system applications made
+# again (the prefix's uicache -a: registerApplicationDictionary, which reads each bundle afresh, where lsplugins --apps'
+# registerApplication: was a no-op for a bundle whose dates had not changed), then SpringBoard started again (this
+# job's runner has no "||": every run of this job does it). For the screen recording (rec_ring=1, the last of the run): the lock screen swiped
+# away, the home screen, Settings.
+/redwood/bin/quietboot &
+/var/jb/usr/bin/sleep 40
+/var/jb/usr/bin/uicache -a
+/var/jb/usr/bin/killall -9 SpringBoard
+/redwood/bin/rwtouch wait 25 swipe 0.5 0.985 0.5 0.3 250
+/var/jb/usr/bin/sleep 10
+/redwood/bin/rwtouch notify com.hakios.open.prefs
+/var/jb/usr/bin/sleep 36000

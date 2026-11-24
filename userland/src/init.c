@@ -75,8 +75,8 @@ island_cache(void)
 {
 	/* the island and the screen's size together: island=1 makes the screen the 14 Pro's (MiniIOMobileFramebuffer.cpp),
 	 * fbwidth/fbheight another, and MobileGestalt keeps the screen's size in the same cache */
-	const char *island = boot_arg("island"), *width = boot_arg("fbwidth"), *height = boot_arg("fbheight");
-	char want[64], last[64] = "";
+	const char *island = boot_arg("island"), *width = boot_arg("fbwidth"), *height = boot_arg("fbheight"), *bbdt = boot_arg("bbdt");
+	char want[96], last[96] = "";
 	int fd = open(ISLAND_STATE, O_RDONLY, 0), n;
 
 	/* (no snprintf here: mini.h) */
@@ -85,6 +85,11 @@ island_cache(void)
 	strcpy(want + strlen(want), width != NULL && strlen(width) < 8 ? width : "-");
 	strcpy(want + strlen(want), " fbheight=");
 	strcpy(want + strlen(want), height != NULL && strlen(height) < 8 ? height : "-");
+	/* ... and the modem: bbdt=1, a /baseband in the device tree (the loader), makes the device cellular to MobileGestalt,
+	 * and ABM does not start on a cache from before it (25 November). Without bbdt=1 the line is as it was. */
+	if (bbdt != NULL && strcmp(bbdt, "1") == 0) {
+		strcpy(want + strlen(want), " bbdt=1");
+	}
 	if (fd >= 0) {
 		n = (int)read(fd, last, sizeof(last) - 1);
 		last[n > 0 ? n : 0] = 0;
@@ -1847,9 +1852,44 @@ main(int argc, char **argv, char **envp)
 		}
 	}
 
+
+    /* Both stage0 RAM-root and flash_root reach here with /redwood available.
+     * Synthetic entries and this bind affect this mounted system only. */
+    {
+        struct stat carrier_st;
+        if (stat(in_image("/carrier-bundles"), &carrier_st)==0) {
+            const char *target="/System/Library/Carrier Bundles";
+            int exists=stat(target,&carrier_st)==0;
+            check((exists || synthetic_dir(target)) && bind_dir(in_image("/carrier-bundles"),target),
+                "carrier-resources-v2 original IPSW carrier bundles (RAM, read only)");
+        }
+    }
 	show_system();
 	mount_writable();
 	restore_var();
+    /* A reduced system must initialize the original carrier bundle cache's
+     * directories and default link. Only create missing entries; never replace
+     * an existing carrier link, directory or subscriber configuration. These
+     * ordinary /var bootstrap entries may persist, like normal system logs. */
+    {
+        static const char *const dirs[]={
+            "/private/var/mobile/Library/Carrier Bundles",
+            "/private/var/mobile/Library/Carrier Bundles/iPhone",
+            "/private/var/mobile/Library/Carrier Bundles/BundleLinks"
+        };
+        struct stat st;
+        if(stat("/System/Library/Carrier Bundles/iPhone/Default.bundle/carrier.plist",&st)==0) {
+            for(unsigned i=0;i<sizeof(dirs)/sizeof(dirs[0]);i++) {
+                if(mkdir(dirs[i],0755)==0)chown(dirs[i],501,501);
+            }
+            const char *link="/private/var/mobile/Library/Carrier Bundles/BundleLinks/CarrierDefault.bundle";
+            if(lstat(link,&st)!=0 && errno==2)
+                symlink("/System/Library/Carrier Bundles/iPhone/Default.bundle",link);
+            check(stat("/private/var/mobile/Library/Carrier Bundles/BundleLinks/CarrierDefault.bundle/carrier.plist",&st)==0,
+                "carrier-bootstrap-v1 original default bundle readable (existing entries preserved)");
+        }
+    }
+
 	test_files();
 	test_writable();
 	test_memory();

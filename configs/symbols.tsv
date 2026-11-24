@@ -1,3 +1,4 @@
+ABB	arg	abb	User space	k	hakios.baseband.cpp,hakios.qmux.c	
 ADRENO	arg	adreno	GPU and display	k	hakios.a630.c,hakios.adreno.c	
 ADRENO_BLIND	arg	adreno_blind	GPU and display	k	hakios.a630.c,hakios.adreno.c	
 ADRENO_DIRTY	arg	adreno_dirty	GPU and display	k	hakios.a630.c,hakios.adreno.c	
@@ -71,6 +72,7 @@ APPLOG_NAME	arg	applog_name	CPU, memory and boot	k	(patch)
 AUTOUNLOCK	arg	autounlock	User space	u	inject_sb.c	
 BATTERY	arg	battery	Audio and battery	kl	hakios.adsp.c,hakios.battery.c,loader.c	
 BATTMGR	arg	battmgr	Audio and battery	k	hakios.adsp.c	every property once, for the log (which number is which on this phone's firmware)
+BBDT	arg	bbdt	Loader	lu	init.c,loader.c	
 BT	arg	bt	User space	k	hakios.bt.c,hakios.bt3990.c	
 BT_AFTER	arg	bt_after	User space	k	hakios.bt3990.c	
 BT_AGAIN	arg	bt_again	User space	k	hakios.bt.c	the second look this many seconds later (0: no second look; 30)
@@ -248,6 +250,7 @@ MODEM_MDATA	arg	modem_mdata	User space	k	hakios.mpss845.c
 MODEM_META_QUIET	arg	modem_meta_quiet	User space	k	hakios.mpss845.c	S seconds without touching a register of the modem (its RMB included) before looking
 MODEM_MPSS_EARLY	arg	modem_mpss_early	User space	k	hakios.mpss845.c	
 MODEM_NAS_WAIT	arg	modem_nas_wait	Cellular	k	hakios.mpss.c,hakios.mpss845.c	
+MODEM_NATIVE_PDP	arg	modem_native_pdp	Cellular	k	hakios.cell.c,hakios.mpss845.c	
 MODEM_NEW	arg	modem_new	Cellular	k	hakios.mpss.c,hakios.mpss845.c	
 MODEM_NO_IPA_QMI	arg	modem_no_ipa_qmi	Cellular	k	hakios.mpss.c,hakios.mpss845.c	
 MODEM_NO_NAV	arg	modem_no_nav	Cellular	k	hakios.mpss.c	
@@ -276,6 +279,7 @@ PMIC_LIST	arg	pmic_list	Chip, thermal and PMIC	k	hakios.pmic.c	only the clock, n
 PRESS_POWER	arg	press_power	Touch and buttons	k	hakios.buttons.c	a short press of the power key that many seconds after boot, and another ten seconds later, given to Darwin as the key's own are (hakios_touch_post):
 PRESS_POWER_MS	arg	press_power_ms	Touch and buttons	k	hakios.buttons.c	
 PRIVS	arg	privs	Security stand-ins	k	kern_minimac.c	
+QMUX_WDS	arg	qmux_wds	User space	k	hakios.qmux.c	
 RD	arg	rd	CPU, memory and boot	kl	(patch),loader.c	
 REC_MB	arg	rec_mb	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 REC_RING	arg	rec_ring	GPU and display	k	MiniIOMobileFramebuffer.cpp	
@@ -332,7 +336,7 @@ SURFTRACE_OF	arg	surftrace_of	GPU and display	k	MiniIOSurface.cpp
 SWITCHER_WALLPAPER	arg	switcher_wallpaper	User space	u	inject_sb.c	
 SYSSLEEP	arg	syssleep	CPU, memory and boot	k	(patch)	
 SYSTRACE	arg	systrace	CPU, memory and boot	k	(patch),user_exception_trace.c	
-SYSTRACE_NAME	arg	systrace_name	CPU, memory and boot	k	(patch)	
+SYSTRACE_NAME	arg	systrace_name	CPU, memory and boot	k	(patch),user_exception_trace.c	
 TEL	arg	tel	User space	k	hakios.mpss845.c	
 THERMAL_LOG	arg	thermal_log	Chip, thermal and PMIC	k	hakios.thermal.c	a summary line this often (0: only on a rise; 60)
 THERMAL_SOC	arg	thermal_soc	Chip, thermal and PMIC	k	hakios.thermal.c	the SDM845's table of sensors (21) instead of the reference phone's (27)
@@ -377,6 +381,8 @@ VIRTIO_SOUND	arg	virtio_sound	Audio and battery	k	hakios.virtio_sound.c
 WALLPAPER_CACHE	arg	wallpaper_cache	User space	u	inject_sb.c	the window that shows the wallpaper rasterized by the window server (CALayer's shouldRasterize), drawn from one texture instead of composed again
 WALLPAPER_FREEZE	arg	wallpaper_freeze	User space	u	inject_sb.c	the wallpaper as one still picture
 WIFI_AGAIN	arg	wifi_again	Wi-Fi	k	hakios.wifi.c	start the DSP although the one before it was shut down without having acknowledged a stop: THAT HAS RESET THE PHONE, twice of two
+WIFI_AP	arg	wifi_ap	Wi-Fi	k	hakios.sta.c	
+WIFI_AP_MHZ	arg	wifi_ap_mhz	Wi-Fi	k	hakios.sta.c	
 WIFI_ARP_QUIET	arg	wifi_arp_quiet	Wi-Fi	k	lx_80211.c	
 WIFI_ASK	arg	wifi_ask	Wi-Fi	k	hakios.wifi.c	step 14 also asks that service a question (its capabilities) and writes down the beginning of an answer
 WIFI_BA	arg	wifi_ba	Wi-Fi	k	lx_80211.c	

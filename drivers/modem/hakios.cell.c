@@ -110,6 +110,28 @@ SYSCTL_PROC(_kern_hakios, OID_AUTO, cellular_tx_bytes, CTLTYPE_QUAD | CTLFLAG_RD
 SYSCTL_PROC(_kern_hakios, OID_AUTO, cellular_rx_bytes, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED,
     NULL, 1, sysctl_cell_bytes, "Q", "IP bytes passed from the modem to en1 this boot; not carrier billing");
 
+/*
+ * What user space asks instead of the boot line: an argument kept inside the kernel (CONFIG_ARGS_BUILTIN) is not in
+ * kern.bootargs, and CommCenter's adapter (userland/src/inject_cc.c) and the hotspot go by these two. abb= (the baseband
+ * stand-ins and /dev/hakios-qmuxN) and modem_native_pdp= (pdp_ip0..15, CommCenter's own data calls), as PE_parse_boot_argn
+ * has them: the line first, then the kernel's own words.
+ */
+static int
+sysctl_cell_argument SYSCTL_HANDLER_ARGS
+{
+	uint32_t value = 0;
+	int answer;
+
+	(void)arg2;
+	PE_parse_boot_argn((const char *)arg1, &value, sizeof(value));
+	answer = (int)value;
+	return sysctl_handle_int(oidp, &answer, 0, req);
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, abb, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    (void *)(uintptr_t)"abb", 0, sysctl_cell_argument, "I", "abb=: the baseband stand-ins and the QMUX bridge for CommCenter");
+SYSCTL_PROC(_kern_hakios, OID_AUTO, native_pdp, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    (void *)(uintptr_t)"modem_native_pdp", 0, sysctl_cell_argument, "I", "modem_native_pdp=: CommCenter's own data calls on pdp_ip0..15");
+
 
 static inline uint32_t
 get32(const uint8_t *p)

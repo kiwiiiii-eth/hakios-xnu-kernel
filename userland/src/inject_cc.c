@@ -190,7 +190,13 @@ wanted(void)
 	char args[2048] = { 0 };
 	size_t size = sizeof(args) - 1;
 	const char *p;
+	int abb = 0;
+	size_t abb_size = sizeof(abb);
 
+	/* (kern.hakios.abb: the kernel's view, the kernel's own arguments included; a kernel without it: the boot line) */
+	if (sysctlbyname("kern.hakios.abb", &abb, &abb_size, NULL, 0) == 0) {
+		return abb != 0;
+	}
 	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0) {
 		return false;
 	}
@@ -1377,8 +1383,10 @@ static int real_modem_integer(const char *name)
 static int native_pdp_mode(void)
 {
     static int native=-1;
-    if(native<0){char args[1024]={0};size_t size=sizeof(args)-1;
-        native=sysctlbyname("kern.bootargs",args,&size,NULL,0)==0 && strstr(args," modem_native_pdp=1")!=NULL;}
+    if(native<0){int value=0;size_t value_size=sizeof(value);
+        if(sysctlbyname("kern.hakios.native_pdp",&value,&value_size,NULL,0)==0)native=value!=0;
+        else{char args[1024]={0};size_t size=sizeof(args)-1;
+            native=sysctlbyname("kern.bootargs",args,&size,NULL,0)==0 && strstr(args," modem_native_pdp=1")!=NULL;}}
     return native;
 }
 static int real_data_evidence(void)
@@ -1445,7 +1453,7 @@ hakios_cc_init(void)
 	}
     char generic_args[2048]={0};size_t generic_size=sizeof(generic_args)-1;
     if(sysctlbyname("kern.bootargs",generic_args,&generic_size,NULL,0)==0 &&
-       strstr(generic_args," cc_generic_modem_mode=1")!=NULL) {
+       (strstr(generic_args," cc_generic_modem_mode=1")!=NULL || native_pdp_mode())) {
         const struct mach_header_64 *executable=NULL;
         uintptr_t executable_slide=0;unsigned candidates=0;bool uuid_match=false;
         for(uint32_t j=0;j<_dyld_image_count();j++) {
@@ -1592,7 +1600,7 @@ hakios_cc_init(void)
         }
         os_log(OS_LOG_DEFAULT,"hakios: cc: upstream-info-v1 adapter-installed=%d",owned_info_adapter_installed);
 
-        if(uuid_match && strstr(generic_args," cc_generic_modem_provision=1")) {
+        if(uuid_match && (strstr(generic_args," cc_generic_modem_provision=1") || native_pdp_mode())) {
             uintptr_t *entry=(uintptr_t *)(0x10158ea30UL+executable_slide);
             uintptr_t expected=0x1006eb398UL+executable_slide;
             static const unsigned char code[16]={0xff,0x43,0x01,0xd1,0xf6,0x57,0x02,0xa9,0xf4,0x4f,0x03,0xa9,0xfd,0x7b,0x04,0xa9};

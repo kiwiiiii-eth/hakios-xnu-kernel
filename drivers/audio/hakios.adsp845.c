@@ -5591,8 +5591,15 @@ mic_bus_up(void)
 	printf("adsp845: %u: the NGD's message buffers at %#llx, shown at %#llx (its FIFOs, %u in, %u out)\n", step, mic_dma_phys, MIC_IOVA,
 	    MIC_RX_BUFS, MIC_TX_BUFS);
 	mic_ngd_old_cfg = get(&mic_ngd, "ngd 1 config", 0x1000);
+	/*
+	 * An NGD with a logical address already is still known to the master (the DSP, the bus's framer): it does not send
+	 * its capability again, and waiting for it made every recording after the first of a boot fail ("no handshake").
+	 * Linux's qcom-ngd-ctrl.c, qcom_slim_ngd_enable(): with NGD_LADDR set, the queues are set up and no capability
+	 * exchange is waited for.
+	 */
 	if (get(&mic_ngd, "ngd 1 status", 0x1004) & 2) {
-		printf("adsp845: %u: the NGD has a logical address already\n", step);
+		printf("adsp845: %u: the NGD has a logical address already: still known to the master, no handshake waited for\n", step);
+		told = true;
 	}
 	mic_pipe_on(3, MIC_RX_FIFO, true);
 	mic_pipe_on(4, MIC_TX_FIFO, false);

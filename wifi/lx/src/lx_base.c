@@ -242,6 +242,7 @@ ticks_to_ns(unsigned long ticks)
 
 static struct timer_list *armed[16];
 static struct timer_list *running;		/* the timer whose function the ticker is calling, if one */
+static int frozen;				/* lx_timers_stop(): no timer and no delayed work any more */
 static struct {
 	struct delayed_work *work;		/* to be queued on ... */
 	struct workqueue_struct *queue;		/* ... when the ticks have reached ... */
@@ -261,13 +262,13 @@ ticker(void *argument)
 		lx_os_lock();
 		lx_os_sleep(&jiffies, 2 * 1000000ull);
 		jiffies = (unsigned long)((lx_os_nanoseconds() - began) / 1000000ull);
-		for (unsigned i = 0; i < nitems(armed) && due == NULL; i++) {
+		for (unsigned i = 0; i < nitems(armed) && due == NULL && !frozen; i++) {
 			if (armed[i] != NULL && (long)(jiffies - armed[i]->expires) >= 0) {
 				due = armed[i];
 				armed[i] = NULL;
 			}
 		}
-		for (unsigned i = 0; i < nitems(later) && work == NULL; i++) {
+		for (unsigned i = 0; i < nitems(later) && work == NULL && !frozen; i++) {
 			if (later[i].work != NULL && (long)(jiffies - later[i].when) >= 0) {
 				work = later[i].work;
 				queue = later[i].queue;
@@ -309,6 +310,10 @@ linux_queue_delayed_work_on(int cpu, struct workqueue_struct *wq, struct delayed
 		return (linux_queue_work_on(cpu, wq, &dwork->work));
 	}
 	lx_os_lock();
+	if (frozen) {
+		lx_os_unlock();
+		return (false);
+	}
 	for (unsigned i = 0; i < nitems(later); i++) {
 		if (later[i].work == dwork) {
 			lx_os_unlock();
@@ -392,12 +397,35 @@ callout_init(struct callout *c, int mpsafe)
 	bzero(c, sizeof(*c));
 }
 
+/*
+ * The driver about to be taken down for good (lx_stop(), at a run's end): no timer fires and no delayed work is queued
+ * from here on, none can be armed again, and one running now is waited for. timer_delete_sync() before a free is not
+ * enough here: the rings' thread still receives while the driver comes down, and htt_rx.c's refill arms its timer
+ * again behind the delete -- r287's panic, the ticker calling into what the removal had freed.
+ */
+void
+lx_timers_stop(void)
+{
+	lx_os_lock();
+	frozen = 1;
+	bzero(armed, sizeof(armed));
+	bzero(later, sizeof(later));
+	for (unsigned waits = 0; running != NULL && waits < 1000; waits++) {
+		(void)lx_os_sleep(&running, 1000000ull);
+	}
+	lx_os_unlock();
+}
+
 int
 mod_timer(struct timer_list *timer, unsigned long expires)
 {
 	int was = 0, slot = -1;
 
 	lx_os_lock();
+	if (frozen) {
+		lx_os_unlock();
+		return (0);
+	}
 	for (unsigned i = 0; i < nitems(armed); i++) {
 		if (armed[i] == timer) {
 			was = 1;

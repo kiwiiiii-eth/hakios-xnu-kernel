@@ -1179,6 +1179,7 @@ lx_stop(void)
 {
 	/* the station's calls drained before the removal frees the radio they use (a scan asleep in it: a panic at shutdown) */
 	lx_station_withdraw();
+	lx_timers_stop();
 	if (lx10_platform_driver->remove != NULL && platform_get_drvdata(&wifi_device) != NULL) {
 		lx10_platform_driver->remove(&wifi_device);
 		platform_set_drvdata(&wifi_device, NULL);

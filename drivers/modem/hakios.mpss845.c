@@ -3642,7 +3642,7 @@ struct hakios_qrtr_port {
 
 static LCK_MTX_DECLARE(qrtr_lock, &mpss_lock_group);    /* the tables below */
 static LCK_MTX_DECLARE(qrtr_calling, &mpss_lock_group); /* held by the link's thread around a callback */
-static struct hakios_qrtr_port qrtr_ports[64];        /* (64: CommCenter's QMux clients, hakios.qmux.c, besides ours) */
+static struct hakios_qrtr_port qrtr_ports[160];       /* 128 QMux clients plus the kernel modem/GNSS services. */
 static struct {
 	uint32_t service, instance, node, port;
 	bool there;
@@ -7030,7 +7030,12 @@ wds_open(void)
 {
 	/* (the 6T: the data path, the IPA, is not made yet; modem_data=1 asks for the session all the same) */
 	/* (ipa8=10: the IPA's data path, the modem online and its data asked for: the three in one boot-arg, for room) */
-	if (wds_port == NULL && !option("modem_data_off") && (option("modem_data") || ipa8_asked() >= 10)) {
+	/*
+	 * (modem_native_pdp=1: CommCenter opens the data calls itself, over QMUX -- hakios.qmux.c -- on pdp_ip0..15. A session of
+	 * ours on the same APN takes the IPv4 side, and CommCenter's own IPv4 start is refused, POLICY_MISMATCH (cc-native-46);
+	 * so here no WDS client at all. DPM and WDA, the port mapping and the data format, stay ours: CommCenter asks neither.)
+	 */
+	if (wds_port == NULL && !option("modem_data_off") && !option("modem_native_pdp") && (option("modem_data") || ipa8_asked() >= 10)) {
 		wds_port = qrtr_open(wds_receive, wds_server, NULL);
 		if (wds_port != NULL) {
 			qrtr_lookup(wds_port, QMI_WDS, 0, 0);

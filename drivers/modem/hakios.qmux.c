@@ -35,7 +35,7 @@
 extern void loader_log_putc(char c);
 
 #define QMUX_DEVICES            4
-#define QMUX_CLIENTS            48
+#define QMUX_CLIENTS            128
 #define QMUX_LARGEST            8192
 #define QMUX_RING               65536u
 #define QMUX_FIND_MS            1500            /* how long a service's server is looked for */
@@ -80,6 +80,42 @@ qmux_say(const char *format, ...)
 		loader_log_putc(*c);
 	}
 	printf("%s", line);
+}
+
+/*
+ * boot-arg qmux_wds=1: each message of the data services (WDS 0x01, WDS admin 0x1a), both ways, with its TLVs -- what a
+ * data call asked for (its family, its APN, the mux it was bound to), what the modem answered, and why a call ended. The
+ * packet statistics CommCenter polls for are left out; at most QMUX_TRACE_LINES lines a boot.
+ */
+#define QMUX_TRACE_LINES        900
+static uint32_t qmux_trace_on, qmux_trace_said;
+
+static void
+qmux_trace(bool to_modem, uint8_t service, uint8_t client, const uint8_t *sdu, uint32_t length)
+{
+	char line[300];
+	uint32_t at, off, size, tl;
+	uint16_t message;
+
+	if (!qmux_trace_on || (service != 0x01 && service != 0x1a) || length < 7) {
+		return;
+	}
+	message = (uint16_t)(sdu[3] | sdu[4] << 8);
+	if (message == 0x0024 || qmux_trace_said >= QMUX_TRACE_LINES) {
+		return;
+	}
+	qmux_trace_said++;
+	tl = (uint32_t)(sdu[5] | sdu[6] << 8);
+	at = (uint32_t)snprintf(line, sizeof(line), "qmux-wds: %s %#x/%u %s %u msg %#06x:", to_modem ? ">" : "<", service, client,
+	    sdu[0] == 0 ? "req" : sdu[0] == 2 ? "resp" : sdu[0] == 4 ? "ind" : "?", (unsigned)(sdu[1] | sdu[2] << 8), message);
+	for (off = 7; off + 3 <= length && off < 7 + tl && at < sizeof(line) - 12; off += 3 + size) {
+		size = (uint32_t)(sdu[off + 1] | sdu[off + 2] << 8);
+		at += (uint32_t)snprintf(line + at, sizeof(line) - at, " %02x/%u=", sdu[off], size);
+		for (uint32_t i = 0; i < size && i < 24 && off + 3 + i < length && at < sizeof(line) - 4; i++) {
+			at += (uint32_t)snprintf(line + at, sizeof(line) - at, "%02x", sdu[off + 3 + i]);
+		}
+	}
+	qmux_say("%s\n", line);
 }
 
 /* With the lock held: one message for the device's reader, or counted as dropped. */
@@ -132,6 +168,7 @@ qmux_receive(void *context, uint32_t node, uint32_t port, const void *data, size
 	}
 	lck_mtx_lock(&qmux_lock);
 	if (c->used && c->device != NULL && c->device->open) {
+		qmux_trace(false, c->service, c->id, data, (uint32_t)length);
 		qmux_header(message, (uint32_t)length, c->service, c->id);
 		memcpy(message + 6, data, length);
 		qmux_put(c->device, message, (uint32_t)length + 6);
@@ -255,8 +292,9 @@ ctl_get_client(struct qmux_device *d, uint8_t transaction, const uint8_t *tlvs, 
 		return;
 	}
 	c->port = ops->open(qmux_receive, qmux_server, c);
-	if (c->port == NULL || ops->lookup(c->port, c->service, 0, 0) != 0) {
-		qmux_say("qmux: service %#x: no QRTR port to be had\n", c->service);
+	int lookup_error = c->port == NULL ? ENOSPC : ops->lookup(c->port, c->service, 0, 0);
+	if (lookup_error != 0) {
+		qmux_say("qmux: service %#x: port allocated=%u lookup-error=%d clients-limit=%u\n", c->service, c->port != NULL, lookup_error, QMUX_CLIENTS);
 		if (c->port != NULL) {
 			ops->close(c->port);
 		}
@@ -527,6 +565,7 @@ qmux_message(struct qmux_device *d, const struct hakios_qrtr_ops *ops, uint8_t *
 			uint32_t node = c->node, to = c->server_port;
 
 			lck_mtx_unlock(&qmux_lock);
+			qmux_trace(true, message[4], message[5], message + 6, whole - 6);
 			return ops != NULL ? ops->send(port, node, to, message + 6, whole - 6) : ENXIO;
 		}
 	}
@@ -548,6 +587,7 @@ qmux_start(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
 	char name[32];
 
+	qmux_say("qmux: capacity-v2 clients=%u\n", QMUX_CLIENTS);
 	qmux_major = cdevsw_add(-1, &qmux_cdevsw);
 	for (int unit = 0; unit < QMUX_DEVICES && qmux_major >= 0; unit++) {
 		snprintf(name, sizeof(name), "hakios-qmux%d", unit);
@@ -569,6 +609,7 @@ qmux_init(void)
 	if (!PE_parse_boot_argn("abb", &on, sizeof(on)) || on == 0) {
 		return;
 	}
+	PE_parse_boot_argn("qmux_wds", &qmux_trace_on, sizeof(qmux_trace_on));
 	start_call = thread_call_allocate(qmux_start, NULL);
 	clock_interval_to_deadline(2, NSEC_PER_SEC, &deadline);
 	thread_call_enter_delayed(start_call, deadline);

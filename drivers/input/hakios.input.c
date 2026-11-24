@@ -272,6 +272,8 @@ static const struct cdevsw touch_cdevsw = {
 	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_type = 0
 };
 
+extern void HakiosBasebandPublish(void);
+
 void
 hakios_input_init(void)
 {
@@ -295,4 +297,5 @@ hakios_input_init(void)
 	hakios_wifi_init();
 	hakios_adsp_init();
 	hakios_mpss_init();
+	HakiosBasebandPublish();        /* abb=1: before CommCenter looks for them (drivers/modem/hakios.baseband.cpp) */
 }

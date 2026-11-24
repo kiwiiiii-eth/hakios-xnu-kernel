@@ -388,6 +388,440 @@ take_over(uintptr_t slide, uintptr_t vt, uintptr_t from, void *to)
 	return done;
 }
 
+
+/*
+ * libPCITransport's kernel side, taken over: acipcKernel is what talks to an iPhone's converged-IPC driver (rings in shared
+ * memory, a doorbell); its virtual methods are answered here over /dev/hakios-qmuxN instead, and everything above them --
+ * TelephonyBasebandPCITransportCreate, the Mav router's pci_shim, QMux, the QMI clients -- runs as it is. Returns are
+ * IOReturns; asynchronous completions call back (context, result, bytes), as IOKit's would.
+ */
+#define VT_ACIPC        0x20c64c5a0UL   /* __ZTV11acipcKernel */
+#define AK_START_RL     0x1e93a9dacUL
+#define AK_START_Q      0x1e93a9ebcUL
+#define AK_STOP         0x1e93aae8cUL
+#define AK_OPEN         0x1e93aa19cUL
+#define AK_CLOSE        0x1e93aa1d8UL
+#define AK_WRITE        0x1e93aa1e8UL
+#define AK_WRITE_ASYNC  0x1e93aa234UL
+#define AK_READ         0x1e93aa26cUL
+#define AK_READ_ASYNC   0x1e93aa298UL
+#define AK_READ_REG     0x1e93aa2d0UL
+#define AK_ABORT        0x1e93aa334UL
+#define AK_START_CHAN   0x1e93aa45cUL
+#define AK_TIMESYNC     0x1e93aa544UL
+#define AK_REG_TIME     0x1e93aa5ccUL
+#define AK_DEREG_TIME   0x1e93aa630UL
+#define AK_MAP          0x1e93aa6a8UL
+#define AK_UNMAP        0x1e93aa740UL
+
+#define IORET_OK        0
+#define IORET_ABORTED   (int)0xe00002eb
+#define IORET_ERROR     (int)0xe00002bc
+#define IORET_NOT_OPEN  (int)0xe00002cd
+
+typedef void (*io_done_t)(void *, int, void *);
+typedef void (*io_done2_t)(void *, int);
+
+struct link {
+	void                    *owner;
+	int                     fd;
+	unsigned                interface;
+	volatile bool           stop;
+	pthread_t               reader;
+	dispatch_queue_t        queue;
+	pthread_mutex_t         lock;
+	/* the read waiting for a message */
+	void                    *read_buffer;
+	unsigned                read_length;
+	io_done_t               read_done;
+	void                    *read_context;
+	/* messages come before a read asked for them */
+	unsigned char           *pending[32];
+	unsigned                pending_length[32];
+	unsigned                pending_head, pending_tail;
+	unsigned long           in, out;
+};
+
+static struct link links[8];
+static pthread_mutex_t links_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static struct link *
+link_of(void *owner, bool make)
+{
+	struct link *l = NULL;
+
+	pthread_mutex_lock(&links_lock);
+	for (int i = 0; i < 8 && l == NULL; i++) {
+		if (links[i].owner == owner) {
+			l = &links[i];
+		}
+	}
+	for (int i = 0; i < 8 && l == NULL && make; i++) {
+		if (links[i].owner == NULL) {
+			l = &links[i];
+			memset(l, 0, sizeof(*l));
+			l->owner = owner;
+			l->fd = -1;
+			pthread_mutex_init(&l->lock, NULL);
+		}
+	}
+	pthread_mutex_unlock(&links_lock);
+	return l;
+}
+
+static dispatch_queue_t
+link_queue(struct link *l)
+{
+	return l->queue != NULL ? l->queue : dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0);
+}
+
+/* with the lock held: a waiting read given the oldest message, if both are there */
+static void
+link_deliver(struct link *l)
+{
+	if (l->read_done == NULL || l->pending_head == l->pending_tail) {
+		return;
+	}
+	unsigned slot = l->pending_tail % 32;
+	unsigned char *m = l->pending[slot];
+	unsigned n = l->pending_length[slot];
+	io_done_t done = l->read_done;
+	void *context = l->read_context;
+
+	if (n > l->read_length) {
+		n = l->read_length;
+	}
+	memcpy(l->read_buffer, m, n);
+	free(m);
+	l->pending_tail++;
+	l->read_done = NULL;
+	l->in++;
+	dispatch_async(link_queue(l), ^{
+		done(context, IORET_OK, (void *)(uintptr_t)n);
+	});
+}
+
+static void *
+link_reader(void *argument)
+{
+	struct link *l = argument;
+	unsigned char *buffer = malloc(16384);
+
+	while (buffer != NULL && !l->stop) {
+		ssize_t n = read(l->fd, buffer, 16384);
+
+		if (n > 0) {
+			unsigned char *m = malloc((size_t)n);
+
+			if (m == NULL) {
+				continue;
+			}
+			memcpy(m, buffer, (size_t)n);
+			if (l->in < 6) {
+				os_log(OS_LOG_DEFAULT, "hakios: cc: acipc %u: %zd bytes from the modem: %02x %02x%02x %02x %02x %02x | %02x %02x",
+				    l->interface, n, m[0], m[1], m[2], m[3], m[4], m[5], n > 6 ? m[6] : 0, n > 7 ? m[7] : 0);
+			}
+			pthread_mutex_lock(&l->lock);
+			if (l->pending_head - l->pending_tail < 32) {
+				l->pending[l->pending_head % 32] = m;
+				l->pending_length[l->pending_head % 32] = (unsigned)n;
+				l->pending_head++;
+			} else {
+				free(m);
+			}
+			link_deliver(l);
+			pthread_mutex_unlock(&l->lock);
+		} else if (n < 0 && errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) {
+			break;
+		}
+	}
+	free(buffer);
+	return NULL;
+}
+
+static int
+ak_open(void *self, unsigned interface)
+{
+	struct link *l = link_of(self, true);
+	char path[32];
+	int fd = -1;
+
+	if (l == NULL) {
+		return IORET_ERROR;
+	}
+	if (l->fd >= 0) {
+		return IORET_OK;
+	}
+	for (int unit = 0; unit < 4 && fd < 0; unit++) {
+		snprintf(path, sizeof(path), "/dev/hakios-qmux%d", unit);
+		fd = open(path, O_RDWR);
+	}
+	os_log(OS_LOG_DEFAULT, "hakios: cc: acipc %p: interface %u opened on %{public}s (fd %d)", self, interface, fd >= 0 ? path : "nothing", fd);
+	if (fd < 0) {
+		return IORET_ERROR;
+	}
+	l->fd = fd;
+	l->interface = interface;
+	l->stop = false;
+	pthread_create(&l->reader, NULL, link_reader, l);
+	return IORET_OK;
+}
+
+static int
+ak_close(void *self)
+{
+	struct link *l = link_of(self, false);
+
+	if (l != NULL && l->fd >= 0) {
+		l->stop = true;
+		pthread_join(l->reader, NULL);
+		close(l->fd);
+		l->fd = -1;
+		os_log(OS_LOG_DEFAULT, "hakios: cc: acipc %p: closed (%lu in, %lu out)", self, l->in, l->out);
+	}
+	return IORET_OK;
+}
+
+static int
+ak_start_queue(void *self, unsigned interface, dispatch_queue_t queue, void *notify, void *other)
+{
+	struct link *l = link_of(self, true);
+
+	(void)notify;
+	(void)other;
+	if (l != NULL) {
+		l->queue = queue;
+		l->interface = interface;
+	}
+	os_log(OS_LOG_DEFAULT, "hakios: cc: acipc %p: started for interface %u", self, interface);
+	return ak_open(self, interface);
+}
+
+static int
+ak_start_runloop(void *self, unsigned interface, void *runloop, void *notify, void *other)
+{
+	(void)runloop;
+	return ak_start_queue(self, interface, NULL, notify, other);
+}
+
+static int
+ak_stop(void *self, void *group)
+{
+	(void)group;
+	os_log(OS_LOG_DEFAULT, "hakios: cc: acipc %p: stopped", self);
+	return IORET_OK;
+}
+
+static int
+ak_write(void *self, const void *data, unsigned length)
+{
+	struct link *l = link_of(self, false);
+
+	if (l == NULL || l->fd < 0) {
+		return IORET_NOT_OPEN;
+	}
+	l->out++;
+	return write(l->fd, data, length) == (ssize_t)length ? IORET_OK : IORET_ERROR;
+}
+
+static int
+ak_write_async(void *self, const void *data, unsigned length, io_done_t done, void *context)
+{
+	struct link *l = link_of(self, false);
+	int result;
+
+	if (l == NULL || l->fd < 0) {
+		return IORET_NOT_OPEN;
+	}
+	if (l->out < 6) {
+		const unsigned char *b = data;
+
+		os_log(OS_LOG_DEFAULT, "hakios: cc: acipc %u: %u bytes to the modem: %02x %02x%02x %02x %02x %02x | %02x %02x",
+		    l->interface, length, b[0], length > 1 ? b[1] : 0, length > 2 ? b[2] : 0, length > 3 ? b[3] : 0,
+		    length > 4 ? b[4] : 0, length > 5 ? b[5] : 0, length > 6 ? b[6] : 0, length > 7 ? b[7] : 0);
+	}
+	l->out++;
+	result = write(l->fd, data, length) == (ssize_t)length ? IORET_OK : IORET_ERROR;
+	if (done != NULL) {
+		dispatch_async(link_queue(l), ^{
+			done(context, result, (void *)(uintptr_t)(result == IORET_OK ? length : 0));
+		});
+	}
+	return IORET_OK;
+}
+
+static int
+ak_read(void *self, void *data, unsigned *length)
+{
+	(void)self;
+	(void)data;
+	if (length != NULL) {
+		*length = 0;
+	}
+	return IORET_ERROR;                     /* (asynchronous reads only) */
+}
+
+static int
+ak_read_async(void *self, void *data, unsigned length, io_done_t done, void *context)
+{
+	struct link *l = link_of(self, false);
+
+	if (l == NULL || l->fd < 0) {
+		os_log(OS_LOG_DEFAULT, "hakios: cc: acipc %p: a read while not open", self);
+		return IORET_NOT_OPEN;
+	}
+	if (l->in < 3) {
+		os_log(OS_LOG_DEFAULT, "hakios: cc: acipc %u: a read of up to %u bytes waits", l->interface, length);
+	}
+	pthread_mutex_lock(&l->lock);
+	l->read_buffer = data;
+	l->read_length = length;
+	l->read_done = done;
+	l->read_context = context;
+	link_deliver(l);
+	pthread_mutex_unlock(&l->lock);
+	return IORET_OK;
+}
+
+static int
+ak_abort(void *self, int direction, io_done2_t done, void *context)
+{
+	struct link *l = link_of(self, false);
+	io_done_t read_done = NULL;
+	void *read_context = NULL;
+
+	(void)direction;
+	os_log(OS_LOG_DEFAULT, "hakios: cc: acipc %p: channel %d aborted", self, direction);
+	if (l != NULL) {
+		pthread_mutex_lock(&l->lock);
+		read_done = l->read_done;
+		read_context = l->read_context;
+		l->read_done = NULL;
+		pthread_mutex_unlock(&l->lock);
+	}
+	dispatch_async(l != NULL ? link_queue(l) : dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+		if (read_done != NULL) {
+			read_done(read_context, IORET_ABORTED, NULL);
+		}
+		if (done != NULL) {
+			done(context, IORET_OK);
+		}
+	});
+	return IORET_OK;
+}
+
+static int
+ak_start_channel(void *self, int direction, io_done2_t done, void *context)
+{
+	struct link *l = link_of(self, false);
+
+	os_log(OS_LOG_DEFAULT, "hakios: cc: acipc %p: channel %d started", self, direction);
+	(void)direction;
+	if (done != NULL) {
+		dispatch_async(l != NULL ? link_queue(l) : dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+			done(context, IORET_OK);
+		});
+	}
+	return IORET_OK;
+}
+
+static int
+ak_map(void *self, int region, void *a, unsigned b, void *c, unsigned d, io_done_t done, void *context)
+{
+	struct link *l = link_of(self, false);
+
+	(void)a;
+	(void)c;
+	os_log(OS_LOG_DEFAULT, "hakios: cc: acipc %p: region %d mapped (%u, %u bytes)", self, region, b, d);
+	if (done != NULL) {
+		dispatch_async(l != NULL ? link_queue(l) : dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+			done(context, IORET_OK, NULL);
+		});
+	}
+	return IORET_OK;
+}
+
+static int
+ak_unmap(void *self, int region, io_done2_t done, void *context)
+{
+	(void)region;
+	return ak_start_channel(self, 0, done, context);
+}
+
+static int
+ak_unsupported(void *self)
+{
+	os_log(OS_LOG_DEFAULT, "hakios: cc: acipc %p: something unsupported asked for", self);
+	return IORET_ERROR;
+}
+
+static int
+ak_nothing(void *self)
+{
+	(void)self;
+	return IORET_OK;
+}
+
+
+/* ... and libPCITransport's control side (acipcKernelControl: the converged IPC's control client), answered too */
+#define VT_ACIPC_CTL    0x20c64c980UL   /* __ZTV18acipcKernelControl */
+#define KC_START        0x1e93aa8b8UL
+#define KC_STOP         0x1e93aaf1cUL
+#define KC_OPEN_RL      0x1e93aaf24UL
+#define KC_OPEN_Q       0x1e93aaf2cUL
+#define KC_CLOSE        0x1e93aaf34UL
+#define KC_READ_LOGS    0x1e93aaf3cUL
+#define KC_EVENTS_RL    0x1e93aa930UL
+#define KC_EVENTS_Q     0x1e93aa9b4UL
+#define KC_NO_EVENTS    0x1e93aaf44UL
+#define KC_LOG_SIZE     0x1e93aaf4cUL
+#define KC_LOG_TUNE     0x1e93aaf54UL
+#define KC_BOOT_STAGE   0x1e93aaf5cUL
+
+static void *control_events;            /* the block ABM gave for the control's events */
+
+static int
+kc_ok(void *self)
+{
+	os_log(OS_LOG_DEFAULT, "hakios: cc: acipc control %p: done", self);
+	return IORET_OK;
+}
+
+static int
+kc_open(void *self, void *queue)
+{
+	(void)queue;
+	os_log(OS_LOG_DEFAULT, "hakios: cc: acipc control %p: opened", self);
+	return IORET_OK;
+}
+
+static int
+kc_events(void *self, void *queue, void *block)
+{
+	(void)queue;
+	control_events = block != NULL ? Block_copy(block) : NULL;
+	os_log(OS_LOG_DEFAULT, "hakios: cc: acipc control %p: events will go to %p", self, block);
+	return IORET_OK;
+}
+
+static int
+kc_boot_stage(void *self, unsigned *stage)
+{
+	(void)self;
+	if (stage != NULL) {
+		*stage = 0;
+	}
+	os_log(OS_LOG_DEFAULT, "hakios: cc: acipc control: boot stage asked for");
+	return IORET_OK;
+}
+
+static int
+kc_unsupported(void *self)
+{
+	(void)self;
+	return IORET_ERROR;
+}
+
 __attribute__((constructor))
 static void
 hakios_cc_init(void)
@@ -399,6 +833,18 @@ hakios_cc_init(void)
 
 	if (strcmp(getprogname(), "CommCenter") != 0 || !wanted()) {
 		return;
+	}
+	/* CommCenter's standard error and output to a file: libPCITransport says what fails there, not in the log */
+	{
+		int fd = open("/private/var/tmp/cc-stderr.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+		if (fd >= 0) {
+			dup2(fd, 2);
+			dup2(fd, 1);
+			close(fd);
+			setvbuf(stderr, NULL, _IONBF, 0);
+			setvbuf(stdout, NULL, _IOLBF, 0);
+		}
 	}
 	slide = (uintptr_t)_dyld_get_shared_cache_range(&length) - CACHE_BASE;
 	/* (the vtable is in the cache, which is mapped whole whether libBasebandManager has been loaded yet or not) */
@@ -433,6 +879,45 @@ hakios_cc_init(void)
 		    take_over(slide, VT_QMI_SERVICE, QS_SNAPSHOT, (void *)qmi_service_snapshot) +
 		    take_over(slide, VT_QMI_SERVICE, QS_WAKE, (void *)qmi_service_wake) +
 		    take_over(slide, VT_QMI_SERVICE, QS_TEARDOWN, (void *)qmi_service_teardown));
+	}
+	{
+		int taken = 0;
+
+		taken += take_over(slide, VT_ACIPC, AK_START_RL, (void *)ak_start_runloop);
+		taken += take_over(slide, VT_ACIPC, AK_START_Q, (void *)ak_start_queue);
+		taken += take_over(slide, VT_ACIPC, AK_STOP, (void *)ak_stop);
+		taken += take_over(slide, VT_ACIPC, AK_OPEN, (void *)ak_open);
+		taken += take_over(slide, VT_ACIPC, AK_CLOSE, (void *)ak_close);
+		taken += take_over(slide, VT_ACIPC, AK_WRITE, (void *)ak_write);
+		taken += take_over(slide, VT_ACIPC, AK_WRITE_ASYNC, (void *)ak_write_async);
+		taken += take_over(slide, VT_ACIPC, AK_READ, (void *)ak_read);
+		taken += take_over(slide, VT_ACIPC, AK_READ_ASYNC, (void *)ak_read_async);
+		taken += take_over(slide, VT_ACIPC, AK_READ_REG, (void *)ak_unsupported);
+		taken += take_over(slide, VT_ACIPC, AK_ABORT, (void *)ak_abort);
+		taken += take_over(slide, VT_ACIPC, AK_START_CHAN, (void *)ak_start_channel);
+		taken += take_over(slide, VT_ACIPC, AK_TIMESYNC, (void *)ak_unsupported);
+		taken += take_over(slide, VT_ACIPC, AK_REG_TIME, (void *)ak_nothing);
+		taken += take_over(slide, VT_ACIPC, AK_DEREG_TIME, (void *)ak_nothing);
+		taken += take_over(slide, VT_ACIPC, AK_MAP, (void *)ak_map);
+		taken += take_over(slide, VT_ACIPC, AK_UNMAP, (void *)ak_unmap);
+		os_log(OS_LOG_DEFAULT, "hakios: cc: %d of 17 of acipcKernel's slots go to /dev/hakios-qmux", taken);
+	}
+	{
+		int taken = 0;
+
+		taken += take_over(slide, VT_ACIPC_CTL, KC_START, (void *)kc_ok);
+		taken += take_over(slide, VT_ACIPC_CTL, KC_STOP, (void *)kc_ok);
+		taken += take_over(slide, VT_ACIPC_CTL, KC_OPEN_RL, (void *)kc_open);
+		taken += take_over(slide, VT_ACIPC_CTL, KC_OPEN_Q, (void *)kc_open);
+		taken += take_over(slide, VT_ACIPC_CTL, KC_CLOSE, (void *)kc_ok);
+		taken += take_over(slide, VT_ACIPC_CTL, KC_READ_LOGS, (void *)kc_unsupported);
+		taken += take_over(slide, VT_ACIPC_CTL, KC_EVENTS_RL, (void *)kc_events);
+		taken += take_over(slide, VT_ACIPC_CTL, KC_EVENTS_Q, (void *)kc_events);
+		taken += take_over(slide, VT_ACIPC_CTL, KC_NO_EVENTS, (void *)kc_ok);
+		taken += take_over(slide, VT_ACIPC_CTL, KC_LOG_SIZE, (void *)kc_unsupported);
+		taken += take_over(slide, VT_ACIPC_CTL, KC_LOG_TUNE, (void *)kc_ok);
+		taken += take_over(slide, VT_ACIPC_CTL, KC_BOOT_STAGE, (void *)kc_boot_stage);
+		os_log(OS_LOG_DEFAULT, "hakios: cc: %d of 12 of acipcKernelControl's slots answered here", taken);
 	}
 	os_log(OS_LOG_DEFAULT, "hakios: cc: %d of 2 of BootControllerLegacy's slots answer \"booted\" (slide %#lx; slots 2-5 %#lx %#lx %#lx %#lx)",
 	    done, (unsigned long)slide, (unsigned long)(vtable[2] - slide), (unsigned long)(vtable[3] - slide),

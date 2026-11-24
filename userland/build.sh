@@ -870,6 +870,13 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	# our audio device, where the audio server looks for such plug-ins (and for no others: Apple's are left out)
 	mkdir -p sysroot/System/Library/Audio/Plug-Ins/HAL
 	ln -s /redwood/lib/HakiosAudio.driver sysroot/System/Library/Audio/Plug-Ins/HAL/HakiosAudio.driver
+	# TELEPHONY_LOG=1 (a test): the baseband IPC's info messages kept by logd (com.apple.telephony.ipc: libPCITransport and
+	# the Mav router say why an engage fails at that level only); the image's file is a link to the unpacked one, so a new one
+	if [ -n "${TELEPHONY_LOG:-}" ]; then
+		f=sysroot/System/Library/Preferences/Logging/Subsystems/com.apple.telephony.ipc.plist
+		rm -f "$f"
+		printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>DEFAULT-OPTIONS</key><dict><key>Enable</key><string>Info</string><key>Persist</key><string>Info</string></dict></dict></plist>\n' > "$f"
+	fi
 	# the plug-in Metal opens when the accelerator names it (boot-arg metal=1; without it nothing names this bundle)
 	rm -rf sysroot/usr/local/redwood
 	[ -d big ] && mkdir -p sysroot/usr/local && cp -a big sysroot/usr/local/redwood

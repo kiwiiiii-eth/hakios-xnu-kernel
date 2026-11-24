@@ -167,6 +167,98 @@ lan_nat(const char *wan)
 	return 0;
 }
 
+/*
+ * Every 30 s while the hotspot is on: where its traffic goes, so that a station that joins and gets no answer says why.
+ * The route (the local address an unbound UDP socket to 8.8.8.8 is given: the unscoped route forwarding uses too, and
+ * whether it is WAN's), IP forwarding, pf (on, its states, the NAT rule's packets), and the packets and errors of WAN and
+ * en0. No address is printed.
+ */
+static const char *stats_wan;
+
+static void
+link_counts(const char *name, char *out, size_t size)
+{
+	struct ifaddrs *all = NULL;
+
+	snprintf(out, size, "%s: none", name);
+	if (getifaddrs(&all) != 0) {
+		return;
+	}
+	for (struct ifaddrs *p = all; p != NULL; p = p->ifa_next) {
+		if (p->ifa_addr != NULL && p->ifa_addr->sa_family == AF_LINK && p->ifa_data != NULL && strcmp(p->ifa_name, name) == 0) {
+			const struct if_data *d = p->ifa_data;
+
+			snprintf(out, size, "%s: in %u packets (%u errors), out %u (%u errors)", name, d->ifi_ipackets, d->ifi_ierrors,
+			    d->ifi_opackets, d->ifi_oerrors);
+		}
+	}
+	freeifaddrs(all);
+}
+
+static void
+stats(void)
+{
+	struct sockaddr_in to = { .sin_len = sizeof(to), .sin_family = AF_INET, .sin_port = htons(53) }, from;
+	socklen_t size = sizeof(from);
+	struct ifaddrs *all = NULL;
+	const char *route = "none";
+	int s = socket(AF_INET, SOCK_DGRAM, 0), forwarding = -1, dev;
+	size_t length = sizeof(forwarding);
+	char wan[160], lan[160];
+
+	to.sin_addr.s_addr = htonl(0x08080808);
+	if (s >= 0 && connect(s, (struct sockaddr *)&to, sizeof(to)) == 0 && getsockname(s, (struct sockaddr *)&from, &size) == 0 &&
+	    getifaddrs(&all) == 0) {
+		route = "not WAN's";
+		for (struct ifaddrs *p = all; p != NULL; p = p->ifa_next) {
+			if (p->ifa_addr != NULL && p->ifa_addr->sa_family == AF_INET &&
+			    ((struct sockaddr_in *)p->ifa_addr)->sin_addr.s_addr == from.sin_addr.s_addr) {
+				route = strcmp(p->ifa_name, stats_wan) == 0 ? "WAN's" : p->ifa_name;
+			}
+		}
+		freeifaddrs(all);
+	}
+	if (s >= 0) {
+		close(s);
+	}
+	(void)sysctlbyname("net.inet.ip.forwarding", &forwarding, &length, NULL, 0);
+	printf("hotspot: stats: the route to 8.8.8.8 is %s (WAN %s); IP forwarding %d\n", route, stats_wan, forwarding);
+	if ((dev = open("/dev/pf", O_RDWR)) >= 0) {
+		struct pf_status status;
+		struct pfioc_rule rule;
+
+		memset(&status, 0, sizeof(status));
+		memset(&rule, 0, sizeof(rule));
+		rule.rule.action = PF_NAT;
+		if (ioctl(dev, DIOCGETSTATUS, &status) == 0) {
+			printf("hotspot: stats: pf %s, %u states; %llu matched, %llu bad offsets, %llu short, %llu bad states, %llu memory\n",
+			    status.running ? "on" : "OFF", status.states, (unsigned long long)status.counters[PFRES_MATCH],
+			    (unsigned long long)status.counters[PFRES_BADOFF], (unsigned long long)status.counters[PFRES_SHORT],
+			    (unsigned long long)status.counters[PFRES_BADSTATE], (unsigned long long)status.counters[PFRES_MEMORY]);
+		}
+		if (ioctl(dev, DIOCGETRULES, &rule) == 0) {
+			unsigned count = rule.nr;
+
+			for (unsigned i = 0; i < count; i++) {
+				rule.nr = i;
+				if (ioctl(dev, DIOCGETRULE, &rule) == 0) {
+					printf("hotspot: stats: NAT rule %u on %s: %llu evaluations, %llu packets out, %llu in, %u states\n", i,
+					    rule.rule.ifname, (unsigned long long)rule.rule.evaluations, (unsigned long long)rule.rule.packets[0],
+					    (unsigned long long)rule.rule.packets[1], rule.rule.states);
+				}
+			}
+			if (count == 0) {
+				printf("hotspot: stats: NO NAT rule\n");
+			}
+		}
+		close(dev);
+	}
+	link_counts(stats_wan, wan, sizeof(wan));
+	link_counts(LAN_IF, lan, sizeof(lan));
+	printf("hotspot: stats: %s; %s\n", wan, lan);
+	fflush(stdout);
+}
+
 /* ---- DHCP for the stations (RFC 2131, as much as a hotspot needs) ---- */
 
 /*
@@ -290,6 +382,7 @@ dhcp_serve(void)
 	unsigned char m[1024], r[548];
 	int on;
 	size_t size;
+	time_t stats_at = 0;
 
 	if (s < 0 || setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) != 0 ||
 	    setsockopt(s, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes)) != 0 ||
@@ -311,6 +404,10 @@ dhcp_serve(void)
 		if (sysctlbyname("kern.hakios.hotspot", &on, &size, NULL, 0) == 0 && !on) {
 			printf("hotspot: the hotspot is off: the DHCP server stops\n");
 			return;
+		}
+		if (stats_wan != NULL && time(NULL) - stats_at >= 30) {
+			stats_at = time(NULL);
+			stats();
 		}
 		FD_ZERO(&ready);
 		FD_SET(s, &ready);
@@ -400,6 +497,7 @@ network(void)
 		say("hotspot: %s: %s\n", "IP forwarding", errno);
 	}
 	(void)lan_nat(wan);
+	stats_wan = wan;
 	fflush(stdout);
 	dhcp_serve();
 	return 0;

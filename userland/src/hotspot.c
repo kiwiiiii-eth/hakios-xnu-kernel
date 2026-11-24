@@ -96,7 +96,14 @@ lan_address(void)
 	return 0;
 }
 
-/* pf: nat on WAN from 172.20.10.0/28 to any -> (WAN), and pf on */
+static in_addr_t ipv4_of(const char *name);
+
+/*
+ * pf: nat on WAN from 172.20.10.0/28 to any -> WAN's address, and pf on. The address itself, as WAN has it now, not
+ * "(WAN)", pf's own following of the interface: over pdp_ip0 that put the stations' packets out with an address that
+ * was not pdp_ip0's (25 November: 148 connections, none of them NAT'd to pdp_ip0's address, nothing answered). The
+ * caller lays the NAT down again whenever the address changes (dhcp_serve). With no address yet, no NAT.
+ */
 static int
 lan_nat(const char *wan)
 {
@@ -104,9 +111,14 @@ lan_nat(const char *wan)
 	struct pfioc_trans_e element;
 	struct pfioc_pooladdr pool;
 	struct pfioc_rule rule;
-	int dev = open("/dev/pf", O_RDWR);
+	in_addr_t address = ipv4_of(wan);
+	int dev;
 
-	if (dev < 0) {
+	if (address == 0) {
+		printf("hotspot: %s has no IPv4 address yet: the NAT when it has one\n", wan);
+		return -1;
+	}
+	if ((dev = open("/dev/pf", O_RDWR)) < 0) {
 		say("hotspot: %s: %s\n", "/dev/pf", errno);
 		return -1;
 	}
@@ -128,8 +140,9 @@ lan_nat(const char *wan)
 		return -1;
 	}
 	pool.af = AF_INET;
-	pool.addr.addr.type = PF_ADDR_DYNIFTL;
-	strlcpy(pool.addr.addr.v.ifname, wan, sizeof(pool.addr.addr.v.ifname));
+	pool.addr.addr.type = PF_ADDR_ADDRMASK;
+	pool.addr.addr.v.a.addr.v4addr.s_addr = address;
+	pool.addr.addr.v.a.mask.v4addr.s_addr = 0xffffffffu;
 	if (ioctl(dev, DIOCADDADDR, &pool) != 0) {
 		say("hotspot: pf: %s: %s\n", "the interface's address", errno);
 		close(dev);
@@ -164,7 +177,7 @@ lan_nat(const char *wan)
 		return -1;
 	}
 	close(dev);
-	printf("hotspot: NAT from 172.20.10.0/28 out of %s, pf on\n", wan);
+	printf("hotspot: NAT from 172.20.10.0/28 out of %s, to its address as it is now, pf on\n", wan);
 	return 0;
 }
 
@@ -282,9 +295,12 @@ stats(void)
 					pool.nr = 0;
 					pool.ticket = rule.ticket;
 					if (ioctl(dev, DIOCGETADDR, &pool) == 0) {
-						/* (pf gives the number of addresses it took from the interface, not the addresses) */
-						printf("hotspot: stats: the NAT translates to %d of %s's addresses; %s has %s\n", pool.addr.addr.p.dyncnt,
-						    stats_wan, stats_wan, ipv4_of(stats_wan) != 0 ? "an IPv4 address" : "no IPv4 address");
+						in_addr_t now = ipv4_of(stats_wan);
+
+						printf("hotspot: stats: the NAT translates to %s; %s has %s\n", pool.addr.addr.type != PF_ADDR_ADDRMASK ?
+						    "an address pf finds itself" : now != 0 && pool.addr.addr.v.a.addr.v4addr.s_addr == now ?
+						    "WAN's address as it is now" : "an address WAN has NOT now", stats_wan, now != 0 ? "an IPv4 address" :
+						    "no IPv4 address");
 					} else {
 						printf("hotspot: stats: the NAT's address not read: %s\n", strerror(errno));
 					}

@@ -32,10 +32,11 @@ enum { GROUP = 0, LINK = 1, LINK_LIST = 2, TITLE_VALUE = 4, SWITCH = 6, EDIT_TEX
 
 static int console = -1;
 static char rows_key, built_key;
-static BOOL building_root, building_privacy;
+static BOOL building_root, building_privacy, building_cellular_pane;
 static __weak id root_controller;
 static id (*original_root)(id, SEL);
 static id (*original_privacy)(id, SEL);
+static id (*original_cellular_pane)(id, SEL);
 static id (*original_cell_status)(id, SEL, id);
 
 static void
@@ -713,6 +714,55 @@ privacy_rows(id self, SEL command)
 	return rows;
 }
 
+/*
+ * iOS's Cellular pane (PSUICellularController) has a Personal Hotspot row of its own, iOS's pane (WirelessModemController,
+ * WirelessModemSettings.bundle): MobileInternetSharing's, which does nothing here. Ours in its place, as in the main list.
+ */
+static id
+cellular_pane_rows(id self, SEL command)
+{
+	if (building_cellular_pane) {
+		return objc_getAssociatedObject(self, &rows_key);
+	}
+	id native = original_cellular_pane(self, command);
+
+	if (![native isKindOfClass:NSArray.class] || !hotspot_here()) {
+		return native;
+	}
+	for (NSUInteger i = 0; i < [native count]; i++) {
+		id spec = native[i];
+		SEL get = NSSelectorFromString(@"detailControllerClass");
+		Class detail = [spec respondsToSelector:get] ? ((Class (*)(id, SEL))objc_msgSend)(spec, get) : Nil;
+		NSString *name = detail != Nil ? NSStringFromClass(detail) : @"", *identifier = identifier_of(spec) ?: @"";
+
+		if ([property(spec, @"HKHotspot") boolValue]) {
+			return native;
+		}
+		if (![name containsString:@"WirelessModem"] && ![identifier.uppercaseString containsString:@"TETHERING"] &&
+		    ![identifier.uppercaseString containsString:@"HOTSPOT"]) {
+			continue;
+		}
+		id row = specifier(S(@"PERSONAL_HOTSPOT", @"Personal Hotspot"), self, NULL, NSSelectorFromString(@"hk_hotspotStatus:"),
+		    NSClassFromString(@"HKHotspotController"), LINK_LIST);
+		if (row == nil) {
+			return native;
+		}
+		set_identifier(row, identifier.length != 0 ? identifier : @"INTERNET_TETHERING");
+		set_property(row, @YES, @"HKHotspot");
+		NSMutableArray *rows = [native mutableCopy];
+		rows[i] = row;
+		building_cellular_pane = YES;
+		keep_rows(self, rows);
+		building_cellular_pane = NO;
+		static unsigned said;
+		if (said++ == 0) {
+			say([NSString stringWithFormat:@"cellular: iOS's Personal Hotspot row (%@, %@) replaced by ours", name, identifier]);
+		}
+		return rows;
+	}
+	return native;
+}
+
 /* CLASS's NAME replaced by IMPLEMENTATION, if it returns an object and takes what NAME says; the old one returned */
 static IMP
 replace(Class cls, NSString *name, IMP implementation)
@@ -785,6 +835,11 @@ settings_init(void)
 		original_cell_status = (void *)replace(root, @"cellularDataStatusForSpecifier:", (IMP)cellular_status);
 		if (privacy != Nil) {
 			original_privacy = (void *)replace(privacy, @"specifiers", (IMP)privacy_rows);
+		}
+		Class cellular_pane = NSClassFromString(@"PSUICellularController");
+		if (cellular_pane != Nil) {
+			class_addMethod(cellular_pane, NSSelectorFromString(@"hk_hotspotStatus:"), (IMP)hotspot_status, "@24@0:8@16");
+			original_cellular_pane = (void *)replace(cellular_pane, @"specifiers", (IMP)cellular_pane_rows);
 		}
 		say([NSString stringWithFormat:@"in (main list %d, hotspot %d, cellular %ld)", original_root != NULL, hotspot_here(),
 		    number("kern.hakios.cellular_up", 0)]);

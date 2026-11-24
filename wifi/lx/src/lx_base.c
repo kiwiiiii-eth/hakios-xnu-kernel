@@ -241,6 +241,7 @@ ticks_to_ns(unsigned long ticks)
 }
 
 static struct timer_list *armed[16];
+static struct timer_list *running;		/* the timer whose function the ticker is calling, if one */
 static struct {
 	struct delayed_work *work;		/* to be queued on ... */
 	struct workqueue_struct *queue;		/* ... when the ticks have reached ... */
@@ -273,10 +274,17 @@ ticker(void *argument)
 				later[i].work = NULL;
 			}
 		}
+		running = due;
 		lx_os_unlock();
 		/* (a timer that a part of the driver not built yet would have given its function has none) */
 		if (due != NULL && due->function_415 != NULL) {
 			due->function_415(due);
+		}
+		if (due != NULL) {
+			lx_os_lock();
+			running = NULL;
+			lx_os_wakeup(&running);
+			lx_os_unlock();
 		}
 		if (work != NULL) {
 			linux_queue_work_on(0, queue, &work->work);
@@ -339,18 +347,30 @@ linux_cancel_delayed_work(struct delayed_work *dwork)
 	return (waited);
 }
 
-/* (A timer's function that is running on the ticker's thread at this moment is not waited for.) */
+/*
+ * A timer's function running on the ticker's thread at this moment is waited for (a second at most: called from that
+ * function itself, it would wait for ever), and the timer taken off again if that function armed it anew -- as
+ * htt_rx.c's refill does when it fails. Until 24 November it was not: the driver, taken down at the run's end with the
+ * hotspot's traffic still refilling, freed what a timer re-armed behind its back pointed into, and the ticker called
+ * a function out of freed memory (r282's panic, ticker()).
+ */
 int
 timer_delete_sync(struct timer_list *timer)
 {
 	int was = 0;
 
 	lx_os_lock();
-	for (unsigned i = 0; i < nitems(armed); i++) {
-		if (armed[i] == timer) {
-			armed[i] = NULL;
-			was = 1;
+	for (unsigned waits = 0; ; waits++) {
+		for (unsigned i = 0; i < nitems(armed); i++) {
+			if (armed[i] == timer) {
+				armed[i] = NULL;
+				was = 1;
+			}
 		}
+		if (running != timer || waits >= 1000) {
+			break;
+		}
+		(void)lx_os_sleep(&running, 1000000ull);
 	}
 	lx_os_unlock();
 	return (was);

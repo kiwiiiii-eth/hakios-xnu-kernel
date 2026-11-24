@@ -12,6 +12,11 @@
  * (LSApplicationWorkspace is CoreServices', loaded here: r223 found no class with Foundation alone.)
  *
  *   usage: lsplugins [BUNDLE.appex ...]      (none: the five, once: /private/var/db/hakios-lsplugins-1 marks it done)
+ *          lsplugins --apps                 the system's applications registered again (registerApplication:), once:
+ *                                           /private/var/db/hakios-lsapps-zh marks it done. The database has their names
+ *                                           in the languages the image had at the first boot; Chinese reached it on 24
+ *                                           November (sysimage/select-system.py's KEEP_LANG), and until the applications
+ *                                           are read again the home screen names them in English whatever the language.
  * Signed with uicache's entitlements (src/lsplugins.entitlements): lsd asks for them.
  */
 #import <Foundation/Foundation.h>
@@ -44,6 +49,39 @@ main(int argc, char **argv)
 		if (workspace == nil || ![workspace respondsToSelector:registerPlugin]) {
 			printf("lsplugins: no LSApplicationWorkspace registerPlugin:\n");
 			return 1;
+		}
+		if (argc == 2 && strcmp(argv[1], "--apps") == 0) {
+			NSString *mark = @"/private/var/db/hakios-lsapps-zh";
+			SEL registerApplication = sel_registerName("registerApplication:");
+			int registered = 0, apps = 0;
+
+			if ([[NSFileManager defaultManager] fileExistsAtPath:mark]) {
+				return 0;
+			}
+			if (![workspace respondsToSelector:registerApplication]) {
+				printf("lsplugins: no LSApplicationWorkspace registerApplication:\n");
+				return 1;
+			}
+			for (NSString *folder in @[ @"/Applications", @"/System/Cryptexes/App/Applications" ]) {
+				for (NSString *name in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:folder error:nil]) {
+					if (![name.pathExtension isEqualToString:@"app"]) {
+						continue;
+					}
+					apps++;
+					if (((BOOL (*)(id, SEL, NSURL *))objc_msgSend)(workspace, registerApplication,
+					    [NSURL fileURLWithPath:[folder stringByAppendingPathComponent:name]])) {
+						registered++;
+					} else {
+						printf("lsplugins: %s: NOT REGISTERED\n", name.UTF8String);
+					}
+				}
+			}
+			printf("lsplugins: %d of %d applications registered again\n", registered, apps);
+			/* (once, the few that will not register notwithstanding: applications the image has without their program) */
+			if (registered > 0) {
+				[[NSData data] writeToFile:mark atomically:YES];
+			}
+			return registered > 0 ? 0 : 1;
 		}
 		for (int i = 1; i < argc; i++) {
 			[paths addObject:@(argv[i])];

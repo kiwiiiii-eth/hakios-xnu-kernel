@@ -4,7 +4,7 @@
  *   hotspot on [FILE]   the name and the passphrase from FILE (two lines; /private/var/root/hakios-hotspot by default,
  *                       which build.sh puts there from ssh/hotspot, never in the repository), then on; and then, until
  *                       the hotspot goes off, its network: en0 at 172.20.10.1/28 (an iPhone's hotspot's), IP forwarding,
- *                       pf's NAT out of the cellular interface (en1, or HOTSPOT_WAN=), and a DHCP server for the stations
+ *                       pf's NAT out of the cellular interface (pdp_ip0 with the native cellular interfaces, else en1; or HOTSPOT_WAN=), and a DHCP server for the stations
  *                       (172.20.10.2-14; DNS 8.8.8.8 and 1.1.1.1; an MTU of 1400 for the cellular path)
  *   hotspot off         off: the radio a station again, and the network it knows joined
  *   hotspot status      on or off, and the name
@@ -376,7 +376,9 @@ dhcp_serve(void)
 static int
 network(void)
 {
-	const char *wan = getenv("HOTSPOT_WAN") != NULL ? getenv("HOTSPOT_WAN") : "en1";
+	/* (pdp_ip0 when the kernel made the native cellular interfaces, modem_native_pdp=1: CommCenter's own data call; else
+	 * en1, the kernel's. pf's "(WAN)" follows the interface's address, so one that has none yet is fine.) */
+	const char *wan = getenv("HOTSPOT_WAN") != NULL ? getenv("HOTSPOT_WAN") : if_nametoindex("pdp_ip0") != 0 ? "pdp_ip0" : "en1";
 	int on = 0, one = 1;
 	size_t size;
 

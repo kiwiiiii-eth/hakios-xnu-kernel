@@ -101,7 +101,9 @@ AUDIO = ('Library/Audio/Plug-Ins/', 'Library/Audio/Tunings/D22/', 'Library/Audio
          # mediaserverd loads from here; the others (baseband voice, CarPlay, AirPlay, USB, the AOP) stay out
          'System/Library/Audio/Plug-Ins/HAL/BTAudioHALPlugin.driver/')
 SKIP_AUDIO = ('System/Library/Audio/UISounds/nano/',)
-KEEP_LANG = ('en', 'Base', 'English', 'en_US', 'en_GB')
+# ... and Chinese (Taiwan, Hong Kong, China): about 10 MB of the 250 all the languages would cost, and their font (PingFang
+# TC/HK/SC) is kept below; without a language's LANGUAGE.lproj, Settings' language switch changes nothing
+KEEP_LANG = ('en', 'Base', 'English', 'en_US', 'en_GB', 'zh_TW', 'zh_HK', 'zh_CN', 'zh-Hant', 'zh-Hans', 'zh-Hant-TW')
 
 
 def entries(listing):

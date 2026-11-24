@@ -7041,7 +7041,8 @@ wds_open(void)
 			qrtr_lookup(wds_port, QMI_WDS, 0, 0);
 		}
 	}
-	if (dsd_port == NULL && wds_port != NULL) {
+	/* (DSD with our WDS, and in modem_native_pdp=1 without it: dsd_write() below is what turns the modem's data on) */
+	if (dsd_port == NULL && (wds_port != NULL || option("modem_native_pdp"))) {
 		dsd_port = qrtr_open(dsd_receive, dsd_server, NULL);
 		if (dsd_port != NULL) {
 			qrtr_lookup(dsd_port, QMI_DSD, 0, 0);
@@ -7572,6 +7573,14 @@ step_nas(void)
 				wlfw_rails_line("NAS registered");
 				data_deadline = now_us() + (uint64_t)data_wait * 1000000ull;
 				tell("mpss: nas: registered; the data session is given up to %u s to come up\n", data_wait);
+			}
+			/*
+			 * (modem_native_pdp=1: no session of ours is refused, which is when dsd_write() is called otherwise; without it
+			 * the modem's data switch stays off and the default data subscription the secondary, and CommCenter's own calls
+			 * end "no service", reason 3 (cc-native-49). So here, once registered: idempotent.)
+			 */
+			if (option("modem_native_pdp")) {
+				dsd_write();
 			}
 			/* stay in the loop until the data session is up or the data deadline passes */
 			if (wds_up || option("modem_data_off") || now_us() > data_deadline) {

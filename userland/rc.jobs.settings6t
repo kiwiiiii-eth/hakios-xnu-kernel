@@ -1,0 +1,22 @@
+# (2026-11-24) Settings' panes of the phone (src/settings_ui.m: Personal Hotspot, Cellular; src/sb_ui.m: the power menu,
+# the volume HUD): the hotspot is turned on and off from Settings now (com.hakios.hotspot, src/hotspot.c "serve"), so
+# this only says, every minute, whether it is on; the kernel's log has the rest (settings:, sbui:, hotspot: lines).
+/redwood/bin/quietboot &
+/var/jb/usr/bin/sleep 30
+/redwood/bin/lsplugins --apps
+/redwood/bin/hotspot status
+/var/jb/usr/bin/sleep 60
+/redwood/bin/hotspot status
+/var/jb/usr/bin/sleep 60
+/redwood/bin/hotspot status
+/var/jb/usr/bin/sleep 60
+/redwood/bin/hotspot status
+/var/jb/usr/bin/sleep 120
+/redwood/bin/hotspot status
+/var/jb/usr/bin/sleep 120
+/redwood/bin/hotspot status
+/var/jb/usr/bin/sleep 300
+/redwood/bin/hotspot status
+/var/jb/usr/bin/sleep 300
+/redwood/bin/hotspot status
+/var/jb/usr/bin/sleep 36000

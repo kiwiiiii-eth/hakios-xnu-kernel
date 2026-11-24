@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+#include <net/if.h>
 
 #define CONF            @"/private/var/mobile/Library/Preferences/com.hakios.hotspot.conf"
 #define CONF_CHANGED    "com.hakios.hotspot.changed"
@@ -462,6 +463,23 @@ hotspot_status(__unused id self, __unused SEL command, __unused id spec)
 }
 
 
+/* Prefer the original iOS cellular pane only with a real native interface,
+ * a loaded original controller and a successful native capability query.
+ * Legacy en1-only profiles retain their existing status-only fallback. */
+static BOOL native_cellular_ready(void)
+{
+    if(!NSClassFromString(@"PSUICellularController") || !if_nametoindex("pdp_ip0"))return NO;
+    static void *library,*connection;
+    if(!library)library=dlopen("/System/Library/Frameworks/CoreTelephony.framework/CoreTelephony",RTLD_NOW|RTLD_GLOBAL);
+    if(!library)return NO;
+    void *(*create)(CFAllocatorRef,void *,void *)=dlsym(library,"_CTServerConnectionCreate");
+    uint64_t (*settings)(void *,bool *,bool *,bool *)=dlsym(library,"_CTServerConnectionGetCellularDataSettings");
+    if(!create || !settings)return NO;
+    if(!connection)connection=create(kCFAllocatorDefault,NULL,NULL);
+    bool capable=false,enabled=false,airplane=false;
+    return connection && settings(connection,&capable,&enabled,&airplane)==0 && capable;
+}
+
 /* ---- Cellular, read only ---- */
 
 static id
@@ -526,6 +544,7 @@ cellular_rows(id self, __unused SEL command)
 static id
 cellular_status(id self, SEL command, id spec)
 {
+	if(native_cellular_ready() && original_cell_status!=NULL)return original_cell_status(self,command,spec);
 	if (number("kern.hakios.cellular_up", 0) == 1) {
 		return number("kern.hakios.cellular_data", 0) == 1 ? @"" : T(@"Not Connected", @"未連線");
 	}
@@ -565,7 +584,20 @@ root_rows(id self, SEL command)
 	root_controller = self;
 	if (cellular) {
 		id native_row = at_cellular != NSNotFound ? rows[at_cellular] : nil;
-		if (![property(native_row, @"HKPortCellular") boolValue]) {
+		if(native_cellular_ready()) {
+            BOOL keep=native_row && ![property(native_row,@"HKPortCellular") boolValue];
+            id row=keep?native_row:specifier(S(@"CELLULAR",@"Cellular"),self,NULL,NULL,NSClassFromString(@"PSUICellularController"),LINK);
+            if(row) {
+                set_identifier(row,@"MOBILE_DATA_SETTINGS_ID");
+                set_property(row,@YES,@"HKNativeCellular");
+                if(!keep)set_property(row,property(native_row,@"iconImage")?:icon(@"CellularData",@"antenna.radiowaves.left.and.right",UIColor.systemGreenColor),@"iconImage");
+                if(at_cellular!=NSNotFound)rows[at_cellular]=row;
+                else if(at_bluetooth!=NSNotFound){[rows insertObject:row atIndex:at_bluetooth+1];at_cellular=at_bluetooth+1;}
+                changed=YES;
+                static unsigned announced;
+                if(announced++<4)say([NSString stringWithFormat:@"native-cellular-v1 row=1 original-row-preserved=%d controller=PSUICellularController",keep]);
+            }
+        } else if (![property(native_row, @"HKPortCellular") boolValue]) {
 			id row = specifier(S(@"CELLULAR", @"Cellular"), self, NULL, NULL, NSClassFromString(@"HKCellularStatusController"), LINK);
 			if (row != nil) {
 				set_identifier(row, @"MOBILE_DATA_SETTINGS_ID");

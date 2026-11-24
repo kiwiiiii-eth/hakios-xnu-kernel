@@ -197,6 +197,15 @@ for d in $EXTRA_SHARE; do
 	[ -d "$d" ] || { echo "build.sh: EXTRA_SHARE: $d is not a directory"; exit 1; }
 	cp -rL "$d" root/share/
 done
+# CARRIER=1: the IPSW's carrier bundles (../sysimage/carrier-bundles, taken from its root file system; never in the
+# repository) in this image, for a RAM boot whose system image was made before select-system.py kept them: init binds
+# them over /System/Library/Carrier Bundles, and CommCenter finds the SIM's carrier there (cellular, abb=1). -R keeps
+# the bundles' links (MCC-MNC names pointing at bundles).
+rm -rf root/carrier-bundles
+if [ -n "$CARRIER" ]; then
+	[ -d ../sysimage/carrier-bundles/iPhone ] || { echo "build.sh: CARRIER=1: no ../sysimage/carrier-bundles/iPhone"; exit 1; }
+	cp -R ../sysimage/carrier-bundles root/carrier-bundles
+fi
 # Metal's compiled shader stages from an earlier boot (tools/metal-cache-seed.sh puts them in
 # userland/hakios-metal-cache): the window server reads them from /redwood/share/hakios-metal-cache
 # (HakiosMetalCA.m: HM_CACHE_SEED) instead of compiling CoreAnimation's shaders during the first minute
@@ -287,7 +296,9 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -o obj/vol_ls src/vol_ls.c
 		$DYN -framework CoreFoundation -framework CoreGraphics -framework ImageIO -o obj/snap_test src/snap_test.c
 		$DYN -framework CoreFoundation -framework CoreGraphics -framework CoreText -o obj/font_test src/font_test.c
-		$DYN -fobjc-arc -framework Foundation -framework SystemConfiguration -o obj/net_test src/net_test.m
+		$DYN -fobjc-arc -framework Foundation -framework SystemConfiguration -o obj/net_test src/net_test.m &&
+		# the native cellular interface's traffic, bound to pdp_ip0 (src/cellnet_test.c; abb=1 modem_native_pdp=1)
+		$DYN -Wall -Wextra -o obj/cellnet_test src/cellnet_test.c
 		# (with an entitlement for "battery_test open URL", if ldid is there: src/battery_test.c)
 		$DYN -framework CoreFoundation -framework IOKit -lsqlite3 -o obj/battery_test src/battery_test.c &&
 			{ ${LDID:-ldid} -Ssrc/battery_test.entitlements obj/battery_test 2>/dev/null ||
@@ -320,8 +331,12 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			-o obj/libhakios.settings.dylib src/settings_ui.m
 		$DYN -fobjc-arc -dynamiclib -install_name /redwood/lib/libhakios.sbui.dylib -framework Foundation -framework UIKit \
 			-o obj/libhakios.sbui.dylib src/sb_ui.m
-		# ... and inside CommCenter, with abb=1: the baseband manager told that the modem is booted already (src/inject_cc.c)
-		$DYN -dynamiclib -install_name /redwood/lib/libhakios.cc.dylib -o obj/libhakios.cc.dylib src/inject_cc.c
+		# ... and inside CommCenter, with abb=1: the baseband manager told that the modem is booted already, its transport
+		# over /dev/hakios-qmuxN, and with cc_generic_modem_mode=1 its SIM, service and carrier model fed from this modem
+		# (src/inject_cc.c; src/inject_cc_dictionary.mm reads CommCenter's own CF dictionaries, in C++)
+		$DYN -fno-exceptions -fno-rtti -c -o obj/inject_cc_dictionary.o src/inject_cc_dictionary.mm &&
+		$DYN -dynamiclib -install_name /redwood/lib/libhakios.cc.dylib -framework CoreFoundation -lc++ \
+			-o obj/libhakios.cc.dylib src/inject_cc.c obj/inject_cc_dictionary.o
 		# ... and inside an application, to say what killed it (src/inject_app.c)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.app.dylib -lobjc \
 			-o obj/libhakios.app.dylib src/inject_app.c
@@ -448,6 +463,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/metal_test ] && cp obj/metal_test root/bin/
 	[ -f obj/fps_info ] && cp obj/fps_info root/bin/
 	[ -f obj/net_test ] && cp obj/net_test root/bin/
+	[ -f obj/cellnet_test ] && cp obj/cellnet_test root/bin/
 	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
 	[ -f obj/keychain_test ] && cp obj/keychain_test root/bin/
 	[ -f obj/aks_restore ] && cp obj/aks_restore root/bin/

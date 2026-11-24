@@ -43,9 +43,11 @@ WHOLE = ('usr/libexec/', 'usr/sbin/', 'usr/bin/', 'usr/lib/', 'usr/share/', 'sbi
 # Of Health only the pictures and films of the activity awards are left out, see SKIP_PREFIX and HEALTH)
 SKIP_SYSTEM_LIBRARY = ('LinguisticData', 'PreinstalledAssetsV2', 'NanoTimeKit', 'Audio',
                        'Assistant', 'AccessibilityBundles',
-                       'VideoProcessors', 'ScreenReader', 'Photos', 'Carrier Bundles', 'NanoPreferenceBundles',
+                       'VideoProcessors', 'ScreenReader', 'Photos', 'NanoPreferenceBundles',
                        'ImagingNetworks', 'ProductDocuments', 'AppPlaceholders', 'UserNotifications',
                        'Caches')
+# (Carrier Bundles kept, 39 MB: CommCenter finds the SIM's carrier there -- its APNs, its name, whether data and the
+# hotspot are allowed -- and the native cellular data path, abb=1 modem_native_pdp=1, wants them; 25 November)
 FRAMEWORKS = ('System/Library/Frameworks/', 'System/Library/PrivateFrameworks/')
 SMALL = 4 << 20
 # never from frameworks: machine-learning models, shader libraries, sound and video, big tables.

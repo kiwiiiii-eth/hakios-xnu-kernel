@@ -1,0 +1,15 @@
+# (2026-11-25) The native cellular data path: CommCenter's own data calls on pdp_ip0 (boot-args bbdt=1 abb=1
+# modem_native_pdp=1 cc_generic_modem_mode=1 cc_generic_modem_provision=1; built with ALLOW=CommCenter, and CARRIER=1
+# while the phone's system image has no carrier bundles). The installed jobs' start, then pdp_ip0's traffic at about
+# 2, 4, 5.5 and 7 minutes (src/cellnet_test.c: an HTTP request in each family, bound to pdp_ip0).
+/redwood/bin/quietboot &
+/redwood/bin/rtcclock &
+/redwood/bin/celltz &
+/redwood/bin/gnssfeed &
+/redwood/bin/lsplugins
+/redwood/bin/cellnet_test 135
+/redwood/bin/net_test show
+/redwood/bin/cellnet_test 240
+/redwood/bin/cellnet_test 330
+/redwood/bin/cellnet_test 420
+/var/jb/usr/bin/sleep 36000

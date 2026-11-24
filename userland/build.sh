@@ -313,6 +313,12 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		# program either as the one library the kernel inserts or opened by a library of ours
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.tweaks.dylib -framework CoreFoundation -lobjc \
 			-o obj/libhakios.tweaks.dylib src/inject_tweaks.c
+		# ... which, in Settings, opens Settings' panes of this phone (src/settings_ui.m); and SpringBoard's library opens the
+		# power menu's and the volume HUD's (src/sb_ui.m)
+		$DYN -fobjc-arc -dynamiclib -install_name /redwood/lib/libhakios.settings.dylib -framework Foundation -framework UIKit \
+			-o obj/libhakios.settings.dylib src/settings_ui.m
+		$DYN -fobjc-arc -dynamiclib -install_name /redwood/lib/libhakios.sbui.dylib -framework Foundation -framework UIKit \
+			-o obj/libhakios.sbui.dylib src/sb_ui.m
 		# ... and inside an application, to say what killed it (src/inject_app.c)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.app.dylib -lobjc \
 			-o obj/libhakios.app.dylib src/inject_app.c
@@ -457,6 +463,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/libhakios.media.dylib ] && cp obj/libhakios.media.dylib root/lib/     # (as with cpu_test)
 	[ -f obj/libhakios.app.dylib ] && cp obj/libhakios.app.dylib root/lib/
 	[ -f obj/libhakios.tweaks.dylib ] && cp obj/libhakios.tweaks.dylib root/lib/
+	[ -f obj/libhakios.settings.dylib ] && cp obj/libhakios.settings.dylib root/lib/
+	[ -f obj/libhakios.sbui.dylib ] && cp obj/libhakios.sbui.dylib root/lib/
 	if [ -n "$BT" ] && [ -f obj/libhakios.bt.dylib ]; then cp obj/libhakios.bt.dylib root/lib/; fi
 	if [ -f obj/HakiosAudio ]; then
 		mkdir -p root/lib/HakiosAudio.driver
@@ -554,6 +562,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# and not by what select-system.py extracted here (--root-volume; seven jobs turn on the difference,
 	# fairplayd among them).
 	cp com.hakios.demo.plist com.hakios.wifi.plist root/LaunchDaemons/
+	[ -f obj/hotspot ] && cp com.hakios.hotspot.plist root/LaunchDaemons/
 	VOLUME=""
 	[ -n "$FLASHBOOT" ] && [ -f $DARWIN/rootfs.slt ] && VOLUME="--root-volume $DARWIN/rootfs.slt"
 	[ -n "$DARWIN_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $DARWIN/rootfs root/LaunchDaemons $DARWIN_JOBS

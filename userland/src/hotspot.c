@@ -8,10 +8,19 @@
  *                       (172.20.10.2-14; DNS 8.8.8.8 and 1.1.1.1; an MTU of 1400 for the cellular path)
  *   hotspot off         off: the radio a station again, and the network it knows joined
  *   hotspot status      on or off, and the name
+ *   hotspot serve       Settings' hotspot (com.hakios.hotspot.plist, root): whenever Settings posts
+ *                       com.hakios.hotspot.changed (src/settings_ui.m), CONF's "on=", "name=" and "password=" lines are
+ *                       done: on (the name and the passphrase to the kernel, then the network above, in a child) or off.
+ *                       With no CONF yet, one is made, off, with ssh/hotspot's name and passphrase if the image has them
+ *                       (a random passphrase if not); mobile's, since Settings shows the passphrase as an iPhone does.
  *
  * The passphrase goes from the file to the kernel and nowhere else: not in argv, not said.
  */
 #include <errno.h>
+#include <notify.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -371,14 +380,14 @@ network(void)
 	int on = 0, one = 1;
 	size_t size;
 
-	for (int i = 0; i < 30 && !on; i++) {
+	for (int i = 0; i < 90 && !on; i++) {      /* (at boot the radio's firmware may still be on its way) */
 		size = sizeof(on);
 		if (sysctlbyname("kern.hakios.hotspot", &on, &size, NULL, 0) != 0 || !on) {
 			sleep(1);
 		}
 	}
 	if (!on) {
-		fprintf(stderr, "hotspot: the hotspot did not come on in 30 s\n");
+		fprintf(stderr, "hotspot: the hotspot did not come on in 90 s\n");
 		return 1;
 	}
 	if (lan_address() != 0) {
@@ -392,6 +401,213 @@ network(void)
 	fflush(stdout);
 	dhcp_serve();
 	return 0;
+}
+
+/* ---- Settings' hotspot (hotspot serve) ---- */
+
+#define CONF            "/private/var/mobile/Library/Preferences/com.hakios.hotspot.conf"
+#define CONF_CHANGED    "com.hakios.hotspot.changed"
+#define MOBILE          501
+
+struct conf {
+	int on;
+	char name[33];
+	char password[64];
+};
+
+static int
+conf_read(struct conf *c)
+{
+	char line[160];
+	FILE *f = fopen(CONF, "r");
+
+	memset(c, 0, sizeof(*c));
+	if (f == NULL) {
+		return -1;
+	}
+	while (fgets(line, sizeof(line), f) != NULL) {
+		line[strcspn(line, "\r\n")] = 0;
+		if (strncmp(line, "on=", 3) == 0) {
+			c->on = atoi(line + 3) != 0;
+		} else if (strncmp(line, "name=", 5) == 0) {
+			strlcpy(c->name, line + 5, sizeof(c->name));
+		} else if (strncmp(line, "password=", 9) == 0) {
+			strlcpy(c->password, line + 9, sizeof(c->password));
+		}
+	}
+	memset(line, 0, sizeof(line));
+	fclose(f);
+	return 0;
+}
+
+/* The first CONF: off, with the image's name and passphrase (build.sh's ssh/hotspot), or "iPhone" and a random one */
+static void
+conf_seed(void)
+{
+	struct stat st;
+	char name[64] = "iPhone", password[80] = "";
+	FILE *f;
+	int fd;
+
+	if (stat(CONF, &st) == 0) {
+		return;
+	}
+	if ((f = fopen("/private/var/root/hakios-hotspot", "r")) != NULL) {
+		if (fgets(name, sizeof(name), f) == NULL || fgets(password, sizeof(password), f) == NULL) {
+			strlcpy(name, "iPhone", sizeof(name));
+			password[0] = 0;
+		}
+		fclose(f);
+		name[strcspn(name, "\r\n")] = 0;
+		password[strcspn(password, "\r\n")] = 0;
+	}
+	if (strlen(password) < 8 || strlen(password) > 63) {
+		static const char letters[] = "abcdefghijkmnpqrstuvwxyz23456789";
+
+		for (int i = 0; i < 12; i++) {
+			password[i] = letters[arc4random_uniform(sizeof(letters) - 1)];
+		}
+		password[12] = 0;
+	}
+	(void)mkdir("/private/var/mobile/Library/Preferences", 0755);
+	if ((fd = open(CONF, O_WRONLY | O_CREAT | O_EXCL, 0600)) < 0) {
+		say("hotspot: %s: %s\n", CONF, errno);
+	} else {
+		dprintf(fd, "on=0\nname=%s\npassword=%s\n", name, password);
+		(void)fchown(fd, MOBILE, MOBILE);
+		close(fd);
+		printf("hotspot: %s made, off, named \"%s\"\n", CONF, name);
+	}
+	memset(password, 0, sizeof(password));
+}
+
+static int
+kernel_on(void)
+{
+	int on = 0;
+	size_t size = sizeof(on);
+
+	return sysctlbyname("kern.hakios.hotspot", &on, &size, NULL, 0) == 0 && on;
+}
+
+static int
+kernel_set(int on)
+{
+	return sysctlbyname("kern.hakios.hotspot", NULL, NULL, &on, sizeof(on));
+}
+
+static pid_t network_child;
+
+/* off, and the network's child gone (its DHCP server stops by itself within 2 s once the hotspot is off) */
+static void
+serve_off(void)
+{
+	if (kernel_on()) {
+		(void)kernel_set(0);
+	}
+	if (network_child > 0) {
+		int status;
+
+		for (int i = 0; i < 50 && waitpid(network_child, &status, WNOHANG) == 0; i++) {
+			usleep(100000);
+		}
+		if (waitpid(network_child, &status, WNOHANG) == 0) {
+			kill(network_child, SIGTERM);
+			(void)waitpid(network_child, &status, 0);
+		}
+		network_child = 0;
+	}
+	for (int i = 0; i < 50 && kernel_on(); i++) {
+		usleep(100000);
+	}
+}
+
+static void
+serve_apply(void)
+{
+	static struct conf applied;
+	static int applied_on;
+	struct conf c;
+
+	if (network_child > 0 && waitpid(network_child, NULL, WNOHANG) == network_child) {
+		network_child = 0;
+	}
+	if (conf_read(&c) != 0 || !c.on) {
+		if (applied_on || kernel_on()) {
+			serve_off();
+			printf("hotspot: off (Settings)\n");
+		}
+		applied_on = 0;
+		memset(&applied, 0, sizeof(applied));
+		memset(&c, 0, sizeof(c));
+		return;
+	}
+	if (applied_on && network_child > 0 && strcmp(applied.name, c.name) == 0 && strcmp(applied.password, c.password) == 0) {
+		memset(&c, 0, sizeof(c));
+		return;                 /* on as asked already */
+	}
+	if (applied_on || kernel_on()) {
+		serve_off();            /* another name or passphrase: the stations join again, as on an iPhone */
+	}
+	if (c.name[0] == 0) {
+		strlcpy(c.name, "iPhone", sizeof(c.name));
+	}
+	if (set_string("kern.hakios.hotspot_name", c.name) != 0 || set_string("kern.hakios.hotspot_password", c.password) != 0 ||
+	    kernel_set(1) != 0) {
+		say("hotspot: %s: %s\n", "on (Settings)", errno);
+		applied_on = 0;
+		memset(&c, 0, sizeof(c));
+		return;
+	}
+	printf("hotspot: on (Settings): \"%s\"\n", c.name);
+	fflush(stdout);
+	if ((network_child = fork()) == 0) {
+		memset(&c, 0, sizeof(c));
+		_exit(network());
+	}
+	applied = c;
+	applied_on = 1;
+	memset(&c, 0, sizeof(c));
+}
+
+static int
+serve(void)
+{
+	int fd = -1, token, on;
+	size_t size = sizeof(on);
+
+	if (sysctlbyname("kern.hakios.hotspot", &on, &size, NULL, 0) != 0) {
+		printf("hotspot: no hotspot in this kernel (no Wi-Fi): nothing to serve\n");
+		return 0;
+	}
+	signal(SIGPIPE, SIG_IGN);
+	conf_seed();
+	if (notify_register_file_descriptor(CONF_CHANGED, &fd, 0, &token) != NOTIFY_STATUS_OK) {
+		fprintf(stderr, "hotspot: the notification %s: not registered\n", CONF_CHANGED);
+		return 1;
+	}
+	printf("hotspot: serving Settings (%s, %s)\n", CONF, CONF_CHANGED);
+	fflush(stdout);
+	serve_apply();
+	for (;;) {
+		struct timeval wait = { 5, 0 };
+		fd_set ready;
+
+		FD_ZERO(&ready);
+		FD_SET(fd, &ready);
+		if (select(fd + 1, &ready, NULL, NULL, &wait) > 0) {
+			int posted;
+
+			if (read(fd, &posted, sizeof(posted)) != sizeof(posted)) {
+				continue;
+			}
+			serve_apply();
+		} else if (network_child > 0 && waitpid(network_child, NULL, WNOHANG) == network_child) {
+			network_child = 0;
+			printf("hotspot: the network's child ended\n");
+		}
+		fflush(stdout);
+	}
 }
 
 int
@@ -439,6 +655,9 @@ main(int argc, char **argv)
 		printf("hotspot: asked off\n");
 		return 0;
 	}
+	if (argc >= 2 && strcmp(argv[1], "serve") == 0) {
+		return serve();
+	}
 	if (argc >= 2 && strcmp(argv[1], "status") == 0) {
 		char name[64] = "";
 		size_t length = sizeof(name);
@@ -451,6 +670,6 @@ main(int argc, char **argv)
 		printf("hotspot: %s (\"%s\")\n", on ? "ON" : "off", name);
 		return 0;
 	}
-	fprintf(stderr, "usage: hotspot on [FILE] | off | status\n");
+	fprintf(stderr, "usage: hotspot on [FILE] | off | status | serve\n");
 	return 2;
 }

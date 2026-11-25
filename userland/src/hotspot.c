@@ -13,6 +13,7 @@
  *                       done: on (the name and the passphrase to the kernel, then the network above, in a child) or off.
  *                       With no CONF yet, one is made, off, with ssh/hotspot's name and passphrase if the image has them
  *                       (a random passphrase if not); mobile's, since Settings shows the passphrase as an iPhone does.
+ *                       At each start it is off whatever CONF said (on=0 written back): Settings turns it on.
  *
  * The passphrase goes from the file to the kernel and nowhere else: not in argv, not said.
  */
@@ -698,6 +699,55 @@ conf_seed(void)
 	memset(password, 0, sizeof(password));
 }
 
+/*
+ * Off at every start: the hotspot is turned on in Settings > Personal Hotspot, not by the phone starting (a CONF left
+ * "on=1" by the last session had it up at boot, its network named before anyone asked). Once a boot (kern.boottime,
+ * noted in /private/var/run): a serve that launchd starts again later in the same boot leaves Settings' choice alone.
+ */
+static void
+conf_off_at_start(void)
+{
+	static const char mark[] = "/private/var/run/hakios-hotspot.boot";
+	struct timeval boot = { 0, 0 };
+	size_t size = sizeof(boot);
+	char seen[32] = "", now[32];
+	struct conf c;
+	FILE *f;
+	int fd;
+
+	if (sysctlbyname("kern.boottime", &boot, &size, NULL, 0) != 0) {
+		return;
+	}
+	snprintf(now, sizeof(now), "%ld", (long)boot.tv_sec);
+	if ((f = fopen(mark, "r")) != NULL) {
+		if (fgets(seen, sizeof(seen), f) == NULL) {
+			seen[0] = 0;
+		}
+		fclose(f);
+		seen[strcspn(seen, "\r\n")] = 0;
+	}
+	if (strcmp(seen, now) == 0) {
+		return;
+	}
+	if ((f = fopen(mark, "w")) != NULL) {
+		fprintf(f, "%s\n", now);
+		fclose(f);
+	}
+	if (conf_read(&c) != 0 || !c.on) {
+		memset(&c, 0, sizeof(c));
+		return;
+	}
+	if ((fd = open(CONF ".new", O_WRONLY | O_CREAT | O_TRUNC, 0600)) >= 0) {
+		dprintf(fd, "on=0\nname=%s\npassword=%s\n", c.name, c.password);
+		(void)fchown(fd, MOBILE, MOBILE);
+		close(fd);
+		if (rename(CONF ".new", CONF) == 0) {
+			printf("hotspot: off at the start, as on an iPhone (Settings > Personal Hotspot turns it on)\n");
+		}
+	}
+	memset(&c, 0, sizeof(c));
+}
+
 static int
 kernel_on(void)
 {
@@ -814,6 +864,7 @@ serve(void)
 	}
 	signal(SIGPIPE, SIG_IGN);
 	conf_seed();
+	conf_off_at_start();
 	if (notify_register_file_descriptor(CONF_CHANGED, &fd, 0, &token) != NOTIFY_STATUS_OK) {
 		fprintf(stderr, "hotspot: the notification %s: not registered\n", CONF_CHANGED);
 		return 1;

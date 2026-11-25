@@ -438,7 +438,48 @@ sysctl_hotspot_password SYSCTL_HANDLER_ARGS
 	return error;
 }
 
+/*
+ * kern.hakios.hotspot_mhz: the channel the hotspot starts on next, in MHz (2412..2472, or 5180..5240, 5745..5825; 0: 2437).
+ * Settings' Maximize Compatibility: on, 2.4 GHz; off, 5 GHz where the radio may send first there (the lx layer says
+ * when it may not, and src/hotspot.c then goes back to 2.4). kern.hakios.hotspot_stations: the stations joined, now.
+ */
+static unsigned ap_stations;
+
+void
+hakios_sta_ap_stations(unsigned count)
+{
+	ap_stations = count;
+}
+
+static int
+sysctl_hotspot_mhz SYSCTL_HANDLER_ARGS
+{
+	int value = hotspot_config.frequency != 0 ? hotspot_config.frequency : 2437, error = sysctl_handle_int(oidp, &value, 0, req);
+
+	if (error != 0 || req->newptr == USER_ADDR_NULL) {
+		return error;
+	}
+	if (!(value >= 2412 && value <= 2472 && (value - 2407) % 5 == 0) && !(value >= 5180 && value <= 5240 && value % 20 == 0) &&
+	    !(value >= 5745 && value <= 5825 && (value - 5745) % 20 == 0)) {
+		return EINVAL;
+	}
+	hotspot_config.frequency = (uint16_t)value;
+	return 0;
+}
+
+static int
+sysctl_hotspot_stations SYSCTL_HANDLER_ARGS
+{
+	int value = ap_running ? (int)ap_stations : 0;
+
+	return sysctl_handle_int(oidp, &value, 0, req);
+}
+
 SYSCTL_DECL(_kern_hakios);
+SYSCTL_PROC(_kern_hakios, OID_AUTO, hotspot_mhz, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0, sysctl_hotspot_mhz, "I",
+    "the hotspot's channel next time, MHz");
+SYSCTL_PROC(_kern_hakios, OID_AUTO, hotspot_stations, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 0, sysctl_hotspot_stations,
+    "I", "the hotspot's stations joined, now");
 SYSCTL_PROC(_kern_hakios, OID_AUTO, hotspot, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0, sysctl_hotspot, "I",
     "the hotspot: 1 on, 0 off");
 SYSCTL_PROC(_kern_hakios, OID_AUTO, hotspot_name, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0, sysctl_hotspot_name,

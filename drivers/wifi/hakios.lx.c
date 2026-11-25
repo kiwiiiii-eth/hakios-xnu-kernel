@@ -355,6 +355,13 @@ lx_os_net_link(int up)
 	}
 }
 
+/* the hotspot's stations, as many as have their keys in use: kern.hakios.hotspot_stations (hakios.sta.c) */
+void
+lx_os_ap_stations(unsigned count)
+{
+	hakios_sta_ap_stations(count);
+}
+
 void
 lx_os_net_quiet(int up)
 {

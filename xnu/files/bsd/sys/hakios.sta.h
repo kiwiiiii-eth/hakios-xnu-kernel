@@ -82,7 +82,7 @@ struct hakios_sta_ap {
 	uint8_t  ssid_length;
 	uint8_t  passphrase[64];
 	uint8_t  passphrase_length;
-	uint16_t frequency;                     /* MHz (2412..2472); 0: 2437, channel 6 */
+	uint16_t frequency;                     /* MHz (2412..2472, or 5 GHz where the radio may send first); 0: 2437 */
 };
 
 struct hakios_sta_ops {
@@ -120,6 +120,7 @@ int      hakios_sta_ask_join(const struct hakios_sta_join *what);
 int      hakios_sta_ask_join_standing(const struct hakios_sta_join *what);
 int      hakios_sta_ask_leave(void);
 int      hakios_sta_ask_ap(const struct hakios_sta_ap *what);         /* the hotspot on; NULL: off */
+void     hakios_sta_ap_stations(unsigned count);                     /* (the lx layer) its stations joined, now */
 bool     hakios_sta_busy(void);                                        /* something asked for is not over yet */
 bool     hakios_sta_powered(void);
 /* the `index`th access point the last scan heard: true, or false when there are not that many */

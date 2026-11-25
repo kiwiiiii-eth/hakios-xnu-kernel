@@ -2269,7 +2269,29 @@ ap_channel_number(const struct lx_radio *radio)
 {
 	unsigned frequency = radio->ap.frequency != 0 ? radio->ap.frequency : 2437;
 
+	if (frequency >= 5000 && frequency <= 5900) {
+		return ((frequency - 5000) / 5);
+	}
 	return (frequency >= 2412 && frequency <= 2472 ? (frequency - 2407) / 5 : 6);
+}
+
+/* the hotspot on 5 GHz (Settings' Maximize Compatibility off): 802.11a, no 802.11b rates, no ERP element */
+static bool
+ap_5ghz(const struct lx_radio *radio)
+{
+	return (radio->ap.frequency > 4000);
+}
+
+/* how many stations have their keys in use, for kern.hakios.hotspot_stations (Settings, the status bar, Control Center) */
+static void
+ap_count_stations(struct lx_radio *radio)
+{
+	unsigned count = 0;
+
+	for (unsigned i = 0; i < 8; i++) {
+		count += radio->clients[i].used && radio->clients[i].step == 4;
+	}
+	lx_os_ap_stations(count);
 }
 
 /* A beacon (true) or an answer to a probe: the frame, for the driver's template. tim: where the TIM element begins. */
@@ -2277,6 +2299,7 @@ static struct sk_buff *
 ap_frame(struct lx_radio *radio, bool beacon, uint16_t *tim, uint16_t *tim_length)
 {
 	static const uint8_t rates[] = { 1, 8, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24 };   /* 1 2 5.5 11 basic; 6 9 12 18 */
+	static const uint8_t rates_5ghz[] = { 1, 8, 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c }; /* 6 12 24 basic; 9 18 36 48 54 */
 	static const uint8_t more_rates[] = { 50, 4, 0x30, 0x48, 0x60, 0x6c };                     /* 24 36 48 54 */
 	static const uint8_t rsn[] = { 48, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 2,
 		                       0, 0 };     /* version 1; group CCMP; one pairwise, CCMP; one AKM, PSK; no capabilities */
@@ -2305,7 +2328,7 @@ ap_frame(struct lx_radio *radio, bool beacon, uint16_t *tim, uint16_t *tim_lengt
 	*p++ = radio->ap.ssid_length;
 	memcpy(p, radio->ap.ssid, radio->ap.ssid_length);
 	p += radio->ap.ssid_length;
-	memcpy(p, rates, sizeof(rates));
+	memcpy(p, ap_5ghz(radio) ? rates_5ghz : rates, sizeof(rates));
 	p += sizeof(rates);
 	*p++ = 3;
 	*p++ = 1;
@@ -2324,13 +2347,17 @@ ap_frame(struct lx_radio *radio, bool beacon, uint16_t *tim, uint16_t *tim_lengt
 			*tim_length = 6;
 		}
 	}
-	*p++ = 42;					/* ERP: no protection asked */
-	*p++ = 1;
-	*p++ = 0;
+	if (!ap_5ghz(radio)) {
+		*p++ = 42;				/* ERP: no protection asked */
+		*p++ = 1;
+		*p++ = 0;
+	}
 	memcpy(p, rsn, sizeof(rsn));
 	p += sizeof(rsn);
-	memcpy(p, more_rates, sizeof(more_rates));
-	p += sizeof(more_rates);
+	if (!ap_5ghz(radio)) {
+		memcpy(p, more_rates, sizeof(more_rates));
+		p += sizeof(more_rates);
+	}
 	skb_trim(skb, (unsigned)(p - f));
 	return (skb);
 }
@@ -2503,6 +2530,7 @@ ap_client_gone(struct lx_radio *radio, struct lx_client *c, const char *why)
 	    c->address[5], c->aid, why, c->received, c->sent);
 	kfree(c->sta_memory);
 	explicit_bzero(c, sizeof(*c));
+	ap_count_stations(radio);
 }
 
 /* A management frame to a station: the 24 bytes, to it, from us (the network's address is ours). */
@@ -2670,7 +2698,8 @@ ap_authentication(struct lx_radio *radio, const uint8_t *f, unsigned length)
 static void
 ap_association(struct lx_radio *radio, const uint8_t *f, unsigned length, bool again)
 {
-	struct ieee80211_supported_band *band = radio->wiphy->bands[NL80211_BAND_2GHZ];
+	enum nl80211_band in_use = ap_5ghz(radio) ? NL80211_BAND_5GHZ : NL80211_BAND_2GHZ;
+	struct ieee80211_supported_band *band = radio->wiphy->bands[in_use];
 	struct lx_client *c = ap_client(radio, f + 10, false);
 	unsigned at = 24 + 4 + (again ? 6 : 0), status = 0;
 	const uint8_t *rates = NULL, *more = NULL, *rsn = NULL;
@@ -2706,16 +2735,20 @@ ap_association(struct lx_radio *radio, const uint8_t *f, unsigned length, bool a
 		status = 18;				/* no rate in common */
 	}
 	if (status == 0) {
-		c->sta->deflink.supp_rates[NL80211_BAND_2GHZ] = has;
+		c->sta->deflink.supp_rates[in_use] = has;
 		c->sta->wme = false;
 		c->sta->aid = c->aid;
 		if (ap_client_state(radio, c, IEEE80211_STA_ASSOC) != 0) {
 			status = 1;
 		}
 	}
-	if ((skb = ap_management_new(radio, c, again ? 0x30 : 0x10, 6 + 10 + 6, &body)) != NULL) {
+	if (band == NULL) {
+		status = 1;
+	}
+	if ((skb = ap_management_new(radio, c, again ? 0x30 : 0x10, 6 + (ap_5ghz(radio) ? 10 : 16), &body)) != NULL) {
 		static const uint8_t rate_elements[] = { 1, 8, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24, 50, 4, 0x30, 0x48,
 			                                 0x60, 0x6c };
+		static const uint8_t rate_elements_5ghz[] = { 1, 8, 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c };
 
 		body[0] = 0x31;
 		body[1] = 0x04;
@@ -2723,7 +2756,11 @@ ap_association(struct lx_radio *radio, const uint8_t *f, unsigned length, bool a
 		body[3] = (uint8_t)(status >> 8);
 		body[4] = (uint8_t)c->aid;
 		body[5] = (uint8_t)(0xc0 | c->aid >> 8);
-		memcpy(body + 6, rate_elements, sizeof(rate_elements));
+		if (ap_5ghz(radio)) {
+			memcpy(body + 6, rate_elements_5ghz, sizeof(rate_elements_5ghz));
+		} else {
+			memcpy(body + 6, rate_elements, sizeof(rate_elements));
+		}
 		ap_send(radio, c, skb);
 	}
 	lx_tell("lx: access point: ASSOCIATION of ..:%02x:%02x: %s (status %u); station number %u, rates %#x\n", f[14], f[15],
@@ -2789,6 +2826,7 @@ ap_handshake_received(struct lx_radio *radio, const uint8_t *frame, unsigned len
 		}
 		c->step = 4;
 		explicit_bzero(&c->wpa, sizeof(c->wpa));
+		ap_count_stations(radio);
 		lx_tell("lx: access point: A STATION HAS JOINED: ..:%02x:%02x, station number %u: the keys are given to the driver, "
 		    "%s (%d)\n", c->address[4], c->address[5], c->aid, error == 0 ? "frames can pass" : "BUT THE DRIVER REFUSED THEM",
 		    error);
@@ -2969,8 +3007,11 @@ ap_start(struct lx_radio *radio, const struct hakios_sta_ap *what)
 		return (EINVAL);
 	}
 	channel = linuxkpi_ieee80211_get_channel(radio->wiphy, frequency);
-	if (channel == NULL || (channel->flags & IEEE80211_CHAN_DISABLED) || frequency > 2472) {
-		lx_tell("lx: access point: %u MHz is not a channel the radio may use here: not started\n", frequency);
+	if (channel == NULL || (channel->flags & IEEE80211_CHAN_DISABLED) || (frequency > 2472 && frequency < 5000) ||
+	    (frequency > 5000 && (channel->flags & (IEEE80211_CHAN_NO_IR | IEEE80211_CHAN_RADAR)))) {
+		lx_tell("lx: access point: %u MHz is not a channel the radio may use here%s: not started\n", frequency,
+		    channel != NULL && frequency > 5000 && (channel->flags & (IEEE80211_CHAN_NO_IR | IEEE80211_CHAN_RADAR)) ?
+		    " (it may only listen there, or must look for radar first)" : "");
 		return (EINVAL);
 	}
 	/* a station first leaves, and the radio comes up again as an access point */
@@ -3022,7 +3063,7 @@ ap_start(struct lx_radio *radio, const struct hakios_sta_ap *what)
 	vif->cfg.ssid_len = radio->ap.ssid_length;
 	vif->bss_conf.beacon_int = AP_BEACON_INTERVAL;
 	vif->bss_conf.dtim_period = AP_DTIM_PERIOD;
-	vif->bss_conf.basic_rates = 0xf;
+	vif->bss_conf.basic_rates = ap_5ghz(radio) ? 0x15 : 0xf;	/* 6 12 24 Mbit/s on 5 GHz; 1 2 5.5 11 on 2.4 */
 	vif->bss_conf.use_short_slot = true;
 	vif->bss_conf.use_short_preamble = true;
 	vif->bss_conf.hidden_ssid = false;

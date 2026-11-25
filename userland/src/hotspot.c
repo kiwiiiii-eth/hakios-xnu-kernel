@@ -629,6 +629,7 @@ network(void)
 
 struct conf {
 	int on;
+	int compat;			/* Maximize Compatibility: 1 (the default) 2.4 GHz, 0 5 GHz */
 	char name[33];
 	char password[64];
 };
@@ -640,6 +641,7 @@ conf_read(struct conf *c)
 	FILE *f = fopen(CONF, "r");
 
 	memset(c, 0, sizeof(*c));
+	c->compat = 1;
 	if (f == NULL) {
 		return -1;
 	}
@@ -647,6 +649,8 @@ conf_read(struct conf *c)
 		line[strcspn(line, "\r\n")] = 0;
 		if (strncmp(line, "on=", 3) == 0) {
 			c->on = atoi(line + 3) != 0;
+		} else if (strncmp(line, "compat=", 7) == 0) {
+			c->compat = atoi(line + 7) != 0;
 		} else if (strncmp(line, "name=", 5) == 0) {
 			strlcpy(c->name, line + 5, sizeof(c->name));
 		} else if (strncmp(line, "password=", 9) == 0) {
@@ -738,7 +742,7 @@ conf_off_at_start(void)
 		return;
 	}
 	if ((fd = open(CONF ".new", O_WRONLY | O_CREAT | O_TRUNC, 0600)) >= 0) {
-		dprintf(fd, "on=0\nname=%s\npassword=%s\n", c.name, c.password);
+		dprintf(fd, "on=0\ncompat=%d\nname=%s\npassword=%s\n", c.compat, c.name, c.password);
 		(void)fchown(fd, MOBILE, MOBILE);
 		close(fd);
 		if (rename(CONF ".new", CONF) == 0) {
@@ -809,6 +813,7 @@ serve_apply(void)
 	static struct conf applied;
 	static int applied_on;
 	struct conf c;
+	int mhz;
 
 	if (network_child > 0 && waitpid(network_child, NULL, WNOHANG) == network_child) {
 		network_child = 0;
@@ -823,7 +828,8 @@ serve_apply(void)
 		memset(&c, 0, sizeof(c));
 		return;
 	}
-	if (applied_on && network_child > 0 && strcmp(applied.name, c.name) == 0 && strcmp(applied.password, c.password) == 0) {
+	if (applied_on && network_child > 0 && strcmp(applied.name, c.name) == 0 && strcmp(applied.password, c.password) == 0 &&
+	    applied.compat == c.compat) {
 		memset(&c, 0, sizeof(c));
 		return;                 /* on as asked already */
 	}
@@ -833,6 +839,8 @@ serve_apply(void)
 	if (c.name[0] == 0) {
 		strlcpy(c.name, "iPhone", sizeof(c.name));
 	}
+	mhz = c.compat ? 2437 : 5745;		/* channel 6, or 149 (5 GHz, where the radio may send first) */
+	(void)sysctlbyname("kern.hakios.hotspot_mhz", NULL, NULL, &mhz, sizeof(mhz));
 	if (set_string("kern.hakios.hotspot_name", c.name) != 0 || set_string("kern.hakios.hotspot_password", c.password) != 0 ||
 	    kernel_set(1) != 0) {
 		say("hotspot: %s: %s\n", "on (Settings)", errno);
@@ -840,8 +848,18 @@ serve_apply(void)
 		memset(&c, 0, sizeof(c));
 		return;
 	}
-	printf("hotspot: on (Settings): \"%s\", a passphrase of %zu characters, fingerprint %s\n", c.name, strlen(c.password),
-	    fingerprint(c.password));
+	/* 5 GHz only where the radio may send first: if the access point is not up within 8 s there, 2.4 GHz instead */
+	for (int i = 0; mhz != 2437 && i < 40 && !kernel_on(); i++) {
+		usleep(200000);
+	}
+	if (mhz != 2437 && !kernel_on()) {
+		printf("hotspot: 5 GHz (%d MHz) did not start here: 2.4 GHz instead\n", mhz);
+		mhz = 2437;
+		(void)sysctlbyname("kern.hakios.hotspot_mhz", NULL, NULL, &mhz, sizeof(mhz));
+		(void)kernel_set(1);
+	}
+	printf("hotspot: on (Settings): \"%s\", a passphrase of %zu characters, fingerprint %s, %s\n", c.name, strlen(c.password),
+	    fingerprint(c.password), mhz == 2437 ? "2.4 GHz (channel 6)" : "5 GHz (channel 149)");
 	fflush(stdout);
 	if ((network_child = fork()) == 0) {
 		memset(&c, 0, sizeof(c));
@@ -850,6 +868,31 @@ serve_apply(void)
 	applied = c;
 	applied_on = 1;
 	memset(&c, 0, sizeof(c));
+}
+
+/*
+ * SpringBoard (src/sb_ui.m: the status bar's green bubble, Control Center's button) and Settings are told, by the
+ * notification com.hakios.hotspot.stations, whenever the hotspot goes on or off or its stations change in number
+ * (kern.hakios.hotspot_stations); they read the numbers themselves.
+ */
+static void
+serve_tell_stations(void)
+{
+	static int said_on = -1, said_stations = -1;
+	int on = kernel_on(), stations = 0;
+	size_t size = sizeof(stations);
+
+	if (on && sysctlbyname("kern.hakios.hotspot_stations", &stations, &size, NULL, 0) != 0) {
+		stations = 0;
+	}
+	if (on != said_on || stations != said_stations) {
+		if (said_on >= 0) {
+			printf("hotspot: %s, %d station%s joined\n", on ? "on" : "off", stations, stations == 1 ? "" : "s");
+		}
+		said_on = on;
+		said_stations = stations;
+		notify_post("com.hakios.hotspot.stations");
+	}
 }
 
 static int
@@ -873,8 +916,10 @@ serve(void)
 	fflush(stdout);
 	serve_apply();
 	for (;;) {
-		struct timeval wait = { 5, 0 };
+		struct timeval wait = { 1, 0 };
 		fd_set ready;
+
+		serve_tell_stations();
 
 		FD_ZERO(&ready);
 		FD_SET(fd, &ready);

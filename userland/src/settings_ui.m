@@ -34,6 +34,7 @@ static int console = -1;
 static char rows_key, built_key;
 static BOOL building_root, building_privacy, building_cellular_pane;
 static __weak id root_controller;
+static __weak id hotspot_pane;          /* our Personal Hotspot pane while it is there, to follow Control Center's switch */
 static id (*original_root)(id, SEL);
 static id (*original_privacy)(id, SEL);
 static id (*original_cellular_pane)(id, SEL);
@@ -308,8 +309,8 @@ conf_write(NSMutableDictionary *conf)
 	if ([conf[@"password"] length] < 8) {
 		conf[@"password"] = random_password();
 	}
-	NSString *text = [NSString stringWithFormat:@"on=%d\nname=%@\npassword=%@\n", [conf[@"on"] intValue] != 0, conf[@"name"],
-	    conf[@"password"]];
+	NSString *text = [NSString stringWithFormat:@"on=%d\ncompat=%d\nname=%@\npassword=%@\n", [conf[@"on"] intValue] != 0,
+	    conf[@"compat"] == nil || [conf[@"compat"] intValue] != 0, conf[@"name"], conf[@"password"]];
 	if (![text writeToFile:CONF atomically:YES encoding:NSUTF8StringEncoding error:&error]) {
 		say([NSString stringWithFormat:@"hotspot: %@ not written: %@", CONF, error.localizedDescription]);
 		return NO;
@@ -341,6 +342,26 @@ hotspot_switch_set(__unused id self, __unused SEL command, id value, __unused id
 		say([NSString stringWithFormat:@"hotspot: asked %@", [value boolValue] ? @"on" : @"off"]);
 	}
 	reload_root_row(@"INTERNET_TETHERING");
+}
+
+/* Maximize Compatibility (as an iPhone 12 and later have it): on, the hotspot on 2.4 GHz; off, 5 GHz where the radio may */
+static id
+hotspot_compat_value(__unused id self, __unused SEL command, __unused id spec)
+{
+	NSString *compat = conf_read()[@"compat"];
+
+	return @(compat == nil || [compat intValue] != 0);
+}
+
+static void
+hotspot_compat_set(__unused id self, __unused SEL command, id value, __unused id spec)
+{
+	NSMutableDictionary *conf = conf_read();
+
+	conf[@"compat"] = [value boolValue] ? @"1" : @"0";
+	if (conf_write(conf)) {
+		say([NSString stringWithFormat:@"hotspot: Maximize Compatibility %@", [value boolValue] ? @"on (2.4 GHz)" : @"off (5 GHz)"]);
+	}
 }
 
 static id
@@ -433,8 +454,11 @@ hotspot_rows(id self, __unused SEL command)
 	    NSSelectorFromString(@"hk_password:"), NSClassFromString(@"HKHotspotPasswordController"), LINK_LIST);
 	id connect = specifier([NSString stringWithFormat:M(@"CONNECT_OVER_WIFI_LABEL", @"TO CONNECT USING %@"),
 	    M(@"WIFI_UPPERCASE", @"WI-FI")], self, NULL, NULL, Nil, GROUP);
+	id compat_group = specifier(@"", self, NULL, NULL, Nil, GROUP);
+	id compat = specifier(M(@"MAXIMIZE_COMPATIBILITY", @"Maximize Compatibility"), self,
+	    NSSelectorFromString(@"hk_setCompat:specifier:"), NSSelectorFromString(@"hk_compat:"), Nil, SWITCH);
 
-	if (group == nil || allow == nil || password == nil || connect == nil) {
+	if (group == nil || allow == nil || password == nil || connect == nil || compat_group == nil || compat == nil) {
 		return @[];
 	}
 	/* the phone renamed since: the network follows, as on an iPhone */
@@ -453,7 +477,11 @@ hotspot_rows(id self, __unused SEL command)
 	    [NSString stringWithFormat:M(@"CONNECT_OVER_WIFI_STEP_1", @"Choose “%@” from the %@ settings on your computer or other "
 	    "device."), name, wifi], M(@"STEP_2", @"2"), M(@"CONNECT_OVER_WIFI_STEP_2", @"Enter the password when prompted.")],
 	    @"footerText");
-	[rows addObjectsFromArray:@[group, allow, password, connect]];
+	set_property(compat_group, M(@"MAXIMIZE_COMPATIBILITY_FOOTER", @"Internet performance may be reduced for devices connected to "
+	    "your hotspot when turned on."), @"footerText");
+	set_identifier(compat, @"HAKIOS_HOTSPOT_COMPATIBILITY");
+	[rows addObjectsFromArray:@[group, allow, password, compat_group, compat, connect]];
+	hotspot_pane = self;
 	keep_rows(self, rows);
 	say(@"hotspot: the pane is up");
 	return rows;
@@ -817,10 +845,23 @@ settings_init(void)
 		if ((cls = controller(base, "HKHotspotController", (IMP)hotspot_rows)) != Nil) {
 			class_addMethod(cls, NSSelectorFromString(@"hk_on:"), (IMP)hotspot_switch_value, "@24@0:8@16");
 			class_addMethod(cls, NSSelectorFromString(@"hk_setOn:specifier:"), (IMP)hotspot_switch_set, "v32@0:8@16@24");
+			class_addMethod(cls, NSSelectorFromString(@"hk_compat:"), (IMP)hotspot_compat_value, "@24@0:8@16");
+			class_addMethod(cls, NSSelectorFromString(@"hk_setCompat:specifier:"), (IMP)hotspot_compat_set, "v32@0:8@16@24");
 			class_addMethod(cls, NSSelectorFromString(@"hk_password:"), (IMP)hotspot_password_value, "@24@0:8@16");
 			class_addMethod(cls, NSSelectorFromString(@"viewWillAppear:"), (IMP)hotspot_will_appear, "v20@0:8B16");
 			objc_registerClassPair(cls);
 		}
+		/* the switch turned in Control Center (src/sb_ui.m) or the stations changed: the pane and the main list's row follow */
+		int token;
+		void (^follow)(int) = ^(__unused int t) {
+			id pane = hotspot_pane;
+			if (pane != nil) {
+				reload_values(pane);
+			}
+			reload_root_row(@"INTERNET_TETHERING");
+		};
+		notify_register_dispatch(CONF_CHANGED, &token, dispatch_get_main_queue(), follow);
+		notify_register_dispatch("com.hakios.hotspot.stations", &token, dispatch_get_main_queue(), follow);
 		if ((cls = controller(base, "HKHotspotPasswordController", (IMP)password_rows)) != Nil) {
 			class_addMethod(cls, NSSelectorFromString(@"hk_password:"), (IMP)hotspot_password_value, "@24@0:8@16");
 			class_addMethod(cls, NSSelectorFromString(@"hk_setPassword:specifier:"), (IMP)hotspot_password_set, "v32@0:8@16@24");

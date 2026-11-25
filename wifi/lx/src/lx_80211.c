@@ -2446,19 +2446,29 @@ ap_client(struct lx_radio *radio, const uint8_t *address, bool make)
 static int
 ap_client_state(struct lx_radio *radio, struct lx_client *c, enum ieee80211_sta_state to)
 {
-	int ret = 0;
+	int ret = 0, first = 0;
 
+	/*
+	 * Up, a step at a time while the driver agrees. Down, every step whatever the driver says, as mac80211 does
+	 * (sta_info.c ends with NONE -> NOTEXIST even when a step before it failed): that last step is the one that
+	 * deletes the firmware's peer, and a peer left there (hotui-3, 25 November: ASSOC -> AUTH failed, the loop
+	 * stopped) made every later join of the same station fail -- the firmware would not make it again.
+	 */
 	mutex_lock(&radio->wiphy->mtx);
-	while (ret == 0 && c->reached != (int)to) {
+	while (c->reached != (int)to) {
 		int next = c->reached < (int)to ? c->reached + 1 : c->reached - 1;
 
 		ret = radio->ops->sta_state(&radio->hw, radio->vif, c->sta, c->reached, next);
-		if (ret == 0 || next < c->reached) {
-			c->reached = next;		/* (going down, on whatever the driver says) */
+		if (ret != 0 && first == 0) {
+			first = ret;
 		}
+		if (ret != 0 && next > c->reached) {
+			break;
+		}
+		c->reached = next;
 	}
 	mutex_unlock(&radio->wiphy->mtx);
-	return (ret);
+	return (first);
 }
 
 static void
@@ -2470,14 +2480,25 @@ ap_client_gone(struct lx_radio *radio, struct lx_client *c, const char *why)
 	c->step = 0;					/* (no frame is sent to it from here on: ap_output() skips it) */
 	__atomic_thread_fence(__ATOMIC_SEQ_CST);
 	lx_pause_ms(5);
+	/*
+	 * As mac80211 takes a station down: out of AUTHORIZED, then its key, then the rest of the way. The key is freed
+	 * only at the end: when the firmware does not answer its removal (it often does not, the station being gone), the
+	 * driver keeps it in its peer and removes it again on the way down (ath10k_clear_peer_keys()); freed before, that
+	 * read zeroes ("cipher 0 is not supported") and the disassociation failed.
+	 */
+	if (c->reached > IEEE80211_STA_ASSOC) {
+		(void)ap_client_state(radio, c, IEEE80211_STA_ASSOC);
+	}
 	if (c->pairwise_key != NULL) {
 		mutex_lock(&radio->wiphy->mtx);
 		radio->ops->set_key(&radio->hw, DISABLE_KEY, radio->vif, c->sta, c->pairwise_key);
 		mutex_unlock(&radio->wiphy->mtx);
+	}
+	(void)ap_client_state(radio, c, IEEE80211_STA_NOTEXIST);
+	if (c->pairwise_key != NULL) {
 		explicit_bzero(c->pairwise_key->key, 16);
 		kfree(c->pairwise_key);
 	}
-	(void)ap_client_state(radio, c, IEEE80211_STA_NOTEXIST);
 	lx_tell("lx: access point: station ..:%02x:%02x (number %u) is gone: %s (%u frames from it, %u to it)\n", c->address[4],
 	    c->address[5], c->aid, why, c->received, c->sent);
 	kfree(c->sta_memory);

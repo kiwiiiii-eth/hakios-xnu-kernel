@@ -4933,6 +4933,30 @@ fb_command(char *cmd)
 				}
 				return;
 			}
+			if (starts_with(cmd, "oem ramdisk fnv")) {
+				/*
+				 * "oem ramdisk fnv": the FNV-1a (64 bits, as darwin's header has it) of what the resident area holds
+				 * now, for the host to compare with its own file's: a 2.6 GB download is not checked on its way, and
+				 * now and then one arrives damaged (25 November: two runs in five, dyld's first program dying of
+				 * SIGBUS or SIGSEGV), which a run would otherwise only show as a system that does not start.
+				 */
+				static const char hex[] = "0123456789abcdef";
+				char text[48] = "fnv ";
+				uint64_t h;
+
+				if (resident_rd_size == 0) {
+					fb_reply("FAIL", "nothing in the resident area");
+					return;
+				}
+				h = ufs_fnv(0xcbf29ce484222325ULL, (const uint8_t *)(win_base + RESIDENT_RD_OFFSET), resident_rd_size);
+				for (int i = 0; i < 16; i++) {
+					text[4 + i] = hex[(h >> (60 - 4 * i)) & 0xf];
+				}
+				text[20] = 0;
+				fb_reply("INFO", text);
+				fb_reply("OKAY", "");
+				return;
+			}
 			if (starts_with(cmd, "oem ramdisk none")) {
 				resident_rd_size = 0;
 				/* (an "oem ramdisk" before this one must not leave the next download aimed at the resident area) */

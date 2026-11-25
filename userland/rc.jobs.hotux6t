@@ -1,0 +1,28 @@
+# The hotspot as an iPhone shows it (25 November): on in Settings (rc.jobs.hotui6t.sh), the ESP32 client joins; the status
+# bar's green bubble; Control Center opened and its connectivity module expanded (the Personal Hotspot button); then
+# Maximize Compatibility off (5 GHz, through CONF and the notification Settings posts) and on again; off in Settings.
+/redwood/bin/quietboot &
+/redwood/bin/rtcclock &
+/redwood/bin/celltz &
+/redwood/bin/gnssfeed &
+/redwood/bin/lsplugins
+/redwood/bin/cellnet_test 110
+/var/jb/bin/sh /redwood/etc/rc.jobs.sh ON
+/var/jb/usr/bin/sleep 40
+/redwood/bin/hotspot status
+/redwood/bin/rwtouch button home wait 2 notify com.hakios.unlock wait 2 button home wait 4
+/redwood/bin/rwtouch swipe 0.9 0.005 0.9 0.6 300 wait 3 hold 0.27 0.2 1200 wait 6
+# its Personal Hotspot button: off, then on again
+/redwood/bin/rwtouch tap 0.70 0.62 wait 12
+/redwood/bin/hotspot status
+/redwood/bin/rwtouch tap 0.70 0.62 wait 12
+/redwood/bin/hotspot status
+/redwood/bin/rwtouch button home wait 3
+/var/jb/usr/bin/sed -i s/^compat=1/compat=0/ /private/var/mobile/Library/Preferences/com.hakios.hotspot.conf
+/redwood/bin/rwtouch notify com.hakios.hotspot.changed wait 25
+/redwood/bin/hotspot status
+/var/jb/usr/bin/sed -i s/^compat=0/compat=1/ /private/var/mobile/Library/Preferences/com.hakios.hotspot.conf
+/redwood/bin/rwtouch notify com.hakios.hotspot.changed wait 40
+/redwood/bin/hotspot status
+/var/jb/bin/sh /redwood/etc/rc.jobs.sh off
+/var/jb/usr/bin/sleep 36000

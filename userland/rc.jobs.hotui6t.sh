@@ -8,7 +8,14 @@ for t in 1 2 3; do
 	esac
 	/redwood/bin/rwtouch button home wait 2 notify com.hakios.unlock wait 3 notify com.hakios.open.prefs wait 12
 	/redwood/bin/battery_test open prefs:root=INTERNET_TETHERING
-	/redwood/bin/rwtouch wait 6 tap 0.86 0.183 wait 5
+	/redwood/bin/rwtouch wait 6 tap 0.86 0.183
+	# (the radio takes a few seconds to come up or go down, the stations' keys first: a check too soon tapped it back)
+	for w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+		case "$(/redwood/bin/hotspot status)" in
+		"hotspot: $want"*) echo "hotui: $want (try $t, after ${w} s)"; exit 0 ;;
+		esac
+		/var/jb/usr/bin/sleep 1
+	done
 done
 case "$(/redwood/bin/hotspot status)" in
 "hotspot: $want"*) echo "hotui: $want (after 3 tries)"; exit 0 ;;

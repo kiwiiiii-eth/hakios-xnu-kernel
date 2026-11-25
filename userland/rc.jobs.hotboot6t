@@ -1,0 +1,7 @@
+# Is the hotspot off at the start, whatever Settings left in CONF (25 November)? Its state and CONF's "on=" line only.
+/redwood/bin/quietboot &
+/redwood/bin/rtcclock &
+/var/jb/usr/bin/sleep 70
+/redwood/bin/hotspot status
+/var/jb/usr/bin/grep ^on= /private/var/mobile/Library/Preferences/com.hakios.hotspot.conf
+/var/jb/usr/bin/sleep 36000

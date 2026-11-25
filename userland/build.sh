@@ -571,6 +571,10 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	fi
 	cp ${RC:-rc.launchd} root/etc/rc
 	cp ${RC_JOBS:-rc.jobs} root/etc/rc.jobs
+	# (a script beside it, RC_JOBS.sh, goes with it as /redwood/etc/rc.jobs.sh: a job line is split at spaces, with no
+	# quotes, so loops and tests go there and a line runs it with /var/jb/bin/sh)
+	rm -f root/etc/rc.jobs.sh
+	[ ! -f "${RC_JOBS:-rc.jobs}.sh" ] || cp "${RC_JOBS:-rc.jobs}.sh" root/etc/rc.jobs.sh
 	# QUIET=1: launchd's own standard error goes nowhere (src/init.c). It says a few thousand
 	# lines about its own business in the first minutes and pushes everything else out of the
 	# kernel's log; the daemons keep their own standard error on the console all the same.

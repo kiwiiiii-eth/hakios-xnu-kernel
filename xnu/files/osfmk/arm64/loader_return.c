@@ -44,6 +44,7 @@ extern void gic_v3_irq_cpu_shutdown(void);
 
 void loader_log_putc(char c);
 void loader_return(void);
+void loader_log_early_panic(void);       /* osfmk/kern/debug.c */
 extern void hakios_adreno_quiesce(void);
 extern void hakios_adreno_stop(void);
 extern void hakios_adreno_minute(void);
@@ -394,6 +395,30 @@ loader_return(void)
 #endif
 	if (!loader_return_entered) {
 		loader_log_panic_text();
+		if (!loader_panic_text_said) {
+			loader_log_early_panic();
+		}
+		/*
+		 * Who is leaving: the return addresses up the stack (for `nm -n` of the unstripped kernel), said always. A way out
+		 * that is not a panic (a halt, a guard) has no text of its own, and an early one no console to have said it on.
+		 */
+		{
+			char line[40];
+			const uintptr_t *fp = __builtin_frame_address(0);
+
+			loader_log_puts("\nloader_return() called from:");
+			for (int depth = 0; depth < 12 && fp != NULL && ((uintptr_t)fp & 7) == 0 && (uintptr_t)fp > VM_MIN_KERNEL_ADDRESS; depth++) {
+				uintptr_t lr = fp[1];
+
+				snprintf(line, sizeof(line), " 0x%llx", (unsigned long long)lr);
+				loader_log_puts(line);
+				if ((const uintptr_t *)fp[0] <= fp) {
+					break;
+				}
+				fp = (const uintptr_t *)fp[0];
+			}
+			loader_log_puts("\n");
+		}
 	}
 	hakios_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
 	hakios_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */

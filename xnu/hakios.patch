@@ -2672,14 +2672,50 @@ index 648cb7043758..195151b70cac 100644
  				 * io_map doesn't support.  However this buffer is set up
  				 * by the bootloader and doesn't require D$ cleaning, so
 diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
-index 48f9405cc9ba..fefd6ae97d58 100644
+index 48f9405cc9ba..5038622601da 100644
 --- a/osfmk/kern/debug.c
 +++ b/osfmk/kern/debug.c
-@@ -1366,10 +1366,13 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+@@ -1366,10 +1366,49 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
  	__builtin_unreachable();
  }
  
 +extern void loader_return(void);
++extern void loader_log_putc(char c);
++
++/*
++ * HakiOS: a panic's text into the loader's log when there is no panic buffer to read it from (a panic early in the start,
++ * before the buffer is there): what the loader shows would otherwise end without a word of why.
++ */
++void loader_log_early_panic(void);
++
++void
++loader_log_early_panic(void)
++{
++	const char *str = debugger_panic_str != NULL ? debugger_panic_str : CPUPANICSTR;
++	va_list *args = debugger_panic_str != NULL ? debugger_panic_args : CPUPANICARGS;
++
++	if (str == NULL) {
++		return;
++	}
++	for (const char *c = "\n--- panic (no panic buffer yet): "; *c; c++) {
++		loader_log_putc(*c);
++	}
++	if (args != NULL) {
++		va_list copy;
++
++		va_copy(copy, *args);
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wformat-nonliteral"
++		_doprnt(str, &copy, loader_log_putc, 0);
++#pragma clang diagnostic pop
++		va_end(copy);
++	} else {
++		for (const char *c = str; *c; c++) {
++			loader_log_putc(*c);
++		}
++	}
++	loader_log_putc('\n');
++}
 +
  /* We rely on this symbol being visible in the debugger for triage automation */
  void __attribute__((noinline, optnone))
@@ -2689,7 +2725,7 @@ index 48f9405cc9ba..fefd6ae97d58 100644
  	for (;;) {
  #if defined(__arm__) || defined(__arm64__)
  		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
-@@ -1390,6 +1393,7 @@ panic_stackshot_release_lock(void)
+@@ -1390,6 +1429,7 @@ panic_stackshot_release_lock(void)
  static void
  kdp_machine_reboot_type(unsigned int type, uint64_t debugger_flags)
  {

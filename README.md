@@ -1,5 +1,12 @@
 # HakiOS
 
+> [!NOTE]
+> **This is the OnePlus 6T (fajita) branch** of [HakiOS](https://github.com/oosexgang/hakios-xnu-kernel): upstream's kernel
+> with the 6T's drivers (Adreno 630, SDM845 modem and cellular data, WCN3990 Wi‑Fi and hotspot, audio, cameras, Bluetooth).
+> To install or try it, and for its status and releases, see **[hakios-fajita](https://github.com/kiwiiiii-eth/hakios-fajita)**.
+> 這是 OnePlus 6T 的分支：安裝、功能狀態與版本請看 [hakios-fajita](https://github.com/kiwiiiii-eth/hakios-fajita/blob/main/README.zh-TW.md)。
+> The rest of this page is upstream's.
+
 English · [中文](README.zh.md) · [Українська](README.uk.md)
 
 **Apple's open-source Darwin kernel (XNU, xnu-8796.121.2) on Android phones**, the way Android is Linux on phones: a boot loader of its

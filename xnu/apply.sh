@@ -1,17 +1,17 @@
 #!/bin/bash
-# Get Apple's XNU sources (the release that Darwin userland 16.5 was built from) and put the HakiOS
+# Get Apple's XNU sources (the release that Darwin userland 26.5 was built from) and put the HakiOS
 # work on top of them: hakios.patch changes Apple's files, files/ holds the new ones.
-# usage: xnu/apply.sh [DIR]              (default: $XNU_SRC, else xnu-src/xnu-8796.121.2 next to this directory)
+# usage: xnu/apply.sh [DIR]              (default: $XNU_SRC, else xnu-src/xnu-12377.121.6 next to this directory)
 # env:   XNU_URL   where to fetch from (default: Apple's repository on GitHub; an existing clone
 #                  that has the tag will do: XNU_URL=file:///path/to/xnu)
 # The result is a git tree on the branch "hakios" with the work uncommitted, which is how
 # xnu/export.sh expects to find it. A directory that already exists is left alone.
 set -e
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-DIR=${1:-${XNU_SRC:-$HERE/../xnu-src/xnu-8796.121.2}}
+DIR=${1:-${XNU_SRC:-$HERE/../xnu-src/xnu-12377.121.6}}
 URL=${XNU_URL:-https://github.com/apple-oss-distributions/xnu.git}
-TAG=xnu-8796.121.2
-BASE=c54f35ca767986246321eb901baf8f5ff7923f6a
+TAG=xnu-12377.121.6
+BASE=ac9718fb1af618d5ce8678d0dc6e8a58f252216f
 
 [ -e "$DIR" ] && { echo "apply.sh: $DIR already exists; not touching it" >&2; exit 1; }
 [ -s "$HERE/hakios.patch" ] && [ -d "$HERE/files" ] || { echo "apply.sh: no hakios.patch and files/ in $HERE" >&2; exit 1; }

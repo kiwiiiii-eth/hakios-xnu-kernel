@@ -37,6 +37,7 @@
 #include <mach/vm_param.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <security/mac_framework.h>
 #include <security/mac_policy.h>
 

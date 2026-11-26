@@ -14,6 +14,16 @@ ml_enable_monitor(void)
 }
 
 /*
+ * Whether the device is fused for production: on Apple's SoCs from its closed support library (KernelSupport/lib<SoC>.os.a),
+ * which is not linked here. bsd/kern/kern_mib.c asks, for hw.osenvironment's "engineering sample" bit: a phone is not one.
+ */
+boolean_t
+ml_device_is_prod_fused(void)
+{
+	return TRUE;
+}
+
+/*
  * On Apple cores the "_nohid" variant skips toggling a HID chicken bit;
  * elsewhere it is simply a forced clean to the point of coherency.
  */

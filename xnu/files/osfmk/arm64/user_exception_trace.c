@@ -22,7 +22,9 @@
 #include <stdarg.h>
 #include <pexpert/pexpert.h>
 #include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_shared_region.h>
+#include <vm/vm_shared_region_xnu.h>
 
 extern char *proc_name_address(struct proc *p);
 
@@ -236,7 +238,8 @@ ustacks_task(task_t task, struct proc *proc)
 	char line[512];
 	int at;
 	vm_shared_region_t region;
-	vm_map_t map, old_map;
+	vm_map_t map;
+	vm_map_switch_context_t switched;
 	thread_t thread;
 	uint32_t slide = 0;
 	unsigned count = 0;
@@ -288,7 +291,7 @@ ustacks_task(task_t task, struct proc *proc)
 	    proc_name_address(proc), proc_pid(proc), count, slide, (unsigned long)secs, (unsigned)usecs / 1000, nanos / 1000);
 	ustacks_say(line);
 
-	old_map = vm_map_switch(map);
+	switched = vm_map_switch_to(map);
 	for (unsigned i = 0; i < count; i++) {
 		uint64_t frame[2], fp = snap[i].fp;
 
@@ -311,7 +314,7 @@ ustacks_task(task_t task, struct proc *proc)
 		snprintf(line + at, sizeof(line) - at, "\n");
 		ustacks_say(line);
 	}
-	vm_map_switch(old_map);
+	vm_map_switch_back(switched);
 	vm_map_deallocate(map);
 }
 

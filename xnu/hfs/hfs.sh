@@ -1,6 +1,6 @@
 #!/bin/bash
 # HFS Plus for the kernel (the data volume, bsd/hfs): Apple's sources are not kept here, as XNU's are not. They are
-# fetched from Apple's own release, hfs-627.100.6, and what this port changes in them is xnu/hfs/hfs.patch; the
+# fetched from Apple's own release, hfs-715.120.4, and what this port changes in them is xnu/hfs/hfs.patch; the
 # files of its own (bsd/hfs/hfs_builtin.c) are in xnu/files like every other new file.
 #
 #   xnu/hfs/hfs.sh put TREE      Apple's files that core.list and encodings.list name into TREE's bsd/hfs and
@@ -8,11 +8,11 @@
 #   xnu/hfs/hfs.sh export TREE   hfs.patch again from TREE (xnu/export.sh does this)
 #
 # env: HFS_URL  where to fetch from (default Apple's repository on GitHub; a clone that has the tag will do)
-#      HFS_SRC  where the release is kept once fetched (default xnu-src/hfs-627.100.6 beside the kernel tree)
+#      HFS_SRC  where the release is kept once fetched (default xnu-src/hfs-715.120.4 beside the kernel tree)
 set -e
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-TAG=hfs-627.100.6
-BASE=31d5ec238dfab485e78a9a30b8b92d13e8914f03
+TAG=hfs-715.120.4
+BASE=124b970fd5390f1c2cd6f985478616a04f6eeb1f
 URL=${HFS_URL:-https://github.com/apple-oss-distributions/hfs.git}
 SRC=${HFS_SRC:-$HERE/../../xnu-src/$TAG}
 CMD=$1 TREE=$2

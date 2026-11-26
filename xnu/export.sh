@@ -2,13 +2,13 @@
 # Save the kernel work as it is in the working tree, in the two forms apply.sh puts back:
 #   hakios.patch   the changes to Apple's files (against the tag the work sits on)
 #   files/          the files that are not in Apple's tree, at their paths
-# usage: xnu/export.sh [KERNEL-TREE]     (default: $XNU_SRC, else xnu-src/xnu-8796.121.2)
+# usage: xnu/export.sh [KERNEL-TREE]     (default: $XNU_SRC, else xnu-src/xnu-12377.121.6)
 # Run it before committing whenever the kernel tree has changed. Committed or not makes no
 # difference there: everything is compared with the base commit.
 set -e
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-SRC=${1:-${XNU_SRC:-$HERE/../xnu-src/xnu-8796.121.2}}
-BASE=c54f35ca767986246321eb901baf8f5ff7923f6a           # tag xnu-8796.121.2
+SRC=${1:-${XNU_SRC:-$HERE/../xnu-src/xnu-12377.121.6}}
+BASE=ac9718fb1af618d5ce8678d0dc6e8a58f252216f           # tag xnu-12377.121.6
 # never part of the work: build output and what editors, patch and python leave behind
 # nor what tools/hakios-config.py kernel writes for one configuration (the drivers' choice, the built-in boot-arguments)
 JUNK='^BUILD/|^config/MASTER\.hakios$|^bsd/dev/hakios\.drivers\.h$|^pexpert/gen/hakios\.builtin_args\.h$|(^|/)__pycache__/|\.(orig|rej|pyc|o|swp)$|\.bak[0-9]*$|~$|(^|/)\.DS_Store$'

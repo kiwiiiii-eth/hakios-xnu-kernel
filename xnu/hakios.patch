@@ -2369,6 +2369,31 @@ index f4d148bd1b44..a714b0343ffc 100644
  #elif defined (VMAPPLE)
  
  /* I-Cache. */
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 0554aa8021cb..c3b0ff8b0675 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1184,6 +1184,8 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
+ static void
+ handle_uncategorized(arm_saved_state_t *state)
+ {
++	extern int hakios_emulate_user_insn(arm_saved_state_t *state, uint32_t instr);
++
+ 	exception_type_t           exception = EXC_BAD_INSTRUCTION;
+ 	mach_exception_data_type_t codes[2]  = {EXC_ARM_UNDEFINED};
+ 	mach_msg_type_number_t     numcodes  = 2;
+@@ -1254,6 +1256,11 @@ handle_uncategorized(arm_saved_state_t *state)
+ 		}
+ 	}
+ 
++	/* hakios: an instruction of ARMv8.3 on a processor without them (osfmk/arm64/hakios_emulate.c) */
++	if (hakios_emulate_user_insn(state, instr)) {
++		return;
++	}
++
+ 	/*
+ 	 * Check for GDB breakpoint via illegal opcode.
+ 	 */
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
 index 6aa6fe46ae6c..bdc65572abab 100644
 --- a/osfmk/arm64/start.s
@@ -2719,7 +2744,7 @@ index 75bbfc1c1a4d..48d247ad978d 100644
 +osfmk/minicrypto/mc_provider.c	standard
 +osfmk/minicrypto/mc_aes.c	standard
 diff --git a/osfmk/conf/files.arm64 b/osfmk/conf/files.arm64
-index 878b5154e704..20da6c5a571e 100644
+index 878b5154e704..44066aa960c3 100644
 --- a/osfmk/conf/files.arm64
 +++ b/osfmk/conf/files.arm64
 @@ -35,10 +35,10 @@ osfmk/arm64/WKdmCompress_4k.s	standard
@@ -2737,13 +2762,14 @@ index 878b5154e704..20da6c5a571e 100644
  osfmk/arm64/bcopy.s standard
  osfmk/arm64/bzero.s standard
  osfmk/arm/caches.c		standard
-@@ -129,3 +129,8 @@ osfmk/kern/ecc_init.c		standard
+@@ -129,3 +129,9 @@ osfmk/kern/ecc_init.c		standard
  osfmk/kern/ecc_logging.c	optional config_ecc_logging
  
  osfmk/kern/memory_error_logging.c	standard
 +osfmk/arm64/generic_arm64_support.c	optional nos_arm_asm
 +osfmk/arm64/loader_return.c	optional nos_arm_asm
 +osfmk/arm64/user_exception_trace.c	standard
++osfmk/arm64/hakios_emulate.c	standard
 +osfmk/arm64/gic_v3_irq.c	optional nos_arm_asm
 +osfmk/arm64/psci_smp.c	optional nos_arm_asm
 diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
@@ -2996,6 +3022,70 @@ index 21adaca0b4be..835daf52cdd9 100644
  extern kern_return_t
  kern_work_interval_set_workload_id(mach_port_name_t port_name,
      struct kern_work_interval_workload_id_args *workload_id_args);
+diff --git a/osfmk/vm/vm_dyld_pager.c b/osfmk/vm/vm_dyld_pager.c
+index d3cd6e8fe9bc..5de7516012f7 100644
+--- a/osfmk/vm/vm_dyld_pager.c
++++ b/osfmk/vm/vm_dyld_pager.c
+@@ -557,7 +557,26 @@ fixupPage32(
+ 	return KERN_SUCCESS;
+ }
+ 
+-#if defined(HAS_APPLE_PAC)
++#if !defined(HAS_APPLE_PAC)
++/*
++ * hakios: an arm64e image on a processor without pointer authentication. Its code is lowered (tools/lower: the
++ * instructions that sign and check are gone), so its authenticated pointers are stored as they are, unsigned.
++ */
++#include <ptrauth.h>
++static kern_return_t
++signPointer(
++	uint64_t         unsignedAddr,
++	__unused void    *loc,
++	__unused bool    addrDiv,
++	__unused uint16_t diversity,
++	__unused ptrauth_key key,
++	__unused dyld_pager_t pager,
++	uint64_t         *signedAddr)
++{
++	*signedAddr = unsignedAddr;
++	return KERN_SUCCESS;
++}
++#else /* !defined(HAS_APPLE_PAC) */
+ /*
+  * Sign a pointer needed for fixups.
+  */
+@@ -602,6 +621,7 @@ signPointer(
+ 	}
+ 	return KERN_SUCCESS;
+ }
++#endif /* !defined(HAS_APPLE_PAC) */
+ 
+ /*
+  * Apply fixups to a page used by a 64 bit process using pointer authentication.
+@@ -813,7 +833,6 @@ fixupCachePageAuth64(
+ 	} while (valid_chain);
+ 	return KERN_SUCCESS;
+ }
+-#endif /* defined(HAS_APPLE_PAC) */
+ 
+ 
+ /*
+@@ -922,7 +941,6 @@ fixup_page(
+ 	 * Route to the appropriate fixup routine
+ 	 */
+ 	switch (hdr->mwli_pointer_format) {
+-#if defined(HAS_APPLE_PAC)
+ 	case DYLD_CHAINED_PTR_ARM64E:
+ 		fixupPageAuth64(userVA, contents, pager, segInfo, pageIndex, false);
+ 		break;
+@@ -933,7 +951,6 @@ fixup_page(
+ 	case DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE:
+ 		fixupCachePageAuth64(userVA, contents, pager, segInfo, pageIndex);
+ 		break;
+-#endif /* defined(HAS_APPLE_PAC) */
+ 	case DYLD_CHAINED_PTR_64:
+ 		fixupPage64(userVA, contents, link_info, segInfo, pageIndex, false);
+ 		break;
 diff --git a/osfmk/vm/vm_kern.h b/osfmk/vm/vm_kern.h
 index ddfae66cd7f2..076d940a8aa9 100644
 --- a/osfmk/vm/vm_kern.h

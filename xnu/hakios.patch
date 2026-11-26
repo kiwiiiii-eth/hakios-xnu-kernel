@@ -2059,7 +2059,7 @@ index 8800687f8787..cfc311df1625 100644
  #else
  #define __USES_V_CRYPTO_INTRINSICS 0
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
-index 53f9ce51946f..6a1e1641eca3 100644
+index 53f9ce51946f..3debb6e87975 100644
 --- a/osfmk/arm64/cpu.c
 +++ b/osfmk/arm64/cpu.c
 @@ -586,7 +586,12 @@ cpu_idle(void)
@@ -2076,6 +2076,29 @@ index 53f9ce51946f..6a1e1641eca3 100644
  		platform_cache_idle_enter();
  #endif
  
+@@ -729,6 +734,22 @@ cpu_init(void)
+ 		switch (cpu_info_p->arm_info.arm_arch) {
+ 		case CPU_ARCH_ARMv8:
+ 			cdp->cpu_subtype = CPU_SUBTYPE_ARM64_V8;
++#if defined(BCM2837)
++			{
++				/*
++				 * HakiOS: Darwin userland 17 and later is arm64e only, and its programs are run here with their
++				 * PAuth instructions lowered (tools/lower). The processor is called arm64e so that exec takes
++				 * those files (ml_grade_binary()) and dyld looks for the arm64e shared cache. Boot-arg arm64e=0:
++				 * what the processor really is, for a userland that is plain arm64.
++				 */
++				uint32_t arm64e = 1;
++
++				PE_parse_boot_argn("arm64e", &arm64e, sizeof(arm64e));
++				if (arm64e) {
++					cdp->cpu_subtype = CPU_SUBTYPE_ARM64E;
++				}
++			}
++#endif /* BCM2837 */
+ 			break;
+ 		case CPU_ARCH_ARMv8E:
+ 			cdp->cpu_subtype = CPU_SUBTYPE_ARM64E;
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
 index 07143d539042..1a98b25ba068 100644
 --- a/osfmk/arm64/machine_routines.c
@@ -2920,6 +2943,38 @@ index ddfae66cd7f2..076d940a8aa9 100644
 +#endif /* XNU_KERNEL_PRIVATE */
 +
  #endif  /* _VM_VM_KERN_H_ */
+diff --git a/osfmk/vm/vm_shared_region.c b/osfmk/vm/vm_shared_region.c
+index 0b688296aed7..0b06f03c2984 100644
+--- a/osfmk/vm/vm_shared_region.c
++++ b/osfmk/vm/vm_shared_region.c
+@@ -3345,6 +3345,13 @@ vm_shared_region_slide_page_v3(
+ 			} else {
+ 				memcpy(rebaseLocation, &value, sizeof(value));
+ 			}
++#else /* __has_feature(ptrauth_calls) */
++			/*
++			 * HakiOS: an arm64e shared cache under a kernel without pointer authentication (the processor has
++			 * none; the programs' PAuth instructions are lowered, tools/lower). The pointer is stored as it is,
++			 * slid and unsigned; Apple's code stored nothing here, and left the cache's own encoding in the page.
++			 */
++			memcpy(rebaseLocation, &value, sizeof(value));
+ #endif /* __has_feature(ptrauth_calls) */
+ 		} else {
+ 			// The new value for a rebase is the low 51-bits of the threaded value plus the slide.
+@@ -3564,6 +3571,13 @@ vm_shared_region_slide_page_v5(
+ 			} else {
+ 				memcpy(rebaseLocation, &value, sizeof(value));
+ 			}
++#else /* __has_feature(ptrauth_calls) */
++			/*
++			 * HakiOS: an arm64e shared cache under a kernel without pointer authentication (the processor has
++			 * none; the programs' PAuth instructions are lowered, tools/lower). The pointer is stored as it is,
++			 * slid and unsigned; Apple's code stored nothing here, and left the cache's own encoding in the page.
++			 */
++			memcpy(rebaseLocation, &value, sizeof(value));
+ #endif /* __has_feature(ptrauth_calls) */
+ 		} else {
+ 			// the value already has the correct low bits, so just add in the high8 if it exists
 diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
 index 3ad743fc3efb..ce036c5a2c26 100644
 --- a/pexpert/arm/pe_fiq.c

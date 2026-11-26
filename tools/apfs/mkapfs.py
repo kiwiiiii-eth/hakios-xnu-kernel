@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Build an APFS container from directories: the port's own read-only volumes, as images.
 
-usage: mkapfs.py -o IMAGE [-z [--plain DIR]...] [--time SECONDS] [--slack BLOCKS] NAME=DIR[,manifest=FILE] [NAME=DIR ...]
+usage: mkapfs.py -o IMAGE [-z [--plain DIR]...] [--time SECONDS] [--slack BLOCKS] NAME=DIR[,over=DIR...][,manifest=FILE] [NAME=DIR ...]
 
-Each NAME=DIR becomes one volume of the container (volume 0 first), case-sensitive and
+Each NAME=DIR becomes one volume of the container (volume 0 first; with ,over=DIR2 the files of DIR2 laid over
+those of DIR: a big tree that is only read, and beside it the few files that are changed), case-sensitive and
 normalization-insensitive like the Darwin volumes, unencrypted, read-only content laid out once.
 Permission bits and symbolic links are taken from DIR; everything is owned by root:wheel
 unless a manifest says otherwise (lines of: mode in octal with the type bits, uid, gid, path,
@@ -136,6 +137,16 @@ def read_tree(path, name=''):
     if stat.S_ISLNK(st.st_mode):
         return Node(name, st.st_mode, target=os.fsencode(os.readlink(path)))
     return None                         # device nodes, FIFOs, sockets: /dev is devfs
+
+
+def merge_tree(base, over):
+    """The tree `over` laid on `base`: directories of both are one, anything else of `over` takes the place."""
+    for name, child in over.children.items():
+        below = base.children.get(name)
+        if below is not None and stat.S_ISDIR(below.mode) and stat.S_ISDIR(child.mode):
+            merge_tree(below, child)
+        else:
+            base.children[name] = child
 
 
 def apply_manifest(root, manifest):
@@ -907,7 +918,7 @@ def main():
     ap.add_argument('--plain', action='append', default=[], help='with -z: never compress what is under this directory')
     ap.add_argument('--time', type=int, default=1683900000, help='every timestamp, in seconds')
     ap.add_argument('--slack', type=int, default=256, help='free blocks to leave (at least)')
-    ap.add_argument('volumes', nargs='+', help='NAME=DIR[,manifest=FILE]')
+    ap.add_argument('volumes', nargs='+', help='NAME=DIR[,over=DIR...][,manifest=FILE]')
     args = ap.parse_args()
     vols = []
     spool = open(args.output + '.spool', 'w+b') if args.compress else None
@@ -917,7 +928,9 @@ def main():
         root = read_tree(parts[0])
         for opt in parts[1:]:
             k, _, val = opt.partition('=')
-            if k == 'manifest':
+            if k == 'over':
+                merge_tree(root, read_tree(val))
+            elif k == 'manifest':
                 apply_manifest(root, val)
         vols.append(Volume(i, name, root, args.compress, args.time * 1000000000, spool, args.plain))
     c = Container(vols, args.slack, os.path.basename(args.output))

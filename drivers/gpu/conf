@@ -16,6 +16,7 @@ driver ADRENO
 driver A630
 	file    bsd/dev/hakios.a630.c
 	requires GPUSERVICE
+	default n
 	help    the OnePlus 6T's Adreno 630 (SDM845): the port of the ADRENO driver's steps (adreno=N), so far the first ones;
 	help    the same boot-args and entry points, so not built together with ADRENO
 

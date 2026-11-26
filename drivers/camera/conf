@@ -20,5 +20,6 @@ driver TORCH
 
 driver TORCH8998
 	file    bsd/dev/hakios.torch8998.c
+	default n
 	help    the OnePlus 6T's flashlight: the flash LED module of the PMI8998 (three channels, torch=1); TORCH's copy with
 	help    the same boot-args and entry points, so not built together with TORCH

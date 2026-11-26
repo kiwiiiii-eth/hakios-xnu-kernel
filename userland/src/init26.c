@@ -8,6 +8,14 @@
  * memory filesystem for /private/var with the directories a system looks for there, and becomes the
  * volume's own /sbin/launchd -- Apple's, its code lowered (tools/lower).
  *
+ * launchd would start all 600 jobs of the system. What it is given instead is this image's choice of them
+ * (tools/ios26/boot-image.sh, userland/mkjobs.py: a few named ones, the rest only when something asks for their
+ * services), put over the volume's own directories without writing to it, as userland/src/init.c does for the
+ * Darwin volume on the phone's flash: /LaunchDaemons here over /System/Library/LaunchDaemons, an empty directory
+ * over the other lists, and /xpc -- the volume's without its launchd.plist, the list of every job that launchd
+ * would read instead of the directory -- over /System/Library/xpc.  A boot image without /LaunchDaemons: none of
+ * that, and launchd starts everything.
+ *
  *   init26_dev=NAME        the device of the volume, default rvblk0
  *   init26_exec=PATH       what to become, default /sbin/launchd
  */
@@ -46,6 +54,20 @@ boot_arg(const char *name)
 	return NULL;
 }
 
+/* A directory of this image shown in place of one of the volume's (bindfs); one the volume has not got: nothing. */
+static void
+bind_dir(const char *from, const char *to)
+{
+	struct stat st;
+
+	if (stat(to, &st) != 0) {
+		return;
+	}
+	if (mount("bindfs", to, MNT_RDONLY_, (void *)from) != 0) {
+		printf("init26: bindfs %s on %s: %s\n", from, to, strerror(errno));
+	}
+}
+
 static void
 fail(const char *what)
 {
@@ -76,6 +98,7 @@ main(int argc, char **argv, char **envp)
 	const char *dev = boot_arg("init26_dev"), *prog = boot_arg("init26_exec");
 	static char devpath[160], progpath[160], path[256];
 	char *new_argv[] = { progpath, NULL };
+	struct stat jobs;
 	int fd = open("/dev/console", 2 /* O_RDWR */, 0);
 
 	(void)argc, (void)argv;
@@ -92,6 +115,15 @@ main(int argc, char **argv, char **envp)
 
 	if (mount("apfs", "/flash", MNT_RDONLY_, (void *)devpath) != 0) {
 		fail("mount the system volume on /flash");
+	}
+	if (stat("/LaunchDaemons", &jobs) == 0) {
+		bind_dir("/LaunchDaemons", "/flash/System/Library/LaunchDaemons");
+		bind_dir("/empty", "/flash/System/Library/NanoLaunchDaemons");
+		bind_dir("/empty", "/flash/System/Library/NanoLaunchDaemonsAltAccount");
+		bind_dir("/empty", "/flash/System/Library/DeveloperModeLaunchDaemons");
+		bind_dir("/empty", "/flash/System/Library/LaunchAngels");
+		bind_dir("/xpc", "/flash/System/Library/xpc");
+		printf("init26: this image's launchd jobs, not the volume's\n");
 	}
 	if (sysctlbyname("kern.hakios_switch_root", NULL, NULL, "/flash private/preboot/boot", 28) != 0) {
 		fail("make it the root");

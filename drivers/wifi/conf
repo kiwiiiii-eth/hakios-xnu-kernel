@@ -21,6 +21,7 @@ driver WIFI
 driver WIFI10
 	file    bsd/dev/hakios.wifi10.c
 	requires MPSS845 QMI WIFILX
+	default n
 	help    The OnePlus 6T's Wi-Fi (wifi=1, with modem_step=10 modem_keep=1): the WCN3990 of the SDM845, whose firmware the
 	help    modem runs (drivers/modem/hakios.mpss845.c), Linux's ath10k (its object, made by tools/mk-ath10k.sh, is linked
 	help    in only with this), a station, and the Apple80211 surface. Not with WIFI (the two give the same names)

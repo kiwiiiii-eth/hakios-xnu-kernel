@@ -552,7 +552,7 @@ index fac307fcbc80..5646b85645cd 100644
  		vnode_put(vp);
  		break;
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index 2467b24045cd..57f412106fb5 100644
+index 2467b24045cd..b12f98765a94 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
 @@ -1919,6 +1919,9 @@ SYSCTL_PROC(_vm, OID_AUTO, shared_region_control,
@@ -846,7 +846,48 @@ index 2467b24045cd..57f412106fb5 100644
  	/* Save space for envv[] NULL terminator */
  	if (imgp->ip_argspace < new_ptr_size) {
  		error = E2BIG;
-@@ -7788,12 +7970,29 @@ handle_mac_transition:
+@@ -7213,6 +7395,40 @@ exec_add_apple_strings(struct image_params *imgp,
+ 			goto bad;
+ 		}
+ 		imgp->ip_applec++;
++	} else {
++		/*
++		 * HakiOS: a program without a code signature has no cdhash, and went without "executable_boothash=". Darwin
++		 * userland 26's libmalloc stops in its first lines over that ("couldn't find executable_boothash"), and here
++		 * nothing of ours is signed, nor anything of the system's once its PAuth instructions are lowered and its
++		 * signature no longer fits. It is a per-boot value to seed the allocator's layout with: the same is made of
++		 * the file's place instead of its hash.
++		 */
++		uint64_t place[2] = { 0, 0 };
++		uint8_t sha_digest[SHA256_DIGEST_LENGTH];
++		SHA256_CTX sha_ctx;
++		char app_boot_string[strlen(APP_BOOT_SESSION_KEY) + 2 * SHA1_RESULTLEN + 1];
++		char *s;
++
++		if (imgp->ip_vattr) {
++			place[0] = vnode_get_va_fsid(imgp->ip_vattr);
++			place[1] = imgp->ip_vattr->va_fileid;
++		}
++		SHA256_Init(&sha_ctx);
++		SHA256_Update(&sha_ctx, &exe_boothash_salt, sizeof(exe_boothash_salt));
++		SHA256_Update(&sha_ctx, bootsessionuuid_string, sizeof(bootsessionuuid_string));
++		SHA256_Update(&sha_ctx, place, sizeof(place));
++		SHA256_Final(sha_digest, &sha_ctx);
++		strncpy(app_boot_string, APP_BOOT_SESSION_KEY, sizeof(app_boot_string));
++		s = app_boot_string + sizeof(APP_BOOT_SESSION_KEY) - 1;
++		for (int i = 0; i < SHA1_RESULTLEN; i++) {
++			snprintf(s, 3, "%02x", (int) sha_digest[i]);
++			s += 2;
++		}
++		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(app_boot_string), UIO_SYSSPACE, FALSE);
++		if (error) {
++			goto bad;
++		}
++		imgp->ip_applec++;
+ 	}
+ #if (DEVELOPMENT || DEBUG)
+ 	if (dyld_flags) {
+@@ -7788,12 +8004,29 @@ handle_mac_transition:
  	/* Update the process' identity version and set the security token.
  	 * Also, ensure we always see a modified identity version (rdar://129775819).
  	 */
@@ -882,7 +923,7 @@ index 2467b24045cd..57f412106fb5 100644
  	task_set_uniqueid(proc_task(p));
  
  	/*
-@@ -8767,6 +8966,11 @@ process_signature(proc_t p, struct image_params *imgp)
+@@ -8767,6 +9000,11 @@ process_signature(proc_t p, struct image_params *imgp)
  	}
  
  done:
@@ -972,6 +1013,35 @@ index c25ed3fb9810..5a6c370967a5 100644
  	struct uthread *uth;
  
  	target_act = (thread_t)port_name_to_thread(uap->thread_port,
+diff --git a/bsd/kern/mach_loader.c b/bsd/kern/mach_loader.c
+index 2c16ff7a476d..f2ba23fb493a 100644
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -171,6 +171,14 @@ static bingrade_t bingrade_overrides[MAX_BINGRADE_OVERRIDES] = { 0 };
+ 
+ 
+ /* An empty load_result_t */
++/*
++ * HakiOS, a test's aid. Boot-arg exec_driverkit_plain=1: a program built for the DriverKit platform is started like a
++ * driver (it has no LC_MAIN; dyld calls what the program registers with it) whoever starts it, process 1 included. The
++ * DriverKit runtime is the whole of dyld, libSystem and a shared cache in 22 MB, where the system's own is 4.6 GB: what
++ * tools/lower/dk-test.sh boots under QEMU to see lowered arm64e code through dyld and the cache (userland/src/dk_hello.c).
++ */
++static TUNABLE(uint32_t, exec_driverkit_plain, "exec_driverkit_plain", 0);
++
+ static const load_result_t load_result_null = {
+ 	.mach_header = MACH_VM_MIN_ADDRESS,
+ 	.entry_point = MACH_VM_MIN_ADDRESS,
+@@ -1488,7 +1496,8 @@ parse_machfile(
+ 		 * Check that the entry point is contained in an executable segment
+ 		 */
+ 		if ((pass == 3) && (thread != THREAD_NULL)) {
+-			if (depth == 1 && imgp && (imgp->ip_flags & IMGPF_DRIVER)) {
++			if (depth == 1 && imgp && ((imgp->ip_flags & IMGPF_DRIVER) ||
++			    (exec_driverkit_plain && result->ip_platform == PLATFORM_DRIVERKIT))) {
+ 				/* Driver binaries must have driverkit platform */
+ 				if (result->ip_platform == PLATFORM_DRIVERKIT) {
+ 					/* Driver binaries have no entry point */
 diff --git a/bsd/kern/sys_work_interval.c b/bsd/kern/sys_work_interval.c
 index b544bf307dfe..a06cbc68ffdb 100644
 --- a/bsd/kern/sys_work_interval.c

@@ -3262,7 +3262,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	uint64_t cntfrq = READ_SYSREG(CNTFRQ_EL0);
 	uint64_t ranges[3] = { 0, plat->io_base, plat->io_size };
 	uint64_t reg2[2];
-	uint8_t seed[64];
+	uint8_t seed[256];      /* (xnu-12377 wants four SHA-512 digests' worth and panics on less; xnu-8796 took 64) */
 
 	for (unsigned i = 0; i < sizeof(seed); i++) {
 		seed[i] = (uint8_t)(READ_SYSREG(CNTVCT_EL0) >> (i & 7)) ^ (uint8_t)(i * 37);
@@ -3287,6 +3287,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 
 	dt_begin(&w, "chosen");
 	dt_prop(&w, "random-seed", seed, sizeof(seed));
+	/* (xnu-12377 asks whether the text will be locked, as iBoot says it: there is no CTRR on these processors, so no) */
+	dt_prop_u32(&w, "kernel-ctrr-to-be-enabled", 0);
 	dt_prop_u64(&w, "dram-base", phys_base);
 	dt_prop_u64(&w, "dram-size", win_size);
 	dt_prop_u32(&w, "debug-enabled", 1);

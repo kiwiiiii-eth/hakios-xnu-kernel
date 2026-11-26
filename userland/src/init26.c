@@ -16,6 +16,7 @@
  * would read instead of the directory -- over /System/Library/xpc.  A boot image without /LaunchDaemons: none of
  * that, and launchd starts everything.
  *
+ *   init26_tasks=0         none of launchd's boot tasks run here (boot_task below)
  *   init26_dev=NAME        the device of the volume, default rvblk0
  *   init26_exec=PATH       what to become, default /sbin/launchd
  */
@@ -65,6 +66,33 @@ bind_dir(const char *from, const char *to)
 	}
 	if (mount("bindfs", to, MNT_RDONLY_, (void *)from) != 0) {
 		printf("init26: bindfs %s on %s: %s\n", from, to, strerror(errno));
+	}
+}
+
+/*
+ * A boot task: launchd runs a list of them before any job -- its own, inside it -- and in a boot from a RAM disk
+ * (rd=md0, which this is to launchd) leaves most of them out as a restore's business.  Those the system cannot do
+ * without are run here, before launchd is.
+ */
+static void
+boot_task(char *const argv[], char *const envp[])
+{
+	int status = 0;
+	pid_t pid = fork();
+
+	if (pid == 0) {
+		execve(argv[0], argv, envp);
+		printf("init26: %s: %s\n", argv[0], strerror(errno));
+		_exit(127);
+	}
+	if (pid < 0 || wait4(pid, &status, 0, NULL) != pid) {
+		printf("init26: boot task %s: %s\n", argv[0], strerror(errno));
+		return;
+	}
+	if ((status & 0x7f) != 0) {
+		printf("init26: boot task %s %s: killed by signal %d\n", argv[0], argv[1] ? argv[1] : "", status & 0x7f);
+	} else {
+		printf("init26: boot task %s %s: exit %d\n", argv[0], argv[1] ? argv[1] : "", (status >> 8) & 0xff);
 	}
 }
 
@@ -143,7 +171,15 @@ main(int argc, char **argv, char **envp)
 			chown(path, var_dirs[i].uid, var_dirs[i].uid);
 		}
 	}
-	chmod("/dev/console", 0666);            /* daemons that are not root's write there too */
+	{
+		/* (launchd's own: "usermanagerd" -- the user and its personas, /private/var/keybags; without them the daemon stops) */
+		char *usermanagerd[] = { "/usr/libexec/usermanagerd", "--init", NULL };
+		const char *tasks = boot_arg("init26_tasks");
+
+		if (tasks == NULL || strcmp(tasks, "0") != 0) {
+			boot_task(usermanagerd, envp);
+		}
+	}
 	printf("init26: the root is the system volume; becoming %s\n", progpath);
 	execve(progpath, new_argv, envp);
 	fail(progpath);

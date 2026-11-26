@@ -72,7 +72,7 @@ images:
 	$(IMAGE_OPTS) userland/build.sh
 
 kernel:
-	[ -d xnu-src/xnu-8796.121.2 ] || xnu/apply.sh
+	[ -d xnu-src/xnu-12377.121.6 ] || xnu/apply.sh
 	[ -e xnu-deps/host/bin/ld64 ] || xnu-deps/setup.sh
 	tools/make-kernel.sh -j$(JOBS)
 
@@ -156,4 +156,4 @@ prebuilt:
 	tools/update-prebuilt.sh
 
 clean:
-	rm -rf xnu-src/xnu-8796.121.2/BUILD xnuloader/loader.obj xnuloader/loader.efi userland/root.apfs userland/system.apfs userland/obj
+	rm -rf xnu-src/xnu-12377.121.6/BUILD xnuloader/loader.obj xnuloader/loader.efi userland/root.apfs userland/system.apfs userland/obj

@@ -137,4 +137,9 @@ kern_return_t __iig_stub_42(void) __asm__("__ZN9IOService8DispatchE5IORPC");
 kern_return_t __iig_stub_42(void) { return kIOReturnUnsupported; }
 kern_return_t __iig_stub_43(void) __asm__("__ZN9IOService9MetaClass8DispatchE5IORPC");
 kern_return_t __iig_stub_43(void) { return kIOReturnUnsupported; }
+/* (xnu-12377: IOExtensiblePaniclog, a DriverKit interface the kernel has had since xnu-10002) */
+kern_return_t __iig_stub_44(void) __asm__("__ZN20IOExtensiblePaniclog8DispatchE5IORPC");
+kern_return_t __iig_stub_44(void) { return kIOReturnUnsupported; }
+kern_return_t __iig_stub_45(void) __asm__("__ZN20IOExtensiblePaniclog9MetaClass8DispatchE5IORPC");
+kern_return_t __iig_stub_45(void) { return kIOReturnUnsupported; }
 }

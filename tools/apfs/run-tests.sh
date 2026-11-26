@@ -28,7 +28,7 @@ fail=0
 
 # the header lives in the kernel tree; xnu/files/ has the exported copy
 HDR_DIR=""
-for d in "$ROOT/xnu-src/xnu-8796.121.2/bsd/miscfs/apfs" "$ROOT/xnu/files/bsd/miscfs/apfs"; do
+for d in "$ROOT/xnu-src/xnu-12377.121.6/bsd/miscfs/apfs" "$ROOT/xnu/files/bsd/miscfs/apfs"; do
 	[ -f "$d/apfs_format.h" ] && { HDR_DIR=$d; break; }
 done
 if [ -z "$HDR_DIR" ]; then

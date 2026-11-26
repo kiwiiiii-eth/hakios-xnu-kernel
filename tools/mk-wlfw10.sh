@@ -23,7 +23,7 @@ fi
 for f in "$B/src/qmi_wlfw_v01.h" "$B/src/qmi_wlfw_v01.c" "$B/src/snoc.c"; do
 	head -3 "$f" | grep -q "SPDX-License-Identifier: ISC" || { echo "mk-wlfw10.sh: $f does not carry the licence expected" >&2; exit 1; }
 done
-SRC=$ROOT/xnu-src/xnu-8796.121.2
+SRC=$ROOT/xnu-src/xnu-12377.121.6
 OUT=$SRC/BUILD/obj/DEVELOPMENT_ARM64_${MACHINE:-BCM2837}/bsd/DEVELOPMENT
 [ -d "$OUT" ] || { echo "mk-wlfw10.sh: no build directory $OUT: build the kernel once first" >&2; exit 1; }
 python3 - "$B/src" "$VERSION" > "$OUT/hakios.wlfw_ath10k.h.new" <<'PY'

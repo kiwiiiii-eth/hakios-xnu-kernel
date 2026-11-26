@@ -18,9 +18,11 @@ if [ -f "$LX" ]; then now="$LX $(mtime "$LX")"; else LX= now=; fi
 if [ "$XNU_HOST_OS" = Darwin ]; then HOSTCC=clang; else
 HOSTCC="clang -include $XNUDEPS/hostinc/hostcompat.h -I$XNUDEPS/hostinc -Wno-unused-command-line-argument -Wno-error=implicit-function-declaration"; fi
 if [ -d BUILD/obj ] && [ "$(cat $STAMP 2>/dev/null)" != "$now" ]; then
-	rm -f BUILD/obj/*/mach.*.unstripped
+	# (XNU 12377 links mach.*.unstripped.noctf and makes mach.*.unstripped from it)
+	rm -f BUILD/obj/*/mach.*.unstripped BUILD/obj/*/mach.*.unstripped.noctf
 	echo "$now" > $STAMP
 fi
-exec make HAKIOS_OBJECTS="$LX" SDKROOT=iphoneos ARCH_CONFIGS=ARM64 MACHINE_CONFIGS=${MACHINE:-BCM2837} KERNEL_CONFIGS=DEVELOPMENT \
+[ -d "$XNU_KDK/System/Library/Frameworks/Kernel.framework" ] || { echo "xnu-build.sh: no Kernel Debug Kit headers in $XNU_KDK (xnu-deps/setup.sh --stage1)" >&2; exit 1; }
+exec make HAKIOS_OBJECTS="$LX" KDKROOT="$XNU_KDK" SDKROOT=iphoneos ARCH_CONFIGS=ARM64 MACHINE_CONFIGS=${MACHINE:-BCM2837} KERNEL_CONFIGS=DEVELOPMENT \
   ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 BUILD_WERROR=0 BUILD_LTO=0 DO_CTFMERGE=0 \
   HOST_CC="$HOSTCC" HOST_FLEX=flex HOST_BISON=bison HOST_GM4=m4 CC=xnu-clang CXX=xnu-clang++ LOGCOLORS=n "$@"

@@ -12,7 +12,7 @@ ROOT=$(cd "$HERE/../.." && pwd)
 OUT=${1:-$ROOT/apfs-work/apfs-tool}
 
 SRC=""
-for d in "$ROOT/xnu-src/xnu-8796.121.2/bsd/miscfs/apfs" "$ROOT/xnu/files/bsd/miscfs/apfs"; do
+for d in "$ROOT/xnu-src/xnu-12377.121.6/bsd/miscfs/apfs" "$ROOT/xnu/files/bsd/miscfs/apfs"; do
 	[ -f "$d/apfs_lib.c" ] && { SRC=$d; break; }
 done
 [ -n "$SRC" ] || { echo "build-tool.sh: apfs_lib.c is in neither the kernel tree nor xnu/files" >&2; exit 1; }

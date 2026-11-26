@@ -11,16 +11,16 @@
 #
 # Needs on the machine: git curl tar xz make cc clang flex bison m4 perl python3 autoconf
 # automake, and theos ($THEOS, default ~/theos) with its Linux toolchain
-# (toolchain/linux/iphone: the cctools linker) and sdks/iPhoneOS16.5.sdk.
+# (toolchain/linux/iphone: the cctools linker) and sdks/iPhoneOS26.5.sdk.
 #
 # What ends up where (all under xnu-deps/, none of it committed):
-#   AvailabilityVersions libdispatch libpthread     Apple open source, at the releases of Darwin userland 16.5
+#   AvailabilityVersions libdispatch libpthread     Apple open source, at the releases of Darwin userland 26.5
 #   mm_bootstrap_cmds tcsh unifdef                  sources of mig, csh and unifdef
-#   MacOSX13.3.sdk                                  only Kernel.framework: the DriverKit headers
+#   MacOSX26.1.sdk                                  only Kernel.framework: the DriverKit headers
 #                                                   that Apple's closed "iig" would generate
 #   host/bin                                        mig, migcom, unifdef, tcsh, csh, unzbm, and links
 #                                                   to the cctools (next to our own wrappers)
-#   sdk/iPhoneOS16.5.xnu.sdk                        the theos SDK (as links) plus usr/local: what
+#   sdk/iPhoneOS26.5.xnu.sdk                        the theos SDK (as links) plus usr/local: what
 #                                                   Apple's internal SDK has and the public one lacks
 set -e -o pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -28,8 +28,8 @@ source "$HERE/../xnu-env.sh"
 cd "$XNUDEPS"
 JOBS=${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}
 CCTOOLS=$THEOS/toolchain/linux/iphone/bin
-DARWIN_SDK=$THEOS/sdks/iPhoneOS16.5.sdk
-MACOS_SDK_URL=https://github.com/joseluisq/macosx-sdks/releases/download/13.3/MacOSX13.3.sdk.tar.xz
+DARWIN_SDK=$THEOS/sdks/iPhoneOS26.5.sdk
+MACOS_SDK_URL=https://github.com/joseluisq/macosx-sdks/releases/download/26.1/MacOSX26.1.sdk.tar.xz
 
 log() { echo "setup: $*"; }
 die() { echo "setup: $*" >&2; exit 1; }
@@ -66,13 +66,10 @@ theos_mac() {
 	for tool in ld nm otool strip lipo libtool nmedit ctf_insert codesign_allocate install_name_tool; do
 		link "$(/usr/bin/xcrun -f $tool)" "$THEOS/toolchain/linux/iphone/bin/$tool"
 	done
-	if [ ! -d "$THEOS/sdks-git/iPhoneOS16.5.sdk/usr/include" ]; then
-		log "fetching iPhoneOS16.5.sdk from github.com/theos/sdks (about 220 MB)"
-		rm -rf "$THEOS/sdks-git"
-		git clone -q --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$THEOS/sdks-git" &&
-			git -C "$THEOS/sdks-git" sparse-checkout set iPhoneOS16.5.sdk || die "cannot fetch the SDK"
-	fi
-	link ../sdks-git/iPhoneOS16.5.sdk "$THEOS/sdks/iPhoneOS16.5.sdk"
+	# (github.com/theos/sdks stops at iPhoneOS 16.5: for the Darwin 25 kernel the SDK is Xcode's own, whatever its number)
+	local xcode_sdk
+	xcode_sdk=$(/usr/bin/xcrun --sdk iphoneos --show-sdk-path) && [ -d "$xcode_sdk/usr/include" ] || die "Xcode has no iPhoneOS SDK"
+	link "$xcode_sdk" "$THEOS/sdks/iPhoneOS26.5.sdk"
 }
 
 # linktree FROM TO: TO becomes a tree of links to the files of FROM (cp -rs, which BSD cp lacks)
@@ -106,11 +103,11 @@ stage1() {
 
 	# --- sources -------------------------------------------------------------------------------
 	fetch AvailabilityVersions https://github.com/apple-oss-distributions/AvailabilityVersions.git \
-		5d9baee345b3bc72b26c71adc65f94f2d5e9ced2        # AvailabilityVersions-115.4
+		refs/tags/AvailabilityVersions-157.2
 	fetch libdispatch https://github.com/apple-oss-distributions/libdispatch.git \
-		a641558f447659d90ad002ef0ee6f0212273fbfc        # libdispatch-1415.100.11
+		refs/tags/libdispatch-1542.100.32
 	fetch libpthread https://github.com/apple-oss-distributions/libpthread.git \
-		a6c70ca0e544347a0377babf748f831577ec24f9        # libpthread-514.100.2
+		refs/tags/libpthread-539.100.4
 	fetch mm_bootstrap_cmds https://github.com/markmentovai/bootstrap_cmds \
 		f337e600741638896fb6056ce87c6479f74b89a3        # cross_platform/bootstrap_cmds-138
 	fetch tcsh https://github.com/tcsh-org/tcsh.git b7db07931546178c4cb2542b5fc850c483628ed5
@@ -118,13 +115,23 @@ stage1() {
 
 	# Apple's iig (the DriverKit interface generator) is closed. host/bin/iig hands out the headers it
 	# would generate, which the macOS SDK of the same XNU release ships ready-made.
-	if [ ! -d MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework/Headers/DriverKit ]; then
-		log "downloading the macOS 13.3 SDK for its DriverKit headers"
+	if [ ! -d MacOSX26.1.sdk/System/Library/Frameworks/Kernel.framework/Headers/DriverKit ]; then
+		log "downloading the macOS 26.1 SDK for its DriverKit headers"
 		curl -L --fail --retry 3 -s -o macos-sdk.tar.xz "$MACOS_SDK_URL" || die "download failed: $MACOS_SDK_URL"
 		local wild=--wildcards; [ "$XNU_HOST_OS" = Darwin ] && wild=        # bsdtar: patterns as they are
-		tar -xJf macos-sdk.tar.xz $wild '*MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework*' ||
+		tar -xJf macos-sdk.tar.xz $wild '*MacOSX26.1.sdk/System/Library/Frameworks/Kernel.framework*' ||
 			die "cannot unpack the macOS SDK"
 		rm -f macos-sdk.tar.xz
+	fi
+
+	# IOUserServer.iig of xnu-12377.121.6 has Panic(), which the 26.1 SDK's generated header has not yet; Xcode's own
+	# macOS SDK has (host/bin/iig takes what is in iig-hdr/ first). On Linux: copy that one header from a Mac.
+	mkdir -p iig-hdr
+	if [ ! -f iig-hdr/IOUserServer.h ] && [ "$XNU_HOST_OS" = Darwin ]; then
+		local xcode_dk
+		xcode_dk=$(/usr/bin/xcrun --sdk macosx --show-sdk-path)/System/Library/Frameworks/Kernel.framework/Headers/DriverKit
+		grep -q 'Panic_Impl' "$xcode_dk/IOUserServer.h" 2>/dev/null && cp "$xcode_dk/IOUserServer.h" iig-hdr/IOUserServer.h ||
+			log "Xcode's macOS SDK has no IOUserServer.h with Panic(): iokit/Kernel/IOUserServer.cpp will not compile"
 	fi
 
 	# --- host tools ----------------------------------------------------------------------------
@@ -196,6 +203,13 @@ stage1() {
 	mkdir -p $sdk_local/include/kernel/os $sdk_local/include/os $sdk_local/lib/kernel $sdk_local/libexec
 	update $sdk_local/libexec/availability.pl < AvailabilityVersions/availability.pl
 	[ -x $sdk_local/libexec/availability.pl ] || chmod +x $sdk_local/libexec/availability.pl
+	# (since AvailabilityVersions-140 or so availability.pl only runs the program beside it)
+	if [ -f AvailabilityVersions/availability ]; then
+		update $sdk_local/libexec/availability < AvailabilityVersions/availability
+		[ -x $sdk_local/libexec/availability ] || chmod +x $sdk_local/libexec/availability
+		[ -e $sdk_local/libexec/availability.dsl ] || cp AvailabilityVersions/availability.dsl $sdk_local/libexec/availability.dsl
+		[ -e $sdk_local/libexec/templates ] || cp -R AvailabilityVersions/templates $sdk_local/libexec/templates
+	fi
 	# the kernel's half of a private libdispatch header (unifdef exits with 1 when it removed something)
 	{ host/bin/unifdef -DOS_FIREHOSE_SPI=1 -DKERNEL=1 libdispatch/os/firehose_buffer_private.h || [ $? -eq 1 ]; } |
 		update $sdk_local/include/kernel/os/firehose_buffer_private.h
@@ -229,10 +243,10 @@ stage2() {
 		log "building libfirehose_kernel.a"
 		mkdir -p build/firehose
 		xnu-clang -arch arm64 -c -Os -mkernel -nostdinc -fno-builtin \
-			-DKERNEL=1 -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=0 -DPRIVATE=1 -D__DARWIN_64_BIT_INO_T=1 \
+			-DKERNEL=1 -DKERNEL_PRIVATE=1 -DPRIVATE=1 -D__DARWIN_64_BIT_INO_T=1 \
 			-DDISPATCH_USE_DTRACE=0 -DOS_ATOMIC_CONFIG_MEMORY_ORDER_DEPENDENCY=1 \
 			-DOS_ATOMIC_CONFIG_STARVATION_FREE_ONLY=0 -DOS_FIREHOSE_SPI=1 -DARM64_BOARD_CONFIG_BCM2837 \
-			-Ilibdispatch -Ilibdispatch/src -Ilibdispatch/src/firehose \
+			-Ibuild/pthread/inc -Ilibdispatch -Ilibdispatch/src -Ilibdispatch/src/firehose \
 			-I$hdrs/osfmk -I$hdrs/bsd -I$hdrs/libkern -I$hdrs/pexpert -I$hdrs/iokit -I$hdrs/security \
 			-I$XNU_SRC/libkern/firehose -I$hdrs/libkern/os -I$XNU_SRC/EXTERNAL_HEADERS \
 			-I$XNU_SDK_PATH/usr/local/include/kernel \

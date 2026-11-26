@@ -25,8 +25,8 @@ cd "$WS"
 
 # the kernel tree, without build output (it is full of absolute paths)
 mkdir -p xnu-src
-cp -a --reflink=auto "$ROOT/xnu-src/xnu-8796.121.2" xnu-src/
-K=xnu-src/xnu-8796.121.2
+cp -a --reflink=auto "$ROOT/xnu-src/xnu-12377.121.6" xnu-src/
+K=xnu-src/xnu-12377.121.6
 rm -rf $K/BUILD
 (
 	cd $K

@@ -271,8 +271,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		# the hotspot on and off (src/hotspot.c, kern.hakios.hotspot*)
 		# (pf's ioctls with the kernel's own structures: its net/pfvar.h, and the two headers it needs, from the tree)
 		mkdir -p obj/pfinc/net obj/pfinc/libkern
-		cp ../xnu-src/xnu-8796.121.2/bsd/net/pfvar.h ../xnu-src/xnu-8796.121.2/bsd/net/radix.h ../xnu-src/xnu-8796.121.2/bsd/net/bpf.h obj/pfinc/net/ 2>/dev/null
-		cp ../xnu-src/xnu-8796.121.2/libkern/libkern/tree.h obj/pfinc/libkern/ 2>/dev/null
+		cp ../xnu-src/xnu-12377.121.6/bsd/net/pfvar.h ../xnu-src/xnu-12377.121.6/bsd/net/radix.h ../xnu-src/xnu-12377.121.6/bsd/net/bpf.h obj/pfinc/net/ 2>/dev/null
+		cp ../xnu-src/xnu-12377.121.6/libkern/libkern/tree.h obj/pfinc/libkern/ 2>/dev/null
 		$DYN -Iobj/pfinc -o obj/hotspot src/hotspot.c
 		$DYN -fobjc-arc -framework Foundation -o obj/logdump src/logdump.m &&
 			{ ${LDID:-ldid} -Ssrc/logdump.entitlements obj/logdump 2>/dev/null ||

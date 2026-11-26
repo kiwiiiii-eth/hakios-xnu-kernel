@@ -24,7 +24,7 @@
  *
  * What is lowered: the sections of a Mach-O file that hold instructions (S_ATTR_PURE_INSTRUCTIONS or
  * S_ATTR_SOME_INSTRUCTIONS), less the ranges its LC_DATA_IN_CODE names (jump tables: data that could look like any
- * instruction). A universal file: its arm64 slices. The file's signature is not touched and no longer matches it.
+ * instruction). A universal file: its arm64 slices. The hashes of the pages in the file's signature are made anew.
  *
  *   pac_lower [-n] [-q] FILE...     -n: count, change nothing    -q: no line per file, only the total
  *   pac_lower [-n] --cache FILE     a dyld shared cache: FILE is its first file (dyld_shared_cache_arm64e), the others
@@ -50,11 +50,19 @@ enum {
 	K_NONE, K_PAC_AUT, K_XPAC, K_BR, K_BLR, K_RET, K_LDR, K_PACGA,
 	K_LEFT_LDR,             /* a PAuth load that does not fit a plain one: left for the kernel */
 	K_LEFT_ERET,            /* ERETAA/ERETAB: the kernel's own, not expected in a program */
+	/* instructions newer than ARMv8.2 that are not PAuth's: counted, and left for the kernel to emulate */
+	K_LEFT_JSCVT,           /* FJCVTZS (ARMv8.3) */
+	K_LEFT_FCMA,            /* FCMLA, FCADD (ARMv8.3) */
+	K_LEFT_RCPC2,           /* LDAPUR, STLUR (ARMv8.4) */
+	K_LEFT_FLAGM,           /* CFINV, RMIF, SETF8, SETF16 (ARMv8.4) */
+	K_LEFT_DIT,             /* MSR DIT, MRS DIT (ARMv8.4) */
+	K_LEFT_SHA3,            /* SHA-512, SHA-3, SM3, SM4 (ARMv8.2's options, ARMv8.4) */
 	K_COUNT
 };
 
 static const char *const klass_name[K_COUNT] = {
-	"", "pac/aut", "xpac", "br", "blr", "ret", "ldr", "pacga", "ldr left (offset out of reach)", "eret left"
+	"", "pac/aut", "xpac", "br", "blr", "ret", "ldr", "pacga", "ldr left (offset out of reach)", "eret left",
+	"fjcvtzs left", "fcmla/fcadd left", "ldapur/stlur left", "cfinv/rmif/setf left", "dit left", "sha512/sha3 left"
 };
 
 #define INSN_NOP        0xD503201Fu
@@ -135,6 +143,25 @@ lower_insn(uint32_t in, uint32_t *out)
 			return K_LEFT_LDR;
 		}
 		return K_LDR;
+	}
+	/* newer than ARMv8.2 and not PAuth's: nothing of four bytes does the same */
+	if ((in & 0xFFFFFC00u) == 0x1E7E0000u) {                /* FJCVTZS Wd, Dn */
+		return K_LEFT_JSCVT;
+	}
+	if ((in & 0xBF20E400u) == 0x2E00C400u || (in & 0xBF009400u) == 0x2F001000u) {  /* FCMLA, FCADD; FCMLA by element */
+		return (in & 0x00C00000u) != 0 ? K_LEFT_FCMA : K_NONE;                  /* (size 00 is another instruction) */
+	}
+	if ((in & 0x3F200C00u) == 0x19000000u) {                /* STLURB .. LDAPURSW, LDAPUR, STLUR */
+		return K_LEFT_RCPC2;
+	}
+	if (in == 0xD500401Fu || (in & 0xFFE07C10u) == 0xBA000400u || (in & 0xFFFFBC1Fu) == 0x3A00080Du) {
+		return K_LEFT_FLAGM;                            /* CFINV; RMIF; SETF8, SETF16 */
+	}
+	if ((in & 0xFFFFFEFFu) == 0xD503405Fu || (in & 0xFFFFFFE0u) == 0xD53B42A0u || (in & 0xFFFFFFE0u) == 0xD51B42A0u) {
+		return K_LEFT_DIT;                              /* MSR DIT, #imm; MRS Xt, DIT; MSR DIT, Xt */
+	}
+	if ((in & 0xFF000000u) == 0xCE000000u) {                /* SHA512H .. SM4EKEY, EOR3, RAX1, XAR, BCAX */
+		return K_LEFT_SHA3;
 	}
 	return K_NONE;
 }
@@ -229,6 +256,194 @@ be64(const uint8_t *p)
 	return ((uint64_t)be32(p) << 32) | be32(p + 4);
 }
 
+/* ---- the signature ---------------------------------------------------------------------------------------------- */
+
+/*
+ * A signed file names the hash of each of its pages (the code directory of its signature; Apple's <kern/cs_blobs.h>),
+ * and the kernel compares: a process with a page that does not match is no longer one with a valid signature -- for
+ * launchd's and the kernel's own questions (is this a program of the system's?) not a signed one at all. So the hashes
+ * of the pages are computed again from the lowered ones, in place. The code directory is then another, and so is its
+ * hash, the file's identity: nothing here has a list of those to hold it against.
+ */
+#define CSMAGIC_EMBEDDED_SIGNATURE      0xFADE0CC0u
+#define CSMAGIC_CODEDIRECTORY           0xFADE0C02u
+#define LC_CODE_SIGNATURE               0x1Du
+
+static uint32_t
+rol32(uint32_t x, int n)
+{
+	return (x << n) | (x >> (32 - n));
+}
+
+static void
+sha1(const uint8_t *data, uint64_t len, uint8_t out[20])
+{
+	uint32_t h[5] = { 0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u };
+	uint8_t last[128] = { 0 };
+	uint64_t whole = len / 64, tail = len % 64, blocks = whole + (tail < 56 ? 1 : 2);
+
+	memcpy(last, data + whole * 64, (size_t)tail);
+	last[tail] = 0x80;
+	for (int i = 0; i < 8; i++) {
+		last[(blocks - whole) * 64 - 1 - (uint64_t)i] = (uint8_t)((len * 8) >> (8 * i));
+	}
+	for (uint64_t b = 0; b < blocks; b++) {
+		const uint8_t *p = b < whole ? data + b * 64 : last + (b - whole) * 64;
+		uint32_t w[80], a = h[0], bb = h[1], c = h[2], d = h[3], e = h[4];
+
+		for (int i = 0; i < 16; i++) {
+			w[i] = be32(p + 4 * i);
+		}
+		for (int i = 16; i < 80; i++) {
+			w[i] = rol32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+		}
+		for (int i = 0; i < 80; i++) {
+			uint32_t f = i < 20 ? ((bb & c) | (~bb & d)) + 0x5A827999u : i < 40 ? (bb ^ c ^ d) + 0x6ED9EBA1u :
+			    i < 60 ? ((bb & c) | (bb & d) | (c & d)) + 0x8F1BBCDCu : (bb ^ c ^ d) + 0xCA62C1D6u;
+			uint32_t t = rol32(a, 5) + f + e + w[i];
+
+			e = d, d = c, c = rol32(bb, 30), bb = a, a = t;
+		}
+		h[0] += a, h[1] += bb, h[2] += c, h[3] += d, h[4] += e;
+	}
+	for (int i = 0; i < 20; i++) {
+		out[i] = (uint8_t)(h[i / 4] >> (24 - 8 * (i % 4)));
+	}
+}
+
+static const uint32_t sha256_k[64] = {
+	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
+	0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+	0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+	0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+	0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08,
+	0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+	0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+};
+
+static void
+sha256(const uint8_t *data, uint64_t len, uint8_t out[32])
+{
+	uint32_t h[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
+	uint8_t last[128] = { 0 };
+	uint64_t whole = len / 64, tail = len % 64, blocks = whole + (tail < 56 ? 1 : 2);
+
+	memcpy(last, data + whole * 64, (size_t)tail);
+	last[tail] = 0x80;
+	for (int i = 0; i < 8; i++) {
+		last[(blocks - whole) * 64 - 1 - (uint64_t)i] = (uint8_t)((len * 8) >> (8 * i));
+	}
+	for (uint64_t b = 0; b < blocks; b++) {
+		const uint8_t *p = b < whole ? data + b * 64 : last + (b - whole) * 64;
+		uint32_t w[64], v[8];
+
+		for (int i = 0; i < 16; i++) {
+			w[i] = be32(p + 4 * i);
+		}
+		for (int i = 16; i < 64; i++) {
+			uint32_t s0 = rol32(w[i - 15], 25) ^ rol32(w[i - 15], 14) ^ (w[i - 15] >> 3);
+			uint32_t s1 = rol32(w[i - 2], 15) ^ rol32(w[i - 2], 13) ^ (w[i - 2] >> 10);
+
+			w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+		}
+		memcpy(v, h, sizeof(v));
+		for (int i = 0; i < 64; i++) {
+			uint32_t s1 = rol32(v[4], 26) ^ rol32(v[4], 21) ^ rol32(v[4], 7);
+			uint32_t t1 = v[7] + s1 + ((v[4] & v[5]) ^ (~v[4] & v[6])) + sha256_k[i] + w[i];
+			uint32_t s0 = rol32(v[0], 30) ^ rol32(v[0], 19) ^ rol32(v[0], 10);
+			uint32_t t2 = s0 + ((v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]));
+
+			v[7] = v[6], v[6] = v[5], v[5] = v[4], v[4] = v[3] + t1, v[3] = v[2], v[2] = v[1], v[1] = v[0], v[0] = t1 + t2;
+		}
+		for (int i = 0; i < 8; i++) {
+			h[i] += v[i];
+		}
+	}
+	for (int i = 0; i < 32; i++) {
+		out[i] = (uint8_t)(h[i / 4] >> (24 - 8 * (i % 4)));
+	}
+}
+
+static uint64_t resealed_pages;         /* hashes of pages written anew, all files */
+
+/* One code directory at m + at, of the code that starts at m + base (`size`: of all of m). */
+static int
+reseal_directory(uint8_t *m, uint64_t size, uint64_t base, uint64_t at, uint64_t length)
+{
+	uint32_t version, hash_off, nslots;
+	uint64_t limit, page;
+	unsigned hash_size, hash_type, shift;
+
+	if (length < 44 || be32(m + at + 4) > length) {
+		return -1;
+	}
+	version = be32(m + at + 8);
+	hash_off = be32(m + at + 16);
+	nslots = be32(m + at + 28);
+	limit = be32(m + at + 32);
+	hash_size = m[at + 36], hash_type = m[at + 37], shift = m[at + 39];
+	if (version >= 0x20300 && length >= 64 && be64(m + at + 56) != 0) {
+		limit = be64(m + at + 56);
+	}
+	/* (types: 1 SHA-1, 2 SHA-256, 3 SHA-256 cut to 20 bytes; a directory of one hash for all the code has no pages) */
+	if (shift == 0 || shift > 20 || !(hash_type == 1 || hash_type == 2 || hash_type == 3) ||
+	    hash_size != (hash_type == 2 ? 32u : 20u) || (uint64_t)hash_off + (uint64_t)nslots * hash_size > length ||
+	    base + limit > size) {
+		return -1;
+	}
+	page = (uint64_t)1 << shift;
+	for (uint32_t i = 0; i < nslots; i++) {
+		uint64_t start = (uint64_t)i * page, end = start + page > limit ? limit : start + page;
+		uint8_t hash[32], *slot = m + at + hash_off + (uint64_t)i * hash_size;
+
+		if (start >= limit) {
+			break;
+		}
+		if (hash_type == 1) {
+			sha1(m + base + start, end - start, hash);
+		} else {
+			sha256(m + base + start, end - start, hash);
+		}
+		if (memcmp(slot, hash, hash_size) != 0) {
+			if (!dry_run) {
+				memcpy(slot, hash, hash_size);
+			}
+			resealed_pages++;
+		}
+	}
+	return 0;
+}
+
+/* The signature of `sig_size` bytes at m + sig_off, of the code at m + base: every code directory in it. */
+static int
+reseal(uint8_t *m, uint64_t size, uint64_t base, uint64_t sig_off, uint64_t sig_size)
+{
+	int bad = 0;
+
+	if (sig_size < 12 || sig_off + sig_size > size) {
+		return -1;
+	}
+	if (be32(m + sig_off) == CSMAGIC_CODEDIRECTORY) {
+		return reseal_directory(m, size, base, sig_off, sig_size);
+	}
+	if (be32(m + sig_off) == CSMAGIC_EMBEDDED_SIGNATURE) {
+		uint32_t count = be32(m + sig_off + 8);
+
+		if ((uint64_t)12 + (uint64_t)count * 8 > sig_size) {
+			return -1;
+		}
+		for (uint32_t i = 0; i < count; i++) {
+			uint32_t off = be32(m + sig_off + 12 + (uint64_t)i * 8 + 4);
+
+			if ((uint64_t)off + 8 <= sig_size && be32(m + sig_off + off) == CSMAGIC_CODEDIRECTORY) {
+				bad |= reseal_directory(m, size, base, sig_off + off, sig_size - off) < 0;
+			}
+		}
+		return bad ? -1 : 0;
+	}
+	return -1;
+}
+
 /* One 64-bit Mach-O image of `size` bytes at `m`. 0, or -1 if it is not well formed (nothing is changed then). */
 static int
 lower_macho(uint8_t *m, uint64_t size, uint64_t count[K_COUNT])
@@ -237,6 +452,7 @@ lower_macho(uint8_t *m, uint64_t size, uint64_t count[K_COUNT])
 	uint64_t at;
 	struct skip *skips = NULL;
 	size_t nskips = 0;
+	uint64_t sig_off = 0, sig_size = 0;
 	int pass;
 
 	if (size < 32 || get32(m) != MH_MAGIC_64 || get32(m + 4) != CPU_TYPE_ARM64) {
@@ -281,6 +497,10 @@ lower_macho(uint8_t *m, uint64_t size, uint64_t count[K_COUNT])
 					qsort(skips, nskips, sizeof(*skips), skip_compare);
 				}
 			}
+			if (pass == 0 && cmd == LC_CODE_SIGNATURE && cmdsize >= 16) {
+				sig_off = get32(m + at + 8);
+				sig_size = get32(m + at + 12);
+			}
 			if (pass == 1 && cmd == LC_SEGMENT_64 && cmdsize >= 72) {
 				uint32_t nsects = get32(m + at + 64);
 
@@ -308,6 +528,9 @@ lower_macho(uint8_t *m, uint64_t size, uint64_t count[K_COUNT])
 		}
 	}
 	free(skips);
+	if (sig_size != 0 && reseal(m, size, 0, sig_off, sig_size) < 0) {
+		return -2;                      /* lowered, and its signature not understood: it stays as it was */
+	}
 	return 0;
 }
 
@@ -414,6 +637,7 @@ struct cache_mapping {
 	uint32_t prot;
 	int file;
 	uint64_t covered;               /* bytes of it that some image's section of instructions named */
+	int stubs;                      /* a mapping of stubs alone (DYLD_CACHE_MAPPING_TEXT_STUBS), no image's section */
 };
 
 static struct cache_file cache_files[CACHE_MAX_FILES];
@@ -468,6 +692,11 @@ cache_open(const char *path)
 			mp->prot = get32(e + 28);
 			mp->file = cache_nfiles;
 			mp->covered = 0;
+			mp->stubs = 0;
+			/* the same mappings with their flags (dyld_cache_mapping_and_slide_info, 56 bytes), where the header has them */
+			if (off >= 0x140 && get32(f->m + 0x13C) == count && (uint64_t)get32(f->m + 0x138) + (uint64_t)count * 56 <= f->size) {
+				mp->stubs = (get64(f->m + get32(f->m + 0x138) + (uint64_t)i * 56 + 40) & 8) != 0;
+			}
 			if (mp->offset + mp->size > f->size) {
 				fprintf(stderr, "pac_lower: %s: a mapping reaches past the file's end\n", path);
 				return -1;
@@ -659,6 +888,27 @@ lower_cache(const char *path)
 			unreadable++;
 		}
 	}
+	/*
+	 * The stubs that calls between the libraries go through (adrp, add, ldr, braa) are in mappings of their own, which
+	 * no image's section names: a file of nothing else, its header in the first page.
+	 */
+	for (int i = 0; i < cache_nmappings; i++) {
+		struct cache_mapping *mp = &cache_mappings[i];
+		uint64_t start = mp->offset < 0x4000 ? 0x4000 : mp->offset;
+
+		if (mp->stubs && (mp->prot & 4) && start < mp->offset + mp->size) {
+			lower_range(cache_files[mp->file].m, start, mp->offset + mp->size, NULL, 0, count);
+			mp->covered += mp->offset + mp->size - start;
+		}
+	}
+	/* each file's signature: the hashes of its pages (codeSignatureOffset and codeSignatureSize of its header) */
+	for (int i = 0; i < cache_nfiles; i++) {
+		struct cache_file *f = &cache_files[i];
+
+		if (get64(f->m + 0x30) != 0 && reseal(f->m, f->size, 0, get64(f->m + 0x28), get64(f->m + 0x30)) < 0) {
+			fprintf(stderr, "pac_lower: %s: its signature is not understood, and stays as it was\n", f->path);
+		}
+	}
 	if (!dry_run) {
 		for (int i = 0; i < cache_nfiles; i++) {
 			msync(cache_files[i].m, (size_t)cache_files[i].size, MS_SYNC);
@@ -685,6 +935,8 @@ lower_cache(const char *path)
 		}
 		printf("\n%s: the sections of instructions are %llu MB of the %llu MB mapped as code\n", path,
 		    (unsigned long long)(covered >> 20), (unsigned long long)(exec_bytes >> 20));
+		printf("%s: %llu pages' hashes %s in the signatures\n", path, (unsigned long long)resealed_pages,
+		    dry_run ? "would be made anew" : "made anew");
 	}
 	return unreadable ? -1 : 0;
 }
@@ -795,7 +1047,7 @@ main(int argc, char **argv)
 				printf(", %s %llu", klass_name[k], (unsigned long long)total[k]);
 			}
 		}
-		printf("\n");
+		printf("; %llu pages' hashes in the signatures\n", (unsigned long long)resealed_pages);
 	}
 	return status;
 }

@@ -120,6 +120,82 @@ static const struct { int mode, uid; const char *path; } var_dirs[] = {
 	{ 0755, 0, "spool" }, { 0755, 0, "staged_system_apps" }, { 0755, 0, "personalized_factory" },
 };
 
+/*
+ * The files this image has for /private/var (its /var: tools/ios26/boot-image.sh), put there as the system starts on an
+ * empty one every time: the note that the data has been migrated for this build -- without it the window server holds
+ * the shell's check-in back for a migration that never ends here, and SpringBoard waits in FBSystemShellInitialize --
+ * and the settings userland/var has for the 16.5 system (no setup assistant, longer watchdogs). What is below mobile/
+ * is mobile's. Directories are made as they are met; a file that is there already is left.
+ */
+static void
+var_files(const char *from, const char *to, int uid)
+{
+	static char buf[16384];         /* (one level's entries are used up before the next is read: path names are copied out) */
+	char names[24][96];
+	uint8_t types[24];
+	off_t position = 0;
+	ssize_t n;
+	int count = 0, fd = open(from, 0 /* O_RDONLY */, 0);
+
+	if (fd < 0) {
+		return;
+	}
+	while ((n = getdirentries(fd, buf, sizeof(buf), &position)) > 0) {
+		for (ssize_t at = 0; at < n;) {
+			struct dirent *de = (struct dirent *)(buf + at);
+
+			at += de->d_reclen;
+			if (de->d_reclen == 0) {
+				break;
+			}
+			if (de->d_name[0] == '.' || strlen(de->d_name) >= sizeof(names[0]) || count == 24) {
+				continue;
+			}
+			strcpy(names[count], de->d_name);
+			types[count++] = de->d_type;
+		}
+	}
+	close(fd);
+	for (int i = 0; i < count; i++) {
+		char src[320], dst[320];
+		int owner = uid;
+
+		if (strlen(from) + strlen(names[i]) + 2 > sizeof(src) || strlen(to) + strlen(names[i]) + 2 > sizeof(dst)) {
+			continue;
+		}
+		strcpy(src, from); strcpy(src + strlen(src), "/"); strcpy(src + strlen(src), names[i]);
+		strcpy(dst, to); strcpy(dst + strlen(dst), "/"); strcpy(dst + strlen(dst), names[i]);
+		if (strcmp(names[i], "mobile") == 0) {
+			owner = 501;
+		}
+		if (types[i] == 4 /* DT_DIR */) {
+			if (mkdir(dst, 0755) == 0) {
+				chown(dst, owner, owner);
+			}
+			var_files(src, dst, owner);
+		} else if (types[i] == 8 /* DT_REG */) {
+			int in = open(src, 0, 0), out = open(dst, 0x0001 | 0x0200 | 0x0800 /* O_WRONLY | O_CREAT | O_EXCL */, 0644);
+			static char data[65536];
+			ssize_t got;
+
+			while (in >= 0 && out >= 0 && (got = read(in, data, sizeof(data))) > 0) {
+				if (write(out, data, (size_t)got) != got) {
+					printf("init26: %s: %s\n", dst, strerror(errno));
+					break;
+				}
+			}
+			if (out >= 0) {
+				close(out);
+				chown(dst, owner, owner);
+				printf("init26: %s\n", dst);
+			}
+			if (in >= 0) {
+				close(in);
+			}
+		}
+	}
+}
+
 int
 main(int argc, char **argv, char **envp)
 {
@@ -171,6 +247,7 @@ main(int argc, char **argv, char **envp)
 			chown(path, var_dirs[i].uid, var_dirs[i].uid);
 		}
 	}
+	var_files("/private/preboot/boot/var", "/private/var", 0);
 	{
 		/* (launchd's own: "usermanagerd" -- the user and its personas, /private/var/keybags; without them the daemon stops) */
 		char *usermanagerd[] = { "/usr/libexec/usermanagerd", "--init", NULL };

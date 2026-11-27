@@ -18,6 +18,15 @@ $CC -c libmini/start.S -o obj/start.o
 $CC -Ilibmini $LD -o obj/init26 src/init26.c obj/mini.o obj/start.o
 rm -rf boot26 && mkdir -p boot26/sbin boot26/dev boot26/flash
 cp obj/init26 boot26/sbin/launchd
+# what init26 puts into the empty /private/var (var_files() there): userland/var's settings, and the note that this
+# build's data has been migrated, under the build of the system that is started (ROOT's; 16.5's file names its own)
+mkdir -p boot26/var && cp -R var/ boot26/var/
+if [ -n "$ROOT" ]; then
+	BUILD=$(/usr/libexec/PlistBuddy -c 'Print :ProductBuildVersion' "$ROOT/System/Library/CoreServices/SystemVersion.plist")
+	M=boot26/var/mobile/Library/Preferences/com.apple.migration.plist
+	/usr/libexec/PlistBuddy -c "Set :LastSystemVersion $BUILD" -c "Set :DMLastMigrationResults:buildVersion $BUILD" "$M" >/dev/null
+	echo "  /private/var: migrated as of $BUILD"
+fi
 JOBS=${JOBS-"
 	com.apple.notifyd com.apple.cfprefsd.xpc.daemon com.apple.cfprefsd.xpc.daemon.system com.apple.logd
 	com.apple.syslogd com.apple.distnoted.xpc.daemon com.apple.diagnosticd com.apple.fseventsd

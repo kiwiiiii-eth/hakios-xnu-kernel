@@ -64,15 +64,21 @@ enum {
 	kFBMethodGetProtectionOptions   = 82,
 };
 
-/* The swap request (IOMobileFramebufferSwapEnd): 0x46c bytes, of which we read these. */
-#define SWAP_SIZE               0x46c
-#define SWAP_ID                 0x50
-#define SWAP_SURFACE(layer)     (0x54 + 4 * (layer))    /* surface number, 0 = none */
-#define SWAP_SOURCE(layer)      (0x64 + 16 * (layer))   /* x, y, width, height in the surface */
-#define SWAP_ENABLED(layer)     (0xa4 + 4 * (layer))
-#define SWAP_DEST(layer)        (0xc4 + 16 * (layer))   /* x, y, width, height on the display */
-#define SWAP_LAYERS_SET         0x104                   /* bit per layer given in this swap */
-#define SWAP_LAYERS_CLEARED     0x108
+/*
+ * The swap request (IOMobileFramebufferSwapEnd), of which we read these. Darwin 25's (IOMobileFramebuffer.framework of
+ * userland 26: kern_SwapBegin clears 0x588 bytes at 0x18 of its object, kern_SwapSetLayer writes the surface's number
+ * at 0xb4 + 4 * layer of it, the rectangles at 0xc4 and 0x124 + 16 * layer, the two masks at 0x164 and 0x168): 0x588
+ * bytes, and everything this driver reads 0x48 further in than in Darwin 22's 0x46c bytes (the number at 0x50, the
+ * surfaces at 0x54 ...). Read by the old offsets, every swap named no surface at all and nothing reached the panel.
+ */
+#define SWAP_SIZE               0x588
+#define SWAP_ID                 0x98
+#define SWAP_SURFACE(layer)     (0x9c + 4 * (layer))    /* surface number, 0 = none */
+#define SWAP_SOURCE(layer)      (0xac + 16 * (layer))   /* x, y, width, height in the surface */
+#define SWAP_ENABLED(layer)     (0xec + 4 * (layer))
+#define SWAP_DEST(layer)        (0x10c + 16 * (layer))  /* x, y, width, height on the display */
+#define SWAP_LAYERS_SET         0x14c                   /* bit per layer given in this swap */
+#define SWAP_LAYERS_CLEARED     0x150
 #define SWAP_LAYERS             4
 
 #define kFBNotifyVSync          5

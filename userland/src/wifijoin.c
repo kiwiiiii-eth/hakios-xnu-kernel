@@ -49,7 +49,8 @@ say_current(CFRunLoopTimerRef timer, void *info)
 		CFRelease(now);
 	}
 	{
-		static bool tried;
+		static int tried;               /* (the checks, until both answer: the route may come a little after the address) */
+		static bool answered;
 		struct ifaddrs *all, *a;
 		char address[INET_ADDRSTRLEN] = "";
 
@@ -62,20 +63,24 @@ say_current(CFRunLoopTimerRef timer, void *info)
 			freeifaddrs(all);
 		}
 		printf("wifijoin: en0's address: %s\n", address[0] ? address : "none yet");
-		if (address[0] && !tried) {
+		if (address[0] && !answered && tried < 6) {
 			struct addrinfo *found = NULL, hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM };
 			struct sockaddr_in to = { .sin_len = sizeof(to), .sin_family = AF_INET, .sin_port = htons(80) };
 			int fd = socket(AF_INET, SOCK_STREAM, 0), error;
 
-			tried = true;
+			tried++;
 			error = getaddrinfo("apple.com", "80", &hints, &found);
 			printf("wifijoin: apple.com looked up: %s\n", error == 0 ? "an address" : gai_strerror(error));
 			if (found != NULL) {
 				freeaddrinfo(found);
 			}
 			inet_pton(AF_INET, "1.1.1.1", &to.sin_addr);
-			printf("wifijoin: a TCP connection to 1.1.1.1:80: %s\n", connect(fd, (struct sockaddr *)&to, sizeof(to)) == 0 ?
-			    "made" : strerror(errno));
+			{
+				bool made = connect(fd, (struct sockaddr *)&to, sizeof(to)) == 0;
+
+				printf("wifijoin: a TCP connection to 1.1.1.1:80: %s\n", made ? "made" : strerror(errno));
+				answered = made && error == 0;
+			}
 			close(fd);
 		}
 	}

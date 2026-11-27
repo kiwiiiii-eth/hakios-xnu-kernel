@@ -120,7 +120,7 @@ static const struct { int mode, uid; const char *path; } var_dirs[] = {
 	{ 0755, 0, "spool" }, { 0755, 0, "staged_system_apps" }, { 0755, 0, "personalized_factory" },
 	/* (the keychain: /Library/Keychains is a link to it; without it securityd's mkpath_np failed, EIO, and bluetoothd
 	 * stopped every ten seconds on an identity it could not keep, "Bluetooth error - restarting", reason 130) */
-	{ 0755, 0, "Keychains" },
+	{ 0755, 64, "Keychains" },     /* (_securityd's, 64: securityd runs as it, "open(.../keychain-2.db) - Permission denied") */
 };
 
 /*

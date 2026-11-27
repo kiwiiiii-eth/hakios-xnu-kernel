@@ -176,6 +176,25 @@ struct apple80211_assoc {
 	uint8_t rest[0x250 - 0x88];
 };
 
+/*
+ * Darwin 25's ASSOCIATE: 908 bytes. The authentication's two halves are words now, and all that follows them is 4 bytes
+ * later (IO80211's _performAssociation of 26.5: the name's length at 0x10 and the name at 0x14, the access point at 0x34,
+ * the key's version, length and kind at 0x3c, 0x40, 0x44, the key at 0x4c, copied in with room for 0x340 bytes).
+ */
+struct apple80211_assoc_25 {
+	uint32_t version;
+	uint16_t mode, unused_0;
+	uint32_t auth_lower, auth_upper;
+	uint32_t ssid_length;
+	uint8_t ssid[32];
+	uint8_t bssid[6], unused_1[2];
+	uint32_t key_version, key_length, key_cipher;
+	uint32_t key_flags;
+	uint8_t key[64];
+};
+
+#define ASSOC_25                908u
+
 #define CIPHER_PMK              6
 #define CIPHER_PASSPHRASE       10
 
@@ -192,6 +211,9 @@ struct apple80211_link_changed {
 
 _Static_assert(sizeof(struct apple80211_assoc) == 592 && offsetof(struct apple80211_assoc, key) == 0x48,
     "the association request as Darwin userland 16.5 has it");
+_Static_assert(offsetof(struct apple80211_assoc_25, ssid) == 0x14 && offsetof(struct apple80211_assoc_25, bssid) == 0x34 &&
+    offsetof(struct apple80211_assoc_25, key_length) == 0x40 && offsetof(struct apple80211_assoc_25, key) == 0x4c,
+    "the association request as Darwin userland 25 has it");
 _Static_assert(sizeof(struct apple80211_link_changed) == 32 && offsetof(struct apple80211_link_changed, reason) == 0x14,
     "the link event as Darwin userland 16.5 reads it");
 _Static_assert(sizeof(struct apple80211_channels) == 4824, "the channel list as Darwin userland 16.5 has it");
@@ -581,8 +603,37 @@ set_join(const struct apple80211req *request, char *said, size_t said_size)
 	}
 	asked = kalloc_data(sizeof(*asked), Z_WAITOK | Z_ZERO);
 	what = kalloc_data(sizeof(*what), Z_WAITOK | Z_ZERO);
-	if (asked == NULL || what == NULL || (error = copyin(request->req_data, asked, offsetof(struct apple80211_assoc, rest))) != 0) {
-		error = asked == NULL || what == NULL ? ENOMEM : error;
+	if (asked == NULL || what == NULL) {
+		error = ENOMEM;
+		goto out;
+	}
+	if (request->req_len == ASSOC_25) {
+		/* (Darwin 25's, put into the old shape: everything below reads that) */
+		struct apple80211_assoc_25 *new = kalloc_data(sizeof(*new), Z_WAITOK | Z_ZERO);
+
+		if (new == NULL || (error = copyin(request->req_data, new, sizeof(*new))) != 0) {
+			error = new == NULL ? ENOMEM : error;
+		} else {
+			asked->version = new->version;
+			asked->mode = new->mode;
+			asked->auth_lower = (uint16_t)new->auth_lower;
+			asked->auth_upper = (uint16_t)new->auth_upper;
+			asked->ssid_length = new->ssid_length;
+			memcpy(asked->ssid, new->ssid, sizeof(asked->ssid));
+			memcpy(asked->bssid, new->bssid, sizeof(asked->bssid));
+			asked->key_version = new->key_version;
+			asked->key_length = new->key_length;
+			asked->key_cipher = new->key_cipher;
+			memcpy(asked->key, new->key, sizeof(asked->key));
+		}
+		if (new != NULL) {
+			memset_s(new, sizeof(*new), 0, sizeof(*new));
+			kfree_data(new, sizeof(*new));
+		}
+		if (error != 0) {
+			goto out;
+		}
+	} else if ((error = copyin(request->req_data, asked, offsetof(struct apple80211_assoc, rest))) != 0) {
 		goto out;
 	}
 	/* (lengths and kinds only: the name, the access point and the key stay out of the log) */

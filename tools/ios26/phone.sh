@@ -7,6 +7,8 @@
 #     CHECKPOINT=N   stop at loader_checkpoint(N) and come back (osfmk/arm64/arm_init.c)
 #     SYS=FILE       a system image staged into the phone's memory first (oem ramdisk)
 #     KERNEL=FILE    default ./hakios-kernel
+#     SHOTS="20 50"  the screen as a picture at those seconds into the run: logs/phone/NAME-20.png ...
+#     VERBOSE=       without -v: the kernel's text is not drawn over the picture (the log has it all the same)
 #
 # The flow is devices/fajita/scripts/run-darwin-live.sh's (ABL -> fastboot boot of U-Boot + the loader with its own
 # USB -> stage -> oem run), with this tree as the kernel repository and ../root26/out for what it makes, so that
@@ -19,7 +21,7 @@ KERNEL=${KERNEL:-$K/hakios-kernel}; SECS=${SECS:-25}; USBIMG=$ROOT/out/hakios-fa
 LOG=$K/logs/phone/$NAME.txt; mkdir -p "$K/logs/phone" "$K/build"
 export PATH=/opt/homebrew/opt/coreutils/libexec/gnubin:$PATH
 . "$K/devices/fajita/scripts/lib-args.sh"; resolve_args "$K" "$KERNEL" || exit 1
-CMDLINE="loader_return_after=$SECS epoch=$(date +%s) -v $ARGS $SOCARGS $EXTRA ufs_write=0 var_store=0 var_hfs=0"
+CMDLINE="loader_return_after=$SECS epoch=$(date +%s) ${VERBOSE--v} $ARGS $SOCARGS $EXTRA ufs_write=0 var_store=0 var_hfs=0"
 echo "phone: kernel=$(basename "$KERNEL") ramdisk=$(basename "$RD") checkpoint=${CHECKPOINT:-none}"
 echo "phone: cmdline=$CMDLINE"
 
@@ -56,10 +58,40 @@ cd "$K"
 python3 xnuloader/mkpayload.py -o build/phone-run.bin kernel="$KERNEL" ramdisk="$RD" --cmdline "$CMDLINE" >/dev/null
 timeout 60 fastboot stage build/phone-run.bin 2>&1 | grep -q OKAY || { echo "phone: the payload did not go over"; exit 1; }
 timeout 10 fastboot oem run ${CHECKPOINT:-} >/dev/null 2>&1 || true
+# the loader's framebuffer as a PNG (its "oem screenshot": the raw rows, BGRX)
+shot() {
+	local geom; geom=$(timeout 10 fastboot getvar screen 2>&1 | sed -n 's/^screen: //p')
+	[ -n "$geom" ] && timeout 15 fastboot oem screenshot 2>&1 | grep -q OKAY || return 1
+	timeout 60 fastboot get_staged "$LOG.raw" >/dev/null 2>&1 || return 1
+	python3 - "$LOG.raw" "$1" $geom <<'PY' && rm -f "$LOG.raw"
+import struct, sys, zlib
+raw, out, width, height, stride = sys.argv[1], sys.argv[2], *map(int, sys.argv[3:6])
+data = open(raw, 'rb').read()
+rows = bytearray()
+for y in range(height):
+    line = data[y * stride:y * stride + width * 4]
+    rows.append(0)
+    rgb = bytearray(width * 3)
+    rgb[0::3], rgb[1::3], rgb[2::3] = line[2::4], line[1::4], line[0::4]
+    rows += rgb
+def chunk(kind, body):
+    return struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body))
+open(out, 'wb').write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)) +
+    chunk(b'IDAT', zlib.compress(bytes(rows), 6)) + chunk(b'IEND', b''))
+PY
+}
+STARTED=$(date +%s); SHOTS=${SHOTS:-}
 DEADLINE=$(( $(date +%s) + SECS + 120 )); result=
 while [ $(date +%s) -lt $DEADLINE ]; do
 	result=$(timeout 15 fastboot getvar result 2>&1 | grep '^result:' || true)
 	case "$result" in ""|*running*) ;; *) break ;; esac
+	# (one command at a time on the loader's USB: a picture takes this turn's place of the log)
+	next=${SHOTS%% *}
+	if [ -n "$next" ] && [ $(( $(date +%s) - STARTED )) -ge "$next" ]; then
+		shot "${LOG%.txt}-$next.png" && echo "phone: the screen at $next s: ${LOG%.txt}-$next.png"
+		case "$SHOTS" in *" "*) SHOTS=${SHOTS#* } ;; *) SHOTS= ;; esac
+		continue
+	fi
 	if timeout 15 fastboot oem log >/dev/null 2>&1 && timeout 60 fastboot get_staged "$LOG.live.tmp" >/dev/null 2>&1; then
 		mv -f "$LOG.live.tmp" "$LOG.live"
 	fi

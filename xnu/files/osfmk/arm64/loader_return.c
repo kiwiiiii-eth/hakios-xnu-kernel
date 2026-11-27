@@ -256,7 +256,8 @@ loader_jump(uint64_t reason, uint64_t code)
 	 * firmware switch this one off. It must go as the other cores do (psci_smp_cpu_off()), with
 	 * nothing pending: after a panic the "stop" signal and the timer are.
 	 */
-	if (PE_parse_boot_argn("bootcpu", &own_core, sizeof(own_core))) {
+	/* (a checkpoint before PE_init_platform(): no boot-args to ask yet, and no interrupt either) */
+	if (PE_state.initialized && PE_parse_boot_argn("bootcpu", &own_core, sizeof(own_core))) {
 		__builtin_arm_wsr64("CNTV_CTL_EL0", CNTV_CTL_EL0_IMASKED);
 		gic_v3_irq_cpu_shutdown();
 	}

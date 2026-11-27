@@ -1865,7 +1865,7 @@ index 964d522665fc..0461bd6e024e 100644
  # Assume LTO scaling by default, unless it is being explicitly passed on the command-line
  LARGE_BUILD_FOOTPRINT := $(if $(BUILD_LTO),$(BUILD_LTO),1)
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index 6690846b06c4..de252ce12651 100644
+index 6690846b06c4..beae62fab38c 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
 @@ -75,6 +75,9 @@
@@ -1890,7 +1890,18 @@ index 6690846b06c4..de252ce12651 100644
  arm_init(
  	boot_args       *args)
  {
-@@ -364,10 +371,10 @@ arm_init(
+@@ -356,18 +363,21 @@ arm_init(
+ 	DTEntry chosen = NULL;
+ 	unsigned int dt_entry_size = 0;
+ 
++	loader_checkpoint(6);
+ 	arm_slide_rebase_and_sign_image();
++	loader_checkpoint(7);
+ 
+ 	arm_static_if_init(args);
++	loader_checkpoint(8);
+ 
+ 	/* If kernel integrity is supported, use a constant copy of the boot args. */
  	const_boot_args = *args;
  	BootArgs = args = &const_boot_args;
  
@@ -1902,7 +1913,7 @@ index 6690846b06c4..de252ce12651 100644
  	cpu_data_init(&BootCpuData);
  #if defined(HAS_APPLE_PAC)
  	/* bootstrap cpu process dependent key for kernel has been loaded by start.s */
-@@ -376,14 +383,19 @@ arm_init(
+@@ -376,14 +386,19 @@ arm_init(
  #endif /* defined(HAS_APPLE_PAC) */
  
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
@@ -1922,7 +1933,7 @@ index 6690846b06c4..de252ce12651 100644
  
  #if HAS_UPSI_FAILURE_INJECTION
  	/* UPSI (Universal Panic and Stall Injection) Logic
-@@ -415,6 +427,7 @@ arm_init(
+@@ -415,6 +430,7 @@ arm_init(
  	}
  
  	check_for_failure_injection(XNU_STAGE_ARM_INIT);
@@ -1930,7 +1941,7 @@ index 6690846b06c4..de252ce12651 100644
  
  	chosen = NULL; // Force a re-lookup later on since VM addresses are not final at this point
  	dt_entry_size = 0;
-@@ -458,10 +471,13 @@ arm_init(
+@@ -458,10 +474,13 @@ arm_init(
  	}
  #endif
  
@@ -1944,7 +1955,7 @@ index 6690846b06c4..de252ce12651 100644
  	assert(boot_cpu_id >= 0 && boot_cpu_id <= ml_get_max_cpu_number());
  
  	BootCpuData.cpu_number = (unsigned short)boot_cpu_id;
-@@ -475,12 +491,15 @@ arm_init(
+@@ -475,12 +494,15 @@ arm_init(
  	CpuDataEntries[boot_cpu_id].cpu_data_paddr = (void *)((uintptr_t)(args->physBase)
  	    + ((uintptr_t)&BootCpuData
  	    - (uintptr_t)(args->virtBase)));
@@ -1960,7 +1971,7 @@ index 6690846b06c4..de252ce12651 100644
  
  	/*
  	 * Preemption is enabled for this thread so that it can lock mutexes without
-@@ -489,12 +508,16 @@ arm_init(
+@@ -489,12 +511,16 @@ arm_init(
  	 * preemption level is not really meaningful for the bootstrap thread.
  	 */
  	thread->machine.preemption_count = 0;
@@ -1977,7 +1988,7 @@ index 6690846b06c4..de252ce12651 100644
  
  	/*
  	 * Initialize the timer callout world
-@@ -502,6 +525,7 @@ arm_init(
+@@ -502,6 +528,7 @@ arm_init(
  	timer_call_init();
  
  	cpu_init();
@@ -1985,7 +1996,7 @@ index 6690846b06c4..de252ce12651 100644
  
  	processor_bootstrap();
  
-@@ -570,6 +594,7 @@ arm_init(
+@@ -570,6 +597,7 @@ arm_init(
  	pmap_first_pnum = (ppnum_t)atop(gDramBase);
  
  	arm_vm_init(xmaxmem, args);
@@ -1993,7 +2004,7 @@ index 6690846b06c4..de252ce12651 100644
  
  	if (debug_boot_arg) {
  		patch_low_glo();
-@@ -583,7 +608,9 @@ arm_init(
+@@ -583,8 +611,11 @@ arm_init(
  
  	/* Setup debugging output. */
  	const unsigned int serial_exists = serial_init();
@@ -2001,17 +2012,71 @@ index 6690846b06c4..de252ce12651 100644
  	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
 +	loader_checkpoint(19);
  	kprintf("kprintf initialized\n");
++	loader_checkpoint(60);
  
  	serialmode = 0;
-@@ -625,6 +652,7 @@ arm_init(
+ 	if (PE_parse_boot_argn("serial", &serialmode, sizeof(serialmode))) {
+@@ -624,10 +655,13 @@ arm_init(
+ 		(void)switch_to_serial_console(); /* Switch into serial mode from video console */
  		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
  	}
++	loader_checkpoint(61);
  	PE_create_console();
 +	loader_checkpoint(20);
  
  	/* setup console output */
  	PE_init_printf(FALSE);
-@@ -687,6 +715,7 @@ arm_init(
++	loader_checkpoint(50);
+ 
+ #if __arm64__
+ #if DEBUG
+@@ -636,11 +670,14 @@ arm_init(
+ #endif
+ 
+ 	cpu_machine_idle_init(TRUE);
++	loader_checkpoint(51);
+ 
+ 	PE_init_platform(TRUE, &BootCpuData);
++	loader_checkpoint(52);
+ 
+ 	/* Initialize the debug infrastructure system-wide and on the local core. */
+ 	pe_arm_debug_init_early(&BootCpuData);
++	loader_checkpoint(53);
+ 
+ #if __arm64__
+ 	extern bool cpu_config_correct;
+@@ -649,6 +686,7 @@ arm_init(
+ 	}
+ 
+ 	ml_map_cpu_pio();
++	loader_checkpoint(54);
+ 
+ #if APPLE_ARM64_ARCH_FAMILY
+ 	configure_late_apple_regs(true);
+@@ -657,6 +695,7 @@ arm_init(
+ #endif
+ 
+ 	cpu_timebase_init(TRUE);
++	loader_checkpoint(55);
+ 
+ #if KPERF
+ 	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
+@@ -664,11 +703,14 @@ arm_init(
+ #endif /* KPERF */
+ 
+ 	PE_init_cpu();
++	loader_checkpoint(56);
+ #if __arm64__
+ 	apt_msg_init();
+ 	apt_msg_init_cpu();
+ #endif
++	loader_checkpoint(57);
+ 	fiq_context_init(TRUE);
++	loader_checkpoint(58);
+ 
+ 
+ #if HIBERNATION
+@@ -687,6 +729,7 @@ arm_init(
  	 * against string vulnerabilities
  	 */
  	__stack_chk_guard &= ~(0xFFULL << 8);
@@ -2019,7 +2084,7 @@ index 6690846b06c4..de252ce12651 100644
  	machine_startup(args);
  }
  
-@@ -719,6 +748,9 @@ arm_init_cpu(
+@@ -719,6 +762,9 @@ arm_init_cpu(
  
  
  	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
@@ -2058,7 +2123,7 @@ index be2252cd21c7..34a8916d4ce3 100644
  	}
  	os_atomic_clear_exclusive();
 diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
-index 19e7e67a276c..bab86d54d004 100644
+index 19e7e67a276c..b34b05007a8a 100644
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
 @@ -93,6 +93,8 @@
@@ -2070,7 +2135,40 @@ index 19e7e67a276c..bab86d54d004 100644
  #include <san/kasan.h>
  #include <sys/cdefs.h>
  
-@@ -4952,8 +4954,8 @@ pmap_page_protect_options_with_flush_range(
+@@ -1911,6 +1913,23 @@ pmap_construct_io_pte(pmap_paddr_t paddr, pt_entry_t tmplate)
+ }
+ #endif /* XNU_MONITOR */
+ 
++/*
++ * Whether an address mapped write-combined (or real-time) gets Normal memory, or Device memory that combines and
++ * reorders -- Apple's choice for whatever is not DRAM, since xnu-10002.
++ *
++ * DRAM to this kernel (gDramBase, gDramSize: the loader's dram-base, dram-size) is the window of memory the loader
++ * gave it. The rest of the phone's RAM is the firmware's, and two things this kernel maps are in it: the screen's
++ * framebuffer and the panic log's region (/pram), both asked for write-combined. As Device memory they cannot be
++ * cleared -- bzero() does it with DC ZVA, an alignment fault on Device memory, and check_for_panic_log() clears
++ * the region before there is a console: the kernel stopped there on the 6T without a word -- and a scroll of the
++ * console reads the framebuffer one bus access a word. No device register is mapped write-combined here.
++ */
++#if defined(APPLE_ARM64_ARCH_FAMILY)
++#define pmap_wc_is_memory(pa)   is_dram_addr(pa)
++#else
++#define pmap_wc_is_memory(pa)   ((void)(pa), true)
++#endif
++
+ vm_map_address_t
+ pmap_map_bd_with_options(
+ 	vm_map_address_t virt,
+@@ -1943,7 +1962,7 @@ pmap_map_bd_with_options(
+ 
+ 	switch (options & PMAP_MAP_BD_MASK) {
+ 	case PMAP_MAP_BD_WCOMB:
+-		if (is_dram_addr(start)) {
++		if (pmap_wc_is_memory(start)) {
+ 			mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
+ 		} else {
+ #if HAS_FEAT_XS
+@@ -4952,8 +4971,8 @@ pmap_page_protect_options_with_flush_range(
  			}
  #endif
  			if (remove && (options & PMAP_OPTIONS_COMPRESSOR)) {
@@ -2081,7 +2179,25 @@ index 19e7e67a276c..bab86d54d004 100644
  			}
  			goto protect_skip_pve_pass1;
  		}
-@@ -7235,7 +7237,8 @@ void
+@@ -5988,7 +6007,7 @@ wimg_to_pte(unsigned int wimg, pmap_paddr_t pa)
+ 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
+ 		break;
+ 	case VM_WIMG_RT:
+-		if (is_dram_addr(pa)) {
++		if (pmap_wc_is_memory(pa)) {
+ 			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_RT);
+ 		} else {
+ #if HAS_FEAT_XS
+@@ -6028,7 +6047,7 @@ wimg_to_pte(unsigned int wimg, pmap_paddr_t pa)
+ 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
+ 		break;
+ 	case VM_WIMG_WCOMB:
+-		if (is_dram_addr(pa)) {
++		if (pmap_wc_is_memory(pa)) {
+ 			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
+ 		} else {
+ #if HAS_FEAT_XS
+@@ -7235,7 +7254,8 @@ void
  pmap_sync_page_attributes_phys(
  	ppnum_t pp)
  {
@@ -2091,7 +2207,7 @@ index 19e7e67a276c..bab86d54d004 100644
  }
  
  #if CONFIG_COREDUMP
-@@ -12243,7 +12246,8 @@ pmap_cs_lockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
+@@ -12243,7 +12263,8 @@ pmap_cs_lockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
  #if XNU_MONITOR
  	pmap_ppl_lockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
  #else
@@ -2101,7 +2217,7 @@ index 19e7e67a276c..bab86d54d004 100644
  #endif
  }
  
-@@ -12253,7 +12257,8 @@ pmap_cs_unlockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
+@@ -12253,7 +12274,8 @@ pmap_cs_unlockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
  #if XNU_MONITOR
  	pmap_ppl_unlockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
  #else

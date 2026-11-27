@@ -2058,6 +2058,14 @@ static void *ca_context;                /* CoreAnimation's GLContext */
 static GLfloat function_values[90][20];
 static uint8_t function_given[90];
 
+/* From inject.c, Darwin 25: CoreAnimation's context, as soon as it is made (there is no function_uniform() to learn it from) */
+void
+hakios_gl_context(void *context)
+{
+	ca_context = context;
+	say("hakios-gl: CoreAnimation's context is %p: the functions of draws are known\n", context);
+}
+
 /* From inject.c, at every GLContext::function_uniform(): the numbers a function is given, which no shader of CoreAnimation's takes. */
 void
 hakios_gl_function_values(void *context, unsigned function, unsigned index, size_t components, size_t count, const float *values)
@@ -2084,6 +2092,7 @@ hakios_gl_function_values(void *context, unsigned function, unsigned index, size
 
 /* boot-arg glplain=0: leave such draws as they are; 2: also those without a texture; 3: the two with a colour matrix drawn plainly too */
 static int plain_draws = 1;
+static uint64_t no_plain[2];            /* boot-arg glnoplain=N[,N...]: those functions' draws with no program are not drawn */
 
 /*
  * The blur whose radius varies over the picture (the filter variableBlur with a mask: the strip
@@ -3119,7 +3128,7 @@ plain_draw_begin(struct eagl *e, GLint enabled[4])
 	if (!plain_draws || (plain_draws == 1 && e->bound[0] == 0) || reads_what_it_writes(e) ||
 	    (e->colour != 0 && e->colour == e->bound[0])
 #ifdef HAKIOS_DARWIN25
-	    || function >= 90
+	    || function >= 90 || (function < 64 * 2 && (no_plain[function / 64] >> (function % 64) & 1))
 #endif
 	    ) {
 		census_draw(e, function, CENSUS_NOT_DRAWN);
@@ -4478,6 +4487,18 @@ install(void)
 			trace_corners = (GLsizei)strtol(argument + 16, NULL, 10);
 		}
 		fetch_offered = strstr(arguments, "glfetch=0") == NULL;
+		{
+			const char *list = strstr(arguments, "glnoplain=");
+
+			for (const char *at = list != NULL ? list + 10 : NULL; at != NULL && *at >= '0' && *at <= '9';) {
+				unsigned number = (unsigned)strtoul(at, (char **)&at, 10);
+
+				if (number < 128) {
+					no_plain[number / 64] |= 1ULL << (number % 64);
+				}
+				at = *at == ',' ? at + 1 : NULL;
+			}
+		}
 		group_vibrant_on = strstr(arguments, "glgroup=0") == NULL;
 		if ((argument = strstr(arguments, "gltrace_place=")) != NULL) {
 			char *end = (char *)argument + 14;

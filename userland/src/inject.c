@@ -1555,6 +1555,8 @@ watch_metallib_lookups(const char *arguments)
 #define D25_VTABLES_FROM        0x1ee1b1000UL   /* QuartzCore's tables of virtual functions lie between these */
 #define D25_VTABLES_TO          0x1ee1c3000UL
 #define D25_GL                  "/private/preboot/boot/lib/libhakios.gl.dylib"
+#define D25_GLES_FROM_IOSURFACE 0x1840cd580UL   /* CA::OGL::GLESContext::create_surface_from_iosurface(int, int, int, IOSurface *) */
+#define D25_GLES_FROM_SLOT      (0x1ee1b6648UL + 0x10 + 0x2e0)  /* ... its place in GLESContext's table of virtual functions */
 
 #define SERVER_FLAGS(server)    (*(uint32_t *)((char *)(server) + 0xb8))
 #define SERVER_DISPLAY(server)  (*(void **)((char *)(server) + 0x60))
@@ -1616,6 +1618,18 @@ gles_renderer(void *server)
 	renderer[6] = malloc(0x40000);
 	*(uint32_t *)((char *)renderer + 0x60) = 1;
 	SERVER_CONTEXT(server) = context;
+	{
+		/*
+		 * Our OpenGL ES library tells CoreAnimation's functions apart by the number its context keeps while it draws
+		 * (state at 0x10, the function at 0x10 of that, as GLContext::function_supported() reads it in 26.5 too); 16.5
+		 * handed it the context from GLContext::function_uniform(), which 26.5 has not got. Handed over here instead.
+		 */
+		void (*hand)(void *) = (void (*)(void *))dlsym(RTLD_DEFAULT, "hakios_gl_context");
+
+		if (hand != NULL) {
+			hand(context);
+		}
+	}
 	SERVER_RENDERER(server) = renderer;
 	/* the context's 28th virtual function: whether the framebuffer is compressed -- it is not */
 	((void (*)(void *, int))(*(void ***)context)[0xe0 / 8])(context, 0);
@@ -1629,6 +1643,41 @@ gles_renderer(void *server)
 	}
 	say("hakios: gl: the window server draws with OpenGL ES: context %p, renderer %p, flags %#x\n", context, (void *)renderer, flags);
 	return renderer;
+}
+
+/*
+ * CA::OGL::GLESContext::create_surface_from_iosurface(): a surface around an IOSurface (an asynchronous layer's buffer,
+ * AsynchronousItem::first_buffer(): what the Wi-Fi page of Settings opened, 27 November, ios26-66), which
+ * AsynchronousNode::retain_surface() then pushes -- and Context::push_surface() asserts the surface is on its context's
+ * list ("found != slist->end ()"), where nothing of the OpenGL ES renderer's puts it; the window server stopped. Put there
+ * on the list its flag (0x400 at 0x5c) names, 0x60 or 0x58, linked at 0x10. Context::release_surface() takes a surface off
+ * the list its flag names.
+ */
+static void *(*orig_surface_from_iosurface)(void *context, int a, int b, int c, void *iosurface);
+static unsigned surfaces_listed;
+
+static void *
+surface_from_iosurface(void *context, int a, int b, int c, void *iosurface)
+{
+	char *surface = orig_surface_from_iosurface(context, a, b, c, iosurface);
+	void **head;
+
+	if (surface == NULL) {
+		return surface;
+	}
+	/* (on the list its own flag names: with 0x400 set as well, ios26-67's lock screen lost its clock and wallpaper) */
+	head = (void **)((char *)context + ((*(uint32_t *)(surface + 0x5c) & 0x400) ? 0x60 : 0x58));
+	for (void *p = *head; p != NULL; p = *(void **)((char *)p + 0x10)) {
+		if (p == (void *)surface) {
+			return surface;
+		}
+	}
+	*(void **)(surface + 0x10) = *head;
+	*head = surface;
+	if (++surfaces_listed <= 4) {
+		say("hakios: gl: a surface made of an IOSurface (%p) is on the list of context %p\n", (void *)surface, context);
+	}
+	return surface;
 }
 
 static void
@@ -1711,6 +1760,20 @@ opengl_es_25(const char *arguments)
 		}
 	}
 	say("hakios: gl: AccelServer::renderer() replaced in %u tables of virtual functions\n", replaced);
+	{
+		uintptr_t *slot = (uintptr_t *)(D25_GLES_FROM_SLOT + slide);
+		vm_address_t page = (vm_address_t)slot & ~(vm_address_t)(vm_page_size - 1);
+
+		if (*slot != D25_GLES_FROM_IOSURFACE + slide) {
+			say("hakios: gl: GLESContext::create_surface_from_iosurface() is not where it was: left alone\n");
+		} else if (vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) ==
+		    KERN_SUCCESS) {
+			orig_surface_from_iosurface = (void *(*)(void *, int, int, int, void *))*slot;
+			*slot = (uintptr_t)surface_from_iosurface;
+			vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ);
+			say("hakios: gl: the surfaces made of IOSurfaces are put on their context's list\n");
+		}
+	}
 }
 #endif /* HAKIOS_DARWIN25 */
 

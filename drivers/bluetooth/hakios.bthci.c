@@ -283,7 +283,24 @@ vendor_answer(const uint8_t *command, unsigned length, uint8_t *answer)
 	 * on it every ten seconds ("ByteStream_NumReadBytesAvail(*pBs) >= 4"). Four bytes of 0: no features of Broadcom's.
 	 */
 	const bool features = lo == 0xda && hi == 0xfd;
-	const unsigned extra = cal ? 64 : antenna ? 16 : (lo == 0x48 && hi == 0xfd) ? 1 : features ? 4 : 0;
+	/*
+	 * 0xfce2's other sub-commands, Broadcom's "Olympic" ones (Darwin 25: 0x2a, and 0x2c, Set Extended Scan Limits): their
+	 * completion (bluetoothd +0x8ca54) takes the answer as good only with more than one byte after the status, and
+	 * bluetoothd restarted every sixteen seconds on it ("Bluetooth error - restarting", reason 3602,
+	 * BD_VSC_OLYMPIC_SET_EXT_SCAN_LIMITS). The sub-command again, and 0.
+	 */
+	/* ... and 0xfe2c, Match Table Config: _BCM_MatchTableConfigEventParser (bcm_vsc.c:470) asserts a byte, its sub-command */
+	const bool olympic_sub = (lo == 0xe2 && hi == 0xfc && !antenna) || (lo == 0x2c && hi == 0xfe);
+	/*
+	 * The rest: Darwin 25's bluetoothd reads more of the answers than 16.5's did, one parser after another asserting bytes it
+	 * did not get (0xfdda's four, 0xfe2c's one, LowPowerCoreStats' four, ...). Each gets 64 bytes of 0 after the status --
+	 * every count, flag and number in them 0 -- which a parser that reads nothing passes over. bt_vsc_bare=1: none, as before.
+	 */
+	uint32_t bare = 0;
+
+	(void)PE_parse_boot_argn("bt_vsc_bare", &bare, sizeof(bare));
+	const unsigned extra = cal ? 64 : antenna ? 16 : (lo == 0x48 && hi == 0xfd) ? 1 : features ? 4 : olympic_sub ? 2 :
+	    bare ? 0 : 64;
 
 	answer[0] = 0x04;
 	answer[1] = 0x0e;
@@ -294,6 +311,9 @@ vendor_answer(const uint8_t *command, unsigned length, uint8_t *answer)
 	answer[6] = 0x00;
 	for (unsigned i = 0; i < extra; i++) {
 		answer[7 + i] = 0x00;
+	}
+	if (olympic_sub) {
+		answer[7] = sub;
 	}
 	if (cal) {
 		answer[7] = 0x51;                       /* the table's number (the MediaTek branch's guess, which bluetoothd took) */

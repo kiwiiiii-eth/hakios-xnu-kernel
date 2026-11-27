@@ -30,13 +30,15 @@ if [ -d "$SDK" ]; then
 	mkdir -p boot26/lib boot26/bin boot26/etc
 	$E -dynamiclib -install_name /private/preboot/boot/lib/libhakios.dylib -framework CoreFoundation -framework IOKit -lobjc \
 		-o boot26/lib/libhakios.dylib src/inject.c
+	# ... and the one that goes into SpringBoard (src/inject_sb26.c: no setup assistant)
+	$E -dynamiclib -install_name /private/preboot/boot/lib/libhakios.sb.dylib -lobjc -o boot26/lib/libhakios.sb.dylib src/inject_sb26.c
 	$E -o boot26/bin/rwtouch src/rwtouch.c
 	cc -O2 -o obj/pac_lower ../tools/lower/pac_lower.c
-	for f in boot26/lib/libhakios.dylib boot26/bin/rwtouch; do
+	for f in boot26/lib/libhakios.dylib boot26/lib/libhakios.sb.dylib boot26/bin/rwtouch; do
 		/usr/bin/codesign -f -s - "$f"
 		obj/pac_lower -q "$f"
 	done
-	echo "/private/preboot/boot/lib/libhakios.dylib backboardd" > boot26/etc/inject.conf
+	echo "/private/preboot/boot/lib/libhakios.dylib backboardd;/private/preboot/boot/lib/libhakios.sb.dylib SpringBoard" > boot26/etc/inject.conf
 else
 	echo "boot-image.sh: no SDK at $SDK: no library for the window server (no touch screen)" >&2
 fi

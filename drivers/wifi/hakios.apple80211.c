@@ -74,7 +74,9 @@ type_name(int32_t type)
 		{ 50, "ASSOCIATION_STATUS" }, { 51, "COUNTRY_CODE" }, { 54, "RADIO_INFO" }, { 57, "MCS" }, { 66, "MCS_INDEX_SET" },
 		{ 79, "STA_STATS" }, { 80, "ROAM_THRESH" }, { 85, "IE" }, { 86, "SCAN_REQ_MULTIPLE" }, { 87, "BTCOEX_MODE" },
 		{ 90, "SCANCACHE_CLEAR" }, { 94, "VIRTUAL_IF_CREATE" }, { 95, "VIRTUAL_IF_DELETE" }, { 103, "CURRENT_NETWORK" },
-		{ 106, "RSSI_BOUNDS" }, { 107, "ROAM" }, { 207, "CHANNELS_INFO" }, { 254, "HW_SUPPORTED_CHANNELS" },
+		{ 106, "RSSI_BOUNDS" }, { 107, "ROAM" }, { 115, "POWER_DEBUG_INFO" }, { 207, "CHANNELS_INFO" },
+		{ 254, "HW_SUPPORTED_CHANNELS" }, { 481, "HEARTBEAT" }, { 483, "EXTERNAL_POWER_STATE" }, { 485, "APP_STATE" },
+		{ 572, "ACCESSORY_STATE" }, { 575, "OS_ELIGIBILITY" },
 	};
 
 	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -115,7 +117,7 @@ struct apple80211_channels_info {
 	uint8_t unknown_3[3600];
 } __attribute__((packed));
 
-/* SCAN_REQ (10): 5456 bytes */
+/* SCAN_REQ (10): 5456 bytes (Darwin 25: 5528, the same and an 8-byte word at 0x1590 after it, unread here) */
 struct apple80211_scan_request {
 	uint32_t version, bss_type;
 	uint8_t bssid[6], unused_0[2];
@@ -136,7 +138,12 @@ struct apple80211_scan_request {
 
 #define NOISE_FLOOR             (-95)   /* dBm: ath10k's default, the firmware gives none here */
 
-/* SCAN_RESULT (11) and CURRENT_NETWORK (103): 1164 bytes */
+/*
+ * SCAN_RESULT (11) and CURRENT_NETWORK (103): 1164 bytes; Darwin 25 asks with 2272 -- the same to the elements, which have
+ * room for 2048 bytes there (IO80211's _addScanResultToList takes a length up to 0x800), and after them words this leaves 0
+ * (of which it reads a byte at 0x8d8 and a word at 0x8dc, behind a flag). One layout for both: what is given back is cut to
+ * the length asked for, and so is the room for elements.
+ */
 struct apple80211_scan_result {
 	uint32_t version;
 	struct apple80211_channel channel;
@@ -150,8 +157,11 @@ struct apple80211_scan_result {
 	uint32_t age_ms;
 	uint8_t flags, unused_2;
 	uint16_t elements_length;               /* comes in as the room there is */
-	uint8_t elements[1024];
+	uint8_t elements[2048];
+	uint8_t unknown_0[0x8e0 - 0x88c];
 };
+
+#define SCAN_RESULT_16          1164u   /* the length Darwin userland 16.5 asks with */
 
 /* ASSOCIATE (20): 592 bytes; of what follows the key (the RSN element wifid built, flags) nothing is used */
 struct apple80211_assoc {
@@ -187,10 +197,11 @@ _Static_assert(sizeof(struct apple80211_link_changed) == 32 && offsetof(struct a
 _Static_assert(sizeof(struct apple80211_channels) == 4824, "the channel list as Darwin userland 16.5 has it");
 _Static_assert(sizeof(struct apple80211_channels_info) == 10016 && offsetof(struct apple80211_channels_info, number) == 0x32e &&
     offsetof(struct apple80211_channels_info, flags) == 0x12d0, "the channels' description as Darwin userland 16.5 has it");
+_Static_assert(sizeof(struct apple80211_scan_result) == 2272, "a scan's result as Darwin userland 25 has it");
 _Static_assert(sizeof(struct apple80211_scan_request) == 5456 && offsetof(struct apple80211_scan_request, channels) == 0x48 &&
     offsetof(struct apple80211_scan_request, flags) == 0x1308 && offsetof(struct apple80211_scan_request, names) == 0x1318,
     "the scan request as Darwin userland 16.5 has it");
-_Static_assert(sizeof(struct apple80211_scan_result) == 1164 && offsetof(struct apple80211_scan_result, ssid_length) == 0x60 &&
+_Static_assert(offsetof(struct apple80211_scan_result, ssid_length) == 0x60 &&
     offsetof(struct apple80211_scan_result, age_ms) == 0x84 && offsetof(struct apple80211_scan_result, elements) == 0x8c,
     "a scan's result as Darwin userland 16.5 has it");
 
@@ -248,13 +259,15 @@ static int
 give_network(const struct apple80211req *request, const struct hakios_sta_bss *bss)
 {
 	struct apple80211_scan_result *result = kalloc_data(sizeof(*result), Z_WAITOK | Z_ZERO);
-	unsigned room = sizeof(result->elements);
+	unsigned room = request->req_len <= offsetof(struct apple80211_scan_result, elements) ? 0 :
+	    request->req_len - (unsigned)offsetof(struct apple80211_scan_result, elements);
 	int error;
 
 	if (result == NULL) {
 		return ENOMEM;
 	}
-	if (request->req_len >= sizeof(*result) && copyin(request->req_data, result, offsetof(struct apple80211_scan_result,
+	room = room < sizeof(result->elements) ? room : sizeof(result->elements);
+	if (request->req_len >= SCAN_RESULT_16 && copyin(request->req_data, result, offsetof(struct apple80211_scan_result,
 	    elements)) == 0 && result->elements_length < room) {
 		room = result->elements_length;
 	}
@@ -507,8 +520,8 @@ set_scan(const struct apple80211req *request, char *said, size_t said_size)
 	unsigned unknown = 0;
 	int error;
 
-	if (request->req_len != sizeof(*asked)) {
-		return EINVAL;
+	if (request->req_len != sizeof(*asked) && request->req_len != 5528) {
+		return EINVAL;                  /* (5528: Darwin 25's, of which the first 5456 bytes are read) */
 	}
 	if (!hakios_sta_present()) {
 		return EBUSY;                   /* (the radio is still being brought up: the framework tries again) */
@@ -634,6 +647,12 @@ set(const struct apple80211req *request, char *said, size_t said_size)
 	}
 	case 10:
 		return set_scan(request, said, said_size);
+	case 481:                               /* Darwin 25: HEARTBEAT, wifid's sign of life */
+	case 483:                               /* EXTERNAL_POWER_STATE */
+	case 485:                               /* APP_STATE */
+	case 572:                               /* ACCESSORY_STATE */
+	case 575:                               /* OS_ELIGIBILITY: things a driver is told; taken and nothing done */
+		return 0;
 	default:
 		return EOPNOTSUPP;
 	}

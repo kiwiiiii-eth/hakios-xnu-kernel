@@ -260,6 +260,9 @@ hakios_wifi_init(void)
 void
 hakios_wifi_stop(void)
 {
+	extern void hakios_apple80211_summary(void);
+
+	hakios_apple80211_summary();            /* (what wifid asked in this run: the end of a long run's log keeps it) */
 	if (wifi10_started) {
 		hakios_lx_stop();
 		wifi10_started = false;

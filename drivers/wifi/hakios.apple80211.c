@@ -31,6 +31,7 @@
  * outcome as one of Apple80211's result numbers, which the framework turns into its errors:
  * 1 success, 21 "invalid PMK" (a wrong passphrase), 9 a timeout, 2 anything else.
  */
+#include <kern/clock.h>
 #include <kern/kalloc.h>
 #include <kern/locks.h>
 #include <libkern/libkern.h>
@@ -236,6 +237,7 @@ static const char interface_name[16] = "en0";   /* (drivers/net/hakios.net.c mak
 static LCK_GRP_DECLARE(apple80211_lock_group, "hakios-apple80211");
 static LCK_MTX_DECLARE(apple80211_lock, &apple80211_lock_group);
 static unsigned result_next;                    /* which of what the last scan heard a SCAN_RESULT request gets next */
+static char last_join[200];                     /* the last join asked for, as said (lengths and kinds only), and its answer */
 static uint32_t join_result;                    /* of the last join asked for: 0 while it runs, then Apple80211's number */
 
 /* ---- channels ---------------------------------------------------------------------------------------- */
@@ -640,6 +642,7 @@ set_join(const struct apple80211req *request, char *said, size_t said_size)
 	snprintf(said, said_size, " (a join: a name of %u bytes, %s access point, authentication %#x/%#x, a key of %u bytes of kind %u)",
 	    asked->ssid_length, asked->bssid[0] | asked->bssid[1] | asked->bssid[2] | asked->bssid[3] | asked->bssid[4] |
 	    asked->bssid[5] ? "a given" : "any", asked->auth_lower, asked->auth_upper, asked->key_length, asked->key_cipher);
+	strlcpy(last_join, said, sizeof(last_join));
 	if (asked->ssid_length == 0 || asked->ssid_length > sizeof(what->ssid)) {
 		error = EINVAL;
 		goto out;
@@ -803,12 +806,29 @@ static struct {
 } kinds[96];
 static unsigned kind_count;
 
+/* the last requests in their order, less those asked over and over (CURRENT_NETWORK, SCAN_RESULT, ...): said at the end */
+static struct {
+	uint64_t ms;
+	int32_t type;
+	bool set;
+	int error;
+} order[32];
+static unsigned order_next;
+
 static void
 note(const struct apple80211req *request, bool is_set, int error)
 {
 	unsigned i;
+	int32_t t = request->req_type;
 
 	lck_mtx_lock(&apple80211_lock);
+	if (t != 103 && t != 11 && t != 254 && t != 19 && t != 483 && t != 481 && t != 115 && t != 383 && t != 51) {
+		uint64_t now;
+
+		absolutetime_to_nanoseconds(mach_absolute_time(), &now);
+		order[order_next % 32] = (typeof(order[0])) { .ms = now / 1000000, .type = t, .set = is_set, .error = error };
+		order_next++;
+	}
 	for (i = 0; i < kind_count && !(kinds[i].type == request->req_type && kinds[i].set == is_set); i++) {
 	}
 	if (i < sizeof(kinds) / sizeof(kinds[0])) {
@@ -831,6 +851,13 @@ hakios_apple80211_summary(void)
 		return;
 	}
 	said = true;
+	for (unsigned k = order_next > 32 ? order_next - 32 : 0; k < order_next; k++) {
+		printf("apple80211: in this run, in order: %llu ms %s %d (%s): %d\n", order[k % 32].ms, order[k % 32].set ? "set" : "get",
+		    order[k % 32].type, type_name(order[k % 32].type), order[k % 32].error);
+	}
+	if (last_join[0] != 0) {
+		printf("apple80211: in this run the last join asked for:%s; it ended %u (Apple80211's result)\n", last_join, join_result);
+	}
 	for (unsigned i = 0; i < kind_count; i++) {
 		printf("apple80211: in this run: %s %d (%s) %u times, answered %u times%s", kinds[i].set ? "set" : "get", kinds[i].type,
 		    type_name(kinds[i].type), kinds[i].times, kinds[i].answered, kinds[i].last_error == 0 ? "\n" : "");

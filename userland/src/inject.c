@@ -255,8 +255,8 @@ say_the_fault(int signal_number, siginfo_t *info, void *context_in)
 	uintptr_t pc = 0, lr = 0;
 
 	if (context != NULL && context->uc_mcontext != NULL) {
-		pc = (uintptr_t)context->uc_mcontext->__ss.__pc;
-		lr = (uintptr_t)context->uc_mcontext->__ss.__lr;
+		pc = (uintptr_t)arm_thread_state64_get_pc(context->uc_mcontext->__ss);
+		lr = (uintptr_t)arm_thread_state64_get_lr(context->uc_mcontext->__ss);
 	}
 	/*
 	 * And who called, by walking the frame pointers: on arm64 each frame holds the previous one
@@ -265,7 +265,7 @@ say_the_fault(int signal_number, siginfo_t *info, void *context_in)
 	 */
 	char frames[8 * 20 + 1] = "";
 	size_t used = 0;
-	uintptr_t fp = context != NULL && context->uc_mcontext != NULL ? (uintptr_t)context->uc_mcontext->__ss.__fp : 0;
+	uintptr_t fp = context != NULL && context->uc_mcontext != NULL ? (uintptr_t)arm_thread_state64_get_fp(context->uc_mcontext->__ss) : 0;
 
 	for (unsigned i = 0; i < 8 && fp != 0 && (fp & 7) == 0; i++) {
 		uintptr_t next = ((uintptr_t *)fp)[0], ret = ((uintptr_t *)fp)[1];
@@ -1587,9 +1587,16 @@ hakios_init(void)
 		if (strstr(arguments, "metal_watch=1") != NULL || strstr(arguments, "ca_metallib=") != NULL) {
 			watch_metallib_lookups(arguments);
 		}
+#ifndef HAKIOS_DARWIN25
+		/*
+		 * (Darwin 25, userland 26: none of these three. They reach into QuartzCore and BackBoardServices by addresses
+		 * and selectors of 16.5's, and 26's window server draws with its software renderer and reaches the panel
+		 * without them; what it lacks is the touch screen and the buttons, below, which IOKit's own functions give.)
+		 */
 		opengl_es();
 		window_server_fixes();
 		brightness_bridge();            /* (the OnePlus 6T: the slider to the panel, through kern.hakios.brightness) */
+#endif
 		/*
 		 * brightness_fixes() is not used for now: with it backboardd no longer took our touch
 		 * screen service for its own ("still waiting for a main screen digitizer"), whether the
@@ -1598,7 +1605,10 @@ hakios_init(void)
 		 * survive; not tried again since, and until it is, the five seconds stay.)
 		 */
 		input_start();
+#ifndef HAKIOS_DARWIN25
 	} else if (strncmp(name, "containermanagerd", 17) == 0) {
+		/* (Darwin 25 has its personas: usermanagerd makes them, tools/ios26's init26 has it do so) */
 		container_manager_fixes();
+#endif
 	}
 }

@@ -18,6 +18,28 @@ $CC -c libmini/start.S -o obj/start.o
 $CC -Ilibmini $LD -o obj/init26 src/init26.c obj/mini.o obj/start.o
 rm -rf boot26 && mkdir -p boot26/sbin boot26/dev boot26/flash
 cp obj/init26 boot26/sbin/launchd
+# The library that goes into the window server (userland/src/inject.c, of which Darwin 25 takes the touch screen and
+# the buttons: -DHAKIOS_DARWIN25), and rwtouch, which plays touches into the same queue: built arm64e as the system's
+# own programs are, against the 16.5 SDK the other line builds with (IOKit's headers are in it; SDK=...), signed ad hoc
+# and lowered like them (tools/lower/pac_lower). The root is this image at /private/preboot/boot once init26 has changed
+# roots: that is where the kernel is told to find the library (etc/inject.conf -> kern.exec_inject).
+#   TOUCH="STEP..."   a job that runs `rwtouch STEP...` (userland/src/rwtouch.c): TOUCH="wait 150 swipe 0.5 0.99 0.5 0.4 250"
+SDK=${SDK:-$(cd ../.. && pwd)/hakios-xnu-kernel/xnu-deps/theos-mac/sdks-git/iPhoneOS16.5.sdk}
+if [ -d "$SDK" ]; then
+	E="/usr/bin/xcrun clang -target arm64e-apple-ios16.5 -isysroot $SDK -O1 -DHAKIOS_DARWIN25 -Wno-unused-function"
+	mkdir -p boot26/lib boot26/bin boot26/etc
+	$E -dynamiclib -install_name /private/preboot/boot/lib/libhakios.dylib -framework CoreFoundation -framework IOKit -lobjc \
+		-o boot26/lib/libhakios.dylib src/inject.c
+	$E -o boot26/bin/rwtouch src/rwtouch.c
+	cc -O2 -o obj/pac_lower ../tools/lower/pac_lower.c
+	for f in boot26/lib/libhakios.dylib boot26/bin/rwtouch; do
+		/usr/bin/codesign -f -s - "$f"
+		obj/pac_lower -q "$f"
+	done
+	echo "/private/preboot/boot/lib/libhakios.dylib backboardd" > boot26/etc/inject.conf
+else
+	echo "boot-image.sh: no SDK at $SDK: no library for the window server (no touch screen)" >&2
+fi
 # what init26 puts into the empty /private/var (var_files() there): userland/var's settings, and the note that this
 # build's data has been migrated, under the build of the system that is started (ROOT's; 16.5's file names its own)
 mkdir -p boot26/var && cp -R var/ boot26/var/
@@ -43,6 +65,15 @@ if [ -n "$ROOT" ] && [ -z "${ALL_JOBS:-}" ]; then
 	for f in "$ROOT"/System/Library/xpc/*; do
 		case $f in */launchd.plist|*/launchd.plist.sig) ;; *) cp "$f" boot26/xpc/ ;; esac
 	done
+	if [ -n "${TOUCH:-}" ] && [ -f boot26/bin/rwtouch ]; then
+		python3 - $TOUCH <<'PY'
+import plistlib, sys
+job = {'Label': 'com.hakios.rwtouch', 'ProgramArguments': ['/private/preboot/boot/bin/rwtouch'] + sys.argv[1:],
+       'RunAtLoad': True, 'StandardErrorPath': '/dev/console', 'StandardOutPath': '/dev/console'}
+plistlib.dump(job, open('boot26/LaunchDaemons/com.hakios.rwtouch.plist', 'wb'), fmt=plistlib.FMT_BINARY)
+PY
+		echo "  a job that plays touches: rwtouch $TOUCH"
+	fi
 fi
 python3 ../tools/apfs/mkapfs.py -o boot26.apfs Boot=boot26 > /dev/null
 ls -l boot26.apfs

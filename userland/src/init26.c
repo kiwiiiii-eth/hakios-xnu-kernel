@@ -229,6 +229,31 @@ main(int argc, char **argv, char **envp)
 		bind_dir("/xpc", "/flash/System/Library/xpc");
 		printf("init26: this image's launchd jobs, not the volume's\n");
 	}
+	{
+		/*
+		 * The programs that are started with a library of this image's in them (kern.exec_inject: "LIBRARY NAME ...",
+		 * groups parted by ";" -- bsd/kern/kern_exec.c), as this image's /etc/inject.conf has them
+		 * (tools/ios26/boot-image.sh): the window server with the one that gives it the phone's touch screen.
+		 */
+		static char conf[512];
+		int in = open("/etc/inject.conf", 0, 0);
+		ssize_t n = in >= 0 ? read(in, conf, sizeof(conf) - 1) : 0;
+
+		if (in >= 0) {
+			close(in);
+		}
+		while (n > 0 && (conf[n - 1] == '\n' || conf[n - 1] == ' ')) {
+			n--;
+		}
+		if (n > 0) {
+			conf[n] = 0;
+			if (sysctlbyname("kern.exec_inject", NULL, NULL, conf, (size_t)n + 1) != 0) {
+				printf("init26: kern.exec_inject: %s\n", strerror(errno));
+			} else {
+				printf("init26: libraries of this image's in: %s\n", conf);
+			}
+		}
+	}
 	if (sysctlbyname("kern.hakios_switch_root", NULL, NULL, "/flash private/preboot/boot", 28) != 0) {
 		fail("make it the root");
 	}

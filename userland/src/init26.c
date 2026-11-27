@@ -118,6 +118,9 @@ static const struct { int mode, uid; const char *path; } var_dirs[] = {
 	{ 0755, 0, "wireless" }, { 0755, 0, "wireless/Library" }, { 0755, 0, "hardware" }, { 0755, 0, "lib" },
 	{ 0755, 0, "local" }, { 0755, 0, "msgs" }, { 0755, 0, "audit" }, { 0755, 0, "backups" }, { 0755, 0, "cache" },
 	{ 0755, 0, "spool" }, { 0755, 0, "staged_system_apps" }, { 0755, 0, "personalized_factory" },
+	/* (the keychain: /Library/Keychains is a link to it; without it securityd's mkpath_np failed, EIO, and bluetoothd
+	 * stopped every ten seconds on an identity it could not keep, "Bluetooth error - restarting", reason 130) */
+	{ 0755, 0, "Keychains" },
 };
 
 /*
@@ -296,6 +299,18 @@ main(int argc, char **argv, char **envp)
 				printf("init26: /flash/fw: %s\n", strerror(errno));
 			}
 			bind_dir("/fw", "/flash/fw");
+		}
+		/*
+		 * ... and the audio server's plug-in of this image's (userland/src/audio_plugin.c: the speaker, the microphone,
+		 * the motor as an iPhone's devices), among the volume's in /System/Library/Audio/Plug-Ins/HAL, the same way.
+		 */
+		if (stat("/hal/HakiosAudio.driver", &st) == 0) {
+			static const char hal[] = "/flash/System/Library/Audio/Plug-Ins/HAL/HakiosAudio.driver";
+
+			if (stat(hal, &st) != 0 && sysctlbyname("kern.apfs_synthetic", NULL, NULL, hal, sizeof(hal) - 1) != 0) {
+				printf("init26: %s: %s\n", hal, strerror(errno));
+			}
+			bind_dir("/hal/HakiosAudio.driver", hal);
 		}
 	}
 	{

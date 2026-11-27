@@ -34,12 +34,28 @@ if [ -d "$SDK" ]; then
 	# ... and the one that goes into SpringBoard (src/inject_sb26.c: no setup assistant)
 	$E -dynamiclib -install_name /private/preboot/boot/lib/libhakios.sb.dylib -lobjc -o boot26/lib/libhakios.sb.dylib src/inject_sb26.c
 	$E -o boot26/bin/rwtouch src/rwtouch.c
+	# ... and the one for BlueTool and bluetoothd (src/inject_bt.c, as the other line has it: BlueTool's service is ours,
+	# the kernel has brought the WCN3990 up; its bluetoothd change checks its bytes and leaves Darwin 25's alone)
+	$E -dynamiclib -install_name /private/preboot/boot/lib/libhakios.bt.dylib -o boot26/lib/libhakios.bt.dylib src/inject_bt.c
+	# ... and with AUDIO=1 the audio server's plug-in (src/audio_plugin.c, the other line's HakiosAudio.driver: the speaker,
+	# the microphone and the motor as an iPhone's devices), which init26 puts among the volume's in
+	# /System/Library/Audio/Plug-Ins/HAL; the kernel plays and listens with boot-args sound=4 mic=4
+	rm -rf boot26/hal
+	if [ -n "${AUDIO:-}" ]; then
+		mkdir -p boot26/hal/HakiosAudio.driver
+		$E -bundle -framework CoreFoundation -o boot26/hal/HakiosAudio.driver/HakiosAudio src/audio_plugin.c
+		cp src/audio_plugin.plist boot26/hal/HakiosAudio.driver/Info.plist
+	fi
+	# ... and wifijoin (src/wifijoin.c): a network joined by name, as Settings would (RUN="/private/preboot/boot/bin/wifijoin 200 NAME")
+	$E -framework CoreFoundation -F$SDK/System/Library/PrivateFrameworks -framework MobileWiFi -o boot26/bin/wifijoin src/wifijoin.c
 	cc -O2 -o obj/pac_lower ../tools/lower/pac_lower.c
-	for f in boot26/lib/libhakios.dylib boot26/lib/libhakios.sb.dylib boot26/bin/rwtouch; do
+	for f in boot26/lib/libhakios.dylib boot26/lib/libhakios.sb.dylib boot26/lib/libhakios.bt.dylib boot26/bin/rwtouch \
+	    ${AUDIO:+boot26/hal/HakiosAudio.driver/HakiosAudio}; do
 		/usr/bin/codesign -f -s - "$f"
 		obj/pac_lower -q "$f"
 	done
-	echo "/private/preboot/boot/lib/libhakios.dylib backboardd;/private/preboot/boot/lib/libhakios.sb.dylib SpringBoard" > boot26/etc/inject.conf
+	/usr/bin/codesign -f -s - --entitlements src/wifijoin.entitlements boot26/bin/wifijoin && obj/pac_lower -q boot26/bin/wifijoin
+	echo "/private/preboot/boot/lib/libhakios.dylib backboardd;/private/preboot/boot/lib/libhakios.sb.dylib SpringBoard;/private/preboot/boot/lib/libhakios.bt.dylib BlueTool bluetoothd" > boot26/etc/inject.conf
 	# Mesa, when it has been built for these programs (MESA_TARGET=arm64e-apple-ios16.5 MESA_PREFIX=/private/preboot/boot
 	# tools/mk-mesa.sh): the OpenGL ES library that draws with the phone's GPU, and gl_test, a triangle by it
 	# (userland/src/gl_test.c). RUN="PROGRAM ARGUMENT..." is a job that runs one of this image's programs as the system starts.
@@ -110,6 +126,23 @@ mkdir -p boot26/var && cp -R var/ boot26/var/
 A=boot26/var/mobile/Library/Preferences/com.apple.Accessibility.plist
 /usr/libexec/PlistBuddy -c 'Add :ReduceMotionEnabled bool true' -c 'Add :EnhancedBackgroundContrastEnabled bool true' \
 	-c 'Add :ReduceMotionAutoplayMessagesEffectsEnabled bool false' "$A" >/dev/null
+# WIFI_OPEN="NAME ...": open networks (no passphrase) wifid knows from the start and joins by itself, as one that has
+# been joined before: /private/var/preferences/com.apple.wifi.known-networks.plist, the shape Darwin 25's WiFiPolicy
+# keeps them in. (Names only, and only from the environment: never a network's key, never in the repository.)
+if [ -n "${WIFI_OPEN:-}" ]; then
+	mkdir -p boot26/var/preferences
+	python3 - boot26/var/preferences/com.apple.wifi.known-networks.plist $WIFI_OPEN <<'PY'
+import plistlib, sys, datetime
+now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+known = {}
+for name in sys.argv[2:]:
+    known['wifi.network.ssid.' + name] = {
+        'SSID': name.encode(), 'SupportedSecurityTypes': 'Open', 'AddReason': 'Manual', 'AddedAt': now,
+        'JoinedByUserAt': now, 'JoinedBySystemAt': now, 'UpdatedAt': now, '__OSSpecific__': {}}
+plistlib.dump(known, open(sys.argv[1], 'wb'), fmt=plistlib.FMT_BINARY)
+PY
+	echo "  wifid knows $(echo $WIFI_OPEN | wc -w | tr -d ' ') open network(s)"
+fi
 if [ -n "$ROOT" ]; then
 	BUILD=$(/usr/libexec/PlistBuddy -c 'Print :ProductBuildVersion' "$ROOT/System/Library/CoreServices/SystemVersion.plist")
 	M=boot26/var/mobile/Library/Preferences/com.apple.migration.plist

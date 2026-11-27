@@ -101,6 +101,21 @@ dump_class(const char *class_name)
 	free(methods);
 }
 
+/*
+ * -[LCSCaptureApplicationMonitor _beginObservingMetadataChanges]: watching the applications' records for changes, for the lock
+ * screen's camera extensions. When one changes it gathers each capture extension's bundle and its container's into a set,
+ * and an extension here has no container's identifier (nil: the applications of a first start are not installed, only named
+ * -- init26): -[NSMutableSet addObject:nil] threw, and SpringBoard stopped (ios26-38, 43, 50, 54, 55: about 3 minutes after
+ * the start; the second SpringBoard drew the home screen without its icons). Not watched: the lock screen's camera extensions
+ * are as they were found when SpringBoard started.
+ */
+static void
+no_metadata_watch(id self, SEL selector)
+{
+	(void)self;
+	(void)selector;
+}
+
 __attribute__((constructor))
 static void
 hakios_sb_init(void)
@@ -114,6 +129,9 @@ hakios_sb_init(void)
 	    "_setSetupRequiredReason:", (IMP)set_setup_required_reason);
 	say("hakios: SpringBoard: %s\n", original_set_setup_required_reason != NULL ? "no setup assistant" :
 	    "the setup assistant is as it was");
+	say("hakios: SpringBoard: %s\n", replace_method("LCSCaptureApplicationMonitor", "_beginObservingMetadataChanges",
+	    (IMP)no_metadata_watch) != NULL ? "the lock screen's capture extensions are not watched for changes" :
+	    "LCSCaptureApplicationMonitor not found: its watch is as it was");
 	{
 		Class lockdown = objc_getClass("SBLockdownManager");
 		Ivar state = lockdown != NULL ? class_getInstanceVariable(lockdown, "_state") : NULL;

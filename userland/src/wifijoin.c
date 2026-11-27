@@ -87,7 +87,17 @@ say_current(CFRunLoopTimerRef timer, void *info)
 static void
 joined(WiFiDeviceRef device, WiFiNetworkRef network, CFDictionaryRef info, int error, void *context)
 {
+	static int joins;
+
 	printf("wifijoin: the join is over: %d%s\n", error, error == 0 ? " (joined)" : "");
+	if (error != 0 && ++joins < 3) {
+		/* (an access point that did not answer, or a weak one: a scan again, and the best one heard of that name then) */
+		printf("wifijoin: again in 5 s\n");
+		sleep(5);
+		tries = 0;
+		scan(device);
+		return;
+	}
 	CFRunLoopTimerRef timer = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + 5, 5, 0, 0, say_current,
 	    &(CFRunLoopTimerContext){ .info = (void *)device });
 	CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, kCFRunLoopDefaultMode);

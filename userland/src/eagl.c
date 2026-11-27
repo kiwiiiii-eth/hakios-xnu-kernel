@@ -3465,11 +3465,19 @@ my_glFinishObjectAPPLE(void *context, GLenum object, GLint name)
 	EAGL_LEAVE(e, 0xeb8);
 }
 
+#ifdef HAKIOS_DARWIN25
+static void untrack_display_surface(const void *texture_name, void *return_address);
+#endif
 static void
 my_glDeleteTextures(void *context, GLsizei n, const GLuint *textures)
 {
 	struct eagl *e = context;
 
+#ifdef HAKIOS_DARWIN25
+	if (n == 1) {
+		untrack_display_surface(textures, __builtin_return_address(0));
+	}
+#endif
 	EAGL_ENTER(e, 0x1e0);
 	clear_now(e);
 	for (GLsizei i = 0; i < n; i++) {
@@ -4200,6 +4208,7 @@ my_texImageIOSurface(id self, SEL selector, IOSurfaceRef surface, unsigned long 
 #define D25_CACHE_BASE          0x180000000UL
 
 void *hakios_attach_x19, *hakios_attach_x21, *hakios_attach_lr;
+static unsigned tracked;
 
 static void
 track_display_surface(void)
@@ -4214,8 +4223,13 @@ track_display_surface(void)
 	    *(void **)(surface + 0xa0) != (void *)context) {
 		return;
 	}
-	/* (the list of a surface without bit 0x400 in its flags at 0x5c: the context's at 0x58, linked at 0x10 of each) */
-	head = (void **)(context + ((*(uint32_t *)(surface + 0x5c) & 0x400) ? 0x60 : 0x58));
+	/*
+	 * As CA::OGL::MetalContext::get_surface() does for its own: flag 0x400 at 0x5c -- a surface that stays, on the
+	 * context's list at 0x60 and not on that of a frame's passing ones at 0x58, which is expected empty when a frame
+	 * is done ("Transient surfaces left over after rendering complete") -- and on the list, linked at 0x10 of each.
+	 */
+	*(uint32_t *)(surface + 0x5c) |= 0x400;
+	head = (void **)(context + 0x60);
 	for (void *p = *head; p != NULL; p = *(void **)((char *)p + 0x10)) {
 		if (p == (void *)surface) {
 			return;
@@ -4223,7 +4237,41 @@ track_display_surface(void)
 	}
 	*(void **)(surface + 0x10) = *head;
 	*head = surface;
-	say("hakios-gl: the screen's surface %p is on the list of context %p\n", (void *)surface, (void *)context);
+	if (++tracked <= 4) {
+		say("hakios-gl: the screen's surface %p is on the list of context %p\n", (void *)surface, (void *)context);
+	}
+}
+
+/*
+ * ... and off it again when the surface goes: CA::OGL::GLESContext::finalize_surface() deletes its texture -- the
+ * name is in the surface, at 0xac, and that is how the surface is known here (my_glDeleteTextures) -- and frees it
+ * without a look at the list, where the next walk would then read freed memory.
+ */
+#define D25_FINALIZE_RETURN     0x1840ccd48UL   /* in finalize_surface(), after glDeleteTextures(1, &surface->texture) */
+
+static void
+untrack_display_surface(const void *texture_name, void *return_address)
+{
+	extern const void *_dyld_get_shared_cache_range(size_t *length);
+	size_t length = 0;
+	uintptr_t slide_now = (uintptr_t)_dyld_get_shared_cache_range(&length) - D25_CACHE_BASE;
+	char *surface = (char *)(uintptr_t)texture_name - 0xac, *context;
+
+	if ((uintptr_t)return_address != D25_FINALIZE_RETURN + slide_now) {
+		return;
+	}
+	context = *(char **)(surface + 0xa0);
+	if (context == NULL) {
+		return;
+	}
+	for (void **link = (void **)(context + ((*(uint32_t *)(surface + 0x5c) & 0x400) ? 0x60 : 0x58)); *link != NULL;
+	    link = (void **)((char *)*link + 0x10)) {
+		if (*link == (void *)surface) {
+			*link = *(void **)(surface + 0x10);
+			*(void **)(surface + 0x10) = NULL;
+			break;
+		}
+	}
 }
 #endif
 

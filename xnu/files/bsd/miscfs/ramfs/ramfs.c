@@ -933,6 +933,89 @@ out:
 	return error;
 }
 
+/*
+ * renamex_np(), renameatx_np(): RENAME_EXCL -- the new name must not be there -- and RENAME_SWAP, the two names
+ * changing places in one step. Foundation writes a file "atomically" by the second when the file is already there
+ * (-[NSData writeToFile:options:] with NSDataWritingAtomic), and Darwin 25's usermanagerd keeps the personas that
+ * way: without it the second save of /private/var/keybags/persona.kb failed with ENOTSUP, the daemon found the
+ * user's personas missing from the file, and every program that asked for them got none.
+ */
+static int
+ramfs_renamex(struct vnop_renamex_args *ap)
+{
+	struct ramfs_node *fdir = RAMFS_NODE(ap->a_fdvp), *tdir = RAMFS_NODE(ap->a_tdvp);
+	struct ramfs_node *node = RAMFS_NODE(ap->a_fvp), *other;
+	struct ramfs_mount *rm = node->rn_mount;
+	struct componentname *fcnp = ap->a_fcnp, *tcnp = ap->a_tcnp;
+	struct ramfs_dirent *fde, *tde;
+	int error = 0;
+
+	if (ap->a_flags == VFS_RENAME_EXCL) {
+		struct vnop_rename_args plain = {
+			.a_desc = &vnop_rename_desc, .a_fdvp = ap->a_fdvp, .a_fvp = ap->a_fvp, .a_fcnp = fcnp,
+			.a_tdvp = ap->a_tdvp, .a_tvp = ap->a_tvp, .a_tcnp = tcnp, .a_context = ap->a_context,
+		};
+
+		/* (the lookup of the new name found nothing or the system call has refused already; a name made since
+		 * then is looked for once more, under the lock that rename takes next: a narrow window, and EEXIST) */
+		lck_mtx_lock(&rm->rm_lock);
+		tde = ramfs_dir_find(tdir, tcnp->cn_nameptr, (size_t)tcnp->cn_namelen);
+		lck_mtx_unlock(&rm->rm_lock);
+		return tde != NULL ? EEXIST : ramfs_rename(&plain);
+	}
+	if (ap->a_flags != VFS_RENAME_SWAP) {
+		return ENOTSUP;
+	}
+	if (ap->a_tvp == NULLVP) {
+		return ENOENT;
+	}
+	other = RAMFS_NODE(ap->a_tvp);
+
+	lck_mtx_lock(&rm->rm_lock);
+	fde = ramfs_dir_find(fdir, fcnp->cn_nameptr, (size_t)fcnp->cn_namelen);
+	tde = ramfs_dir_find(tdir, tcnp->cn_nameptr, (size_t)tcnp->cn_namelen);
+	if (fde == NULL || tde == NULL || fde->rd_node != node || tde->rd_node != other) {
+		error = ENOENT;
+	} else if (node != other) {
+		/* neither directory may end up below itself */
+		for (struct ramfs_node *up = tdir; up != NULL && !error; up = (up == rm->rm_root) ? NULL : up->rn_parent) {
+			error = (up == node) ? EINVAL : 0;
+		}
+		for (struct ramfs_node *up = fdir; up != NULL && !error; up = (up == rm->rm_root) ? NULL : up->rn_parent) {
+			error = (up == other) ? EINVAL : 0;
+		}
+		if (!error) {
+			fde->rd_node = other;
+			tde->rd_node = node;
+			if (fdir != tdir) {
+				/* (a directory counts as a link of its parent's) */
+				if (node->rn_type == VDIR) {
+					fdir->rn_nlink--;
+					tdir->rn_nlink++;
+					node->rn_parent = tdir;
+				}
+				if (other->rn_type == VDIR) {
+					tdir->rn_nlink--;
+					fdir->rn_nlink++;
+					other->rn_parent = fdir;
+				}
+			}
+			ramfs_touch(node, false);
+			ramfs_touch(other, false);
+			ramfs_touch(fdir, true);
+			ramfs_touch(tdir, true);
+		}
+	}
+	lck_mtx_unlock(&rm->rm_lock);
+	if (!error && node != other) {
+		vnode_update_identity(ap->a_fvp, ap->a_tdvp, tcnp->cn_nameptr, tcnp->cn_namelen, tcnp->cn_hash,
+		    VNODE_UPDATE_PARENT | VNODE_UPDATE_NAME);
+		vnode_update_identity(ap->a_tvp, ap->a_fdvp, fcnp->cn_nameptr, fcnp->cn_namelen, fcnp->cn_hash,
+		    VNODE_UPDATE_PARENT | VNODE_UPDATE_NAME);
+	}
+	return error;
+}
+
 static int
 ramfs_open(__unused struct vnop_open_args *ap)
 {
@@ -1685,6 +1768,7 @@ const struct vnodeopv_entry_desc ramfs_vnodeop_entries[] = {
 	{ .opve_op = &vnop_remove_desc, .opve_impl = (VOPFUNC)ramfs_remove },
 	{ .opve_op = &vnop_link_desc, .opve_impl = (VOPFUNC)ramfs_link },
 	{ .opve_op = &vnop_rename_desc, .opve_impl = (VOPFUNC)ramfs_rename },
+	{ .opve_op = &vnop_renamex_desc, .opve_impl = (VOPFUNC)ramfs_renamex },
 	{ .opve_op = &vnop_mkdir_desc, .opve_impl = (VOPFUNC)ramfs_mkdir },
 	{ .opve_op = &vnop_rmdir_desc, .opve_impl = (VOPFUNC)ramfs_rmdir },
 	{ .opve_op = &vnop_symlink_desc, .opve_impl = (VOPFUNC)ramfs_symlink },
@@ -1879,6 +1963,8 @@ ramfs_vfs_getattr(mount_t mp, struct vfs_attr *fsap, __unused vfs_context_t ctx)
 		    VOL_CAP_INT_ADVLOCK |
 		    VOL_CAP_INT_FLOCK |
 		    VOL_CAP_INT_EXTENDED_SECURITY |
+		    VOL_CAP_INT_RENAME_SWAP |
+		    VOL_CAP_INT_RENAME_EXCL |
 		    VOL_CAP_INT_EXTENDED_ATTR;
 		cap->valid[VOL_CAPABILITIES_FORMAT] =
 		    VOL_CAP_FMT_PERSISTENTOBJECTIDS |
@@ -1911,6 +1997,8 @@ ramfs_vfs_getattr(mount_t mp, struct vfs_attr *fsap, __unused vfs_context_t ctx)
 		    VOL_CAP_INT_USERACCESS |
 		    VOL_CAP_INT_MANLOCK |
 		    VOL_CAP_INT_EXTENDED_ATTR |
+		    VOL_CAP_INT_RENAME_SWAP |
+		    VOL_CAP_INT_RENAME_EXCL |
 		    VOL_CAP_INT_NAMEDSTREAMS;
 		VFSATTR_SET_SUPPORTED(fsap, f_capabilities);
 	}

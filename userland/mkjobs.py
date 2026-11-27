@@ -249,6 +249,8 @@ if '--root-volume' in args:
 args = [a for a in args if a != '--rest']
 src_root, dest, labels = args[0], args[1], args[2:]
 oslog = os.environ.get('OSLOG', '').split()
+# ... and those of OSLOG_DEBUG say the lines below the default level as well (OS_ACTIVITY_MODE=debug)
+oslog_debug = os.environ.get('OSLOG_DEBUG', '').split()
 src = f'{src_root}/System/Library/LaunchDaemons'
 # A program in a cryptex -- on a device a volume of its own, grafted at /System/Cryptexes/NAME (eight of
 # Safari's daemons are in the App cryptex) -- is looked for where unpack.sh unpacked that cryptex, beside
@@ -285,6 +287,8 @@ for label in labels:
     job.pop('_LimitLoadToDeviceTree', None)
     if 'all' in oslog or label in oslog:
         job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
+    if label in oslog_debug:
+        job.setdefault('EnvironmentVariables', {}).update(OS_ACTIVITY_DT_MODE='YES', OS_ACTIVITY_MODE='debug')
     with open(f'{dest}/{label}.plist', 'wb') as f:
         plistlib.dump(job, f, fmt=plistlib.FMT_BINARY)
     program = job.get('Program') or job['ProgramArguments'][0]
@@ -312,6 +316,8 @@ if rest:
         job['StandardErrorPath'] = '/dev/console'
         if label in oslog:
             job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
+        if label in oslog_debug:
+            job.setdefault('EnvironmentVariables', {}).update(OS_ACTIVITY_DT_MODE='YES', OS_ACTIVITY_MODE='debug')
         with open(f'{dest}/{name}', 'wb') as f:
             plistlib.dump(job, f, fmt=plistlib.FMT_BINARY)
         count += 1

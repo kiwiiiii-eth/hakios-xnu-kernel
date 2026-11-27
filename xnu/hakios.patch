@@ -551,6 +551,29 @@ index fac307fcbc80..5646b85645cd 100644
  
  		vnode_put(vp);
  		break;
+diff --git a/bsd/kern/kern_event.c b/bsd/kern/kern_event.c
+index a7b2742c197c..aadd90685c4c 100644
+--- a/bsd/kern/kern_event.c
++++ b/bsd/kern/kern_event.c
+@@ -8922,12 +8922,16 @@ kev_post_msg_internal(struct kev_msg *event_msg, int wait)
+ 		total_size += event_msg->dv[i].data_length;
+ 	}
+ 
+-	if (total_size > MLEN) {
++	/*
++	 * hakios: up to a cluster. Darwin 25's IO80211 reads the end of a Wi-Fi join from its event's data, a structure of 0x1cc
++	 * bytes (the result at 0x1c4) -- more than one mbuf holds; the radio's driver here posts it (drivers/wifi/hakios.apple80211.c).
++	 */
++	if (total_size > MCLBYTES) {
+ 		os_atomic_inc(&kevtstat.kes_toobig, relaxed);
+ 		return EMSGSIZE;
+ 	}
+ 
+-	m = m_get(wait, MT_DATA);
++	m = total_size > MLEN ? m_getcl(wait, MT_DATA, 0) : m_get(wait, MT_DATA);
+ 	if (m == 0) {
+ 		os_atomic_inc(&kevtstat.kes_nomem, relaxed);
+ 		return ENOMEM;
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index 2467b24045cd..b12f98765a94 100644
 --- a/bsd/kern/kern_exec.c

@@ -749,12 +749,26 @@ hakios_apple80211_event(enum hakios_sta_event event, int status)
 		lck_mtx_unlock(&apple80211_lock);
 		post(EVENT_SCAN_DONE, NULL, 0);
 		break;
-	case HAKIOS_STA_JOIN_DONE:
+	case HAKIOS_STA_JOIN_DONE: {
+		/*
+		 * Darwin 25's IO80211 (_dispatchAsyncAssocEvent of 26.5) takes the outcome from the event's own data: ten records of
+		 * access points tried (0x2c bytes each, left empty), then at 0x1c4 the result -- Apple80211's number, as
+		 * ASSOCIATE_RESULT gives it -- read when the word at 0x1c8 is not 0. Without it, every join was "-3902" to wifid,
+		 * joined or not. 16.5 asks ASSOCIATE_RESULT instead and takes the data as it comes.
+		 */
+		struct {
+			uint8_t tried[0x1b8];
+			uint32_t unknown_0, unknown_1, code, result, result_given;
+		} done = { .result_given = 1 };
+
 		lck_mtx_lock(&apple80211_lock);
 		join_result = status == 0 ? 1 : status == EAUTH ? 21 : status == ETIMEDOUT ? 9 : 2;
+		done.result = join_result;
 		lck_mtx_unlock(&apple80211_lock);
-		post(EVENT_ASSOC_DONE, NULL, 0);
+		_Static_assert(offsetof(typeof(done), result) == 0x1c4, "the result where Darwin 25 reads it");
+		post(EVENT_ASSOC_DONE, &done, sizeof(done));
 		break;
+	}
 	case HAKIOS_STA_LINK: {
 		struct apple80211_link_changed link = { .down = status != 1, .involuntary = status != 1 && status != 0,
 			                                .reason = status != 1 && status != 0 ? 4 : 0 };      /* (4: gone, not asked) */

@@ -496,6 +496,17 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
 		format = 'BGRA';
 	}
 	/*
+	 * Apple's losslessly compressed BGRA ('&BGA'), which Darwin 25's window server still makes one of the screen's
+	 * surfaces in although it is told there is no compression (QuartzCore's force_disable_all_compression): the GPU
+	 * here draws into no such surface (eagl.c: "-attachImage: ... '&BGA': not done"), so every other frame shown was one
+	 * never drawn -- the screen flickered without end (27 November, ios26-50: swaps of surface 9 '&BGA' and 1/3 'BGRA' in
+	 * turn). Same geometry as BGRA (4 bytes a pixel, 3328 a row at 828): made as BGRA.
+	 */
+	if (format == '&BGA') {
+		format = 'BGRA';
+		onePlane = true;        /* (it comes with a plane's description, a compressed surface's; eagl.c attaches planeless BGRA only) */
+	}
+	/*
 	 * The same with alpha in a plane of its own: what CoreAnimation makes the screen's own
 	 * surfaces of once it draws with a GPU's renderer (OpenGL ES, userland/src/eagl.c) instead
 	 * of its software one. One plane of BGRA here too; the framebuffer shows nothing else.
@@ -508,6 +519,10 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
 	eh = dictNumber(props, "IOSurfaceElementHeight", 1);
 	bpe = dictNumber(props, "IOSurfaceBytesPerElement", 0);
 	offset = dictNumber(props, "IOSurfaceOffset", 0);
+	if (onePlane && format == 'BGRA') {
+		ew = eh = 1;            /* (a compressed format's own elements, if it said any, are not this one's) */
+		bpe = 4;
+	}
 	if (width > MINISURF_MAX_DIMENSION || height > MINISURF_MAX_DIMENSION || ew == 0 || eh == 0 || ew > 255 || eh > 255) {
 		return NULL;
 	}

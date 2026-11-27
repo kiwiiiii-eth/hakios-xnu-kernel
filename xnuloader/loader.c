@@ -48,7 +48,12 @@ struct boot_video {
 	uint64_t v_baseAddr, v_display, v_rowBytes, v_width, v_height, v_depth;
 };
 
-#define BOOT_LINE_LENGTH 608
+/*
+ * 1024 since xnu-10002 (608 before). What follows the line in the structure -- bootFlags, memSizeActual -- is where
+ * the kernel looks for it by this number: with the old one the kernel read memSizeActual out of memory past the
+ * structure, whatever was there, and stopped in scale_setup() (a product that overflows) whenever that was not zero.
+ */
+#define BOOT_LINE_LENGTH 1024
 
 struct boot_args {
 	uint16_t revision;

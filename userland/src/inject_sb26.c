@@ -11,9 +11,11 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 
 static void
@@ -56,6 +58,49 @@ set_setup_required_reason(id self, SEL selector, long reason)
 	original_set_setup_required_reason(self, selector, 0);
 }
 
+/*
+ * Activated. -[SBLockdownManager _setupActivationState] asks MobileActivation and keeps the answer in its _state:
+ * 2 = activated, 1 = not, 3 = unknown, and 0 while there is no answer -- there never is one here, where
+ * mobileactivationd is not started (it wants a Secure Enclave). A phone that is not activated shows Settings and Phone
+ * on its home screen and nothing else. (16.5's library does the same, at the same place: the ivar is found by its
+ * name here, +8 in both systems.)
+ */
+#define LOCKDOWN_ACTIVATED      2
+static ptrdiff_t lockdown_state_offset;
+
+static void
+setup_activation_state(id self, __unused SEL selector)
+{
+	*(int *)((char *)self + lockdown_state_offset) = LOCKDOWN_ACTIVATED;
+}
+
+/* What a class is made of, said once: for finding by name what 16.5's library found by address. (boot-arg sb_dump=CLASS) */
+static void
+dump_class(const char *class_name)
+{
+	Class cls = objc_getClass(class_name);
+	unsigned count = 0;
+	Ivar *ivars;
+	Method *methods;
+
+	if (cls == NULL) {
+		say("hakios: no class %s\n", class_name);
+		return;
+	}
+	ivars = class_copyIvarList(cls, &count);
+	for (unsigned i = 0; i < count; i++) {
+		say("hakios: %s ivar +%ld %s %s\n", class_name, (long)ivar_getOffset(ivars[i]), ivar_getName(ivars[i]),
+		    ivar_getTypeEncoding(ivars[i]) ? ivar_getTypeEncoding(ivars[i]) : "?");
+	}
+	free(ivars);
+	methods = class_copyMethodList(cls, &count);
+	for (unsigned i = 0; i < count; i++) {
+		say("hakios: %s -%s %s\n", class_name, sel_getName(method_getName(methods[i])),
+		    method_getTypeEncoding(methods[i]) ? method_getTypeEncoding(methods[i]) : "?");
+	}
+	free(methods);
+}
+
 __attribute__((constructor))
 static void
 hakios_sb_init(void)
@@ -69,4 +114,33 @@ hakios_sb_init(void)
 	    "_setSetupRequiredReason:", (IMP)set_setup_required_reason);
 	say("hakios: SpringBoard: %s\n", original_set_setup_required_reason != NULL ? "no setup assistant" :
 	    "the setup assistant is as it was");
+	{
+		Class lockdown = objc_getClass("SBLockdownManager");
+		Ivar state = lockdown != NULL ? class_getInstanceVariable(lockdown, "_state") : NULL;
+		const char *type = state != NULL ? ivar_getTypeEncoding(state) : NULL;
+
+		if (state != NULL && type != NULL && strcmp(type, "i") == 0) {
+			lockdown_state_offset = ivar_getOffset(state);
+			say("hakios: SpringBoard: %s\n", replace_method("SBLockdownManager", "_setupActivationState",
+			    (IMP)setup_activation_state) != NULL ? "activated, as far as SpringBoard asks" : "not activated");
+		} else {
+			say("hakios: SpringBoard: SBLockdownManager has no int _state: not activated\n");
+		}
+	}
+	{
+		static char arguments[1024];
+		size_t size = sizeof(arguments) - 1;
+		const char *dump;
+
+		if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0 && (dump = strstr(arguments, "sb_dump=")) != NULL) {
+			char class_name[64];
+			size_t length = strcspn(dump + 8, " ");
+
+			if (length < sizeof(class_name)) {
+				memcpy(class_name, dump + 8, length);
+				class_name[length] = 0;
+				dump_class(class_name);
+			}
+		}
+	}
 }

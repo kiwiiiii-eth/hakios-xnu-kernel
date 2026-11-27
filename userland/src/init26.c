@@ -231,6 +231,60 @@ main(int argc, char **argv, char **envp)
 	}
 	{
 		/*
+		 * The applications the system installs on its first start -- Camera, Photos, Safari, Messages, the clock, the
+		 * wallpapers' own: 49 of them, in /private/var/staged_system_apps of the volume -- among the system's own in
+		 * /Applications: another name for each there (kern.apfs_synthetic: "NEW=EXISTING", an entry the volume has not
+		 * got, as userland/src/init.c makes them). /private/var is a memory filesystem here and covers where they lie,
+		 * nothing installs them, and the home screen had Settings and Phone and nothing else.
+		 */
+		static char buf[16384], name[128], both[400];
+		off_t position = 0;
+		ssize_t n;
+		int apps = 0, named = 0, dir = open("/flash/private/var/staged_system_apps", 0, 0);
+
+		while (dir >= 0 && (n = getdirentries(dir, buf, sizeof(buf), &position)) > 0) {
+			for (ssize_t at = 0; at < n;) {
+				struct dirent *de = (struct dirent *)(buf + at);
+				size_t len = de->d_namlen;
+
+				if (de->d_reclen == 0) {
+					break;
+				}
+				at += de->d_reclen;
+				if (len < 5 || len >= sizeof(name) || strncmp(de->d_name + len - 4, ".app", 4) != 0) {
+					continue;
+				}
+				memcpy(name, de->d_name, len);
+				name[len] = 0;
+				apps++;
+				strcpy(both, "/flash/Applications/");
+				strcpy(both + strlen(both), name);
+				strcpy(both + strlen(both), "=/flash/private/var/staged_system_apps/");
+				strcpy(both + strlen(both), name);
+				if (sysctlbyname("kern.apfs_synthetic", NULL, NULL, both, strlen(both)) == 0) {
+					named++;
+				} else if (named == 0 && apps == 1) {
+					printf("init26: %s: %s\n", both, strerror(errno));
+				}
+			}
+		}
+		if (dir >= 0) {
+			close(dir);
+			printf("init26: %d of the %d applications installed at a first start are in /Applications\n", named, apps);
+		}
+		/*
+		 * ... and the directory itself under a second name outside /private/var, for the memory filesystem that is about
+		 * to cover it: LaunchServices takes an application of /Applications back to where its files really are, and
+		 * found nothing at /private/var/staged_system_apps ("... with no CFBundleIdentifier in their plist", 143 times).
+		 * See below, where it is put back in its place.
+		 */
+		strcpy(both, "/flash/System/Library/staged_system_apps=/flash/private/var/staged_system_apps");
+		if (dir >= 0 && sysctlbyname("kern.apfs_synthetic", NULL, NULL, both, strlen(both)) != 0) {
+			printf("init26: %s: %s\n", both, strerror(errno));
+		}
+	}
+	{
+		/*
 		 * The programs that are started with a library of this image's in them (kern.exec_inject: "LIBRARY NAME ...",
 		 * groups parted by ";" -- bsd/kern/kern_exec.c), as this image's /etc/inject.conf has them
 		 * (tools/ios26/boot-image.sh): the window server with the one that gives it the phone's touch screen.
@@ -271,6 +325,9 @@ main(int argc, char **argv, char **envp)
 		if (var_dirs[i].uid != 0) {
 			chown(path, var_dirs[i].uid, var_dirs[i].uid);
 		}
+	}
+	if (mount("bindfs", "/private/var/staged_system_apps", MNT_RDONLY_, (void *)"/System/Library/staged_system_apps") != 0) {
+		printf("init26: the applications of a first start on /private/var/staged_system_apps: %s\n", strerror(errno));
 	}
 	var_files("/private/preboot/boot/var", "/private/var", 0);
 	{

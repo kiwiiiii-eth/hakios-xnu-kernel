@@ -21,6 +21,13 @@
 # Needs on this machine: meson, ninja, bison, flex, python3 with venv (Mako is installed into a
 # private environment), llvm-ar.
 #
+#   MESA_TARGET=arm64e-apple-ios16.5   for Darwin 25's userland, whose programs are arm64e (tools/ios26/boot-image.sh):
+#                        the compiler is then Apple's own with that target, the build and what comes out are apart
+#                        (build-...-arm64e-apple-ios16.5, out-arm64e-apple-ios16.5), and the library is not stripped
+#                        or lowered here (tools/lower/pac_lower does that to it, signed, where it is used).
+#   MESA_SDK=DIR         the SDK (default: $THEOS/sdks/iPhoneOS16.5.sdk)
+#   MESA_PREFIX=DIR      where the library will be at run time, its install name (default /redwood)
+#
 # This build is NOT reproducible byte for byte, so do not compare one of its outputs with another
 # by hash. Measured on 20 October: two builds from the same source tree, the second with
 # build-softpipe-freedreno deleted first, gave different libOSMesa.8.dylib and air_run -- same size
@@ -44,9 +51,11 @@ SHA256=592272df3cf01e85e7db300c449df5061092574d099da275d19e97ef0510f8a6
 ROOT=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 source "$ROOT/xnu-env.sh"
 B=$ROOT/xnu-deps/build/mesa
-SDK=$THEOS/sdks/iPhoneOS16.5.sdk
+SDK=${MESA_SDK:-$THEOS/sdks/iPhoneOS16.5.sdk}
 CC=$ROOT/xnu-deps/host/bin/xnu-clang
-mkdir -p "$B/out"
+PREFIX=${MESA_PREFIX:-/redwood}
+OUT=out${MESA_TARGET:+-$MESA_TARGET}
+mkdir -p "$B/$OUT"
 cd "$B"
 
 # The sources are the archive's with tools/mesa/*.patch on top. When the patches change, a tree that was
@@ -76,11 +85,17 @@ fi
 export PATH=$B/venv/bin:$PATH
 
 # the compiler is the kernel's wrapper: it names the target (arm64-apple-ios) and the linker (ld64)
-cat > cross.ini <<INI
+C_CMD="'$CC', '-arch', 'arm64', '-isysroot', '$SDK'"
+CXX_CMD="'$CC++', '-arch', 'arm64', '-isysroot', '$SDK'"
+if [ -n "${MESA_TARGET:-}" ]; then
+	C_CMD="'/usr/bin/clang', '-target', '$MESA_TARGET', '-isysroot', '$SDK', '-w'"
+	CXX_CMD="'/usr/bin/clang++', '-target', '$MESA_TARGET', '-isysroot', '$SDK', '-w'"
+fi
+cat > cross${MESA_TARGET:+-$MESA_TARGET}.ini <<INI
 [binaries]
-c = ['$CC', '-arch', 'arm64', '-isysroot', '$SDK']
-cpp = ['$CC++', '-arch', 'arm64', '-isysroot', '$SDK', '-fuse-cxa-atexit']
-objc = ['$CC', '-arch', 'arm64', '-isysroot', '$SDK']
+c = [$C_CMD]
+cpp = [$CXX_CMD, '-fuse-cxa-atexit']
+objc = [$C_CMD]
 ar = 'llvm-ar'
 ranlib = 'llvm-ranlib'
 strip = 'llvm-strip'
@@ -97,9 +112,9 @@ endian = 'little'
 needs_exe_wrapper = true
 INI
 DRIVERS=${DRIVERS:-softpipe,freedreno}
-BUILD=build-${DRIVERS//,/-}
-[ -f $BUILD/build.ninja ] || meson setup $BUILD mesa-$VERSION --cross-file cross.ini --wrap-mode=nofallback \
-	--prefix=/redwood --libdir=lib --buildtype=release -Db_ndebug=true \
+BUILD=build-${DRIVERS//,/-}${MESA_TARGET:+-$MESA_TARGET}
+[ -f $BUILD/build.ninja ] || meson setup $BUILD mesa-$VERSION --cross-file cross${MESA_TARGET:+-$MESA_TARGET}.ini --wrap-mode=nofallback \
+	--prefix=$PREFIX --libdir=lib --buildtype=release -Db_ndebug=true \
 	-Dplatforms= -Dgallium-drivers="$DRIVERS" -Dfreedreno-kmds=msm -Dvulkan-drivers= -Dglx=disabled -Degl=disabled -Dgbm=disabled \
 	-Dosmesa=true -Dllvm=disabled -Dshared-glapi=enabled -Dgles1=disabled -Dgles2=enabled -Dopengl=true \
 	-Dzstd=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dshader-cache=disabled -Dvalgrind=disabled \
@@ -115,11 +130,15 @@ if [ "${AIR:-}" = 1 ]; then
 	echo "mk-mesa.sh: $B/out/air_run ($(stat -c %s out/air_run) bytes)"
 fi
 
-llvm-strip -x -o out/libOSMesa.8.dylib $BUILD/src/gallium/targets/osmesa/libOSMesa.8.dylib
-install_name_tool -id /redwood/lib/libOSMesa.8.dylib out/libOSMesa.8.dylib
-nm -gU out/libOSMesa.8.dylib | awk '$3 ~ /^_gl/ { print substr($3, 2) }' > out/exported-gl.txt
-cp mesa-$VERSION/src/mapi/glapi/registry/gl.xml out/gl.xml
+if [ -n "${MESA_TARGET:-}" ]; then
+	cp $BUILD/src/gallium/targets/osmesa/libOSMesa.8.dylib $OUT/libOSMesa.8.dylib
+else
+	llvm-strip -x -o $OUT/libOSMesa.8.dylib $BUILD/src/gallium/targets/osmesa/libOSMesa.8.dylib
+fi
+install_name_tool -id $PREFIX/lib/libOSMesa.8.dylib $OUT/libOSMesa.8.dylib
+nm -gU $OUT/libOSMesa.8.dylib | awk '$3 ~ /^_gl/ { print substr($3, 2) }' > $OUT/exported-gl.txt
+cp mesa-$VERSION/src/mapi/glapi/registry/gl.xml $OUT/gl.xml
 # (userland/build.sh comes here again when this no longer matches)
-cat "$ROOT"/tools/mesa/*.patch "$ROOT"/tools/mesa/hakios-drm/* | sha256sum > out/built-from
-echo "mk-mesa.sh: Mesa $VERSION ($DRIVERS): $B/out/libOSMesa.8.dylib, $(stat -c %s out/libOSMesa.8.dylib) bytes," \
-	"$(wc -l < out/exported-gl.txt) gl* functions"
+cat "$ROOT"/tools/mesa/*.patch "$ROOT"/tools/mesa/hakios-drm/* | sha256sum > $OUT/built-from
+echo "mk-mesa.sh: Mesa $VERSION ($DRIVERS): $B/$OUT/libOSMesa.8.dylib, $(stat -c %s $OUT/libOSMesa.8.dylib) bytes," \
+	"$(wc -l < $OUT/exported-gl.txt) gl* functions"

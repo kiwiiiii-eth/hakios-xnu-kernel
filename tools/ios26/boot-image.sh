@@ -39,8 +39,26 @@ if [ -d "$SDK" ]; then
 		obj/pac_lower -q "$f"
 	done
 	echo "/private/preboot/boot/lib/libhakios.dylib backboardd;/private/preboot/boot/lib/libhakios.sb.dylib SpringBoard" > boot26/etc/inject.conf
+	# Mesa, when it has been built for these programs (MESA_TARGET=arm64e-apple-ios16.5 MESA_PREFIX=/private/preboot/boot
+	# tools/mk-mesa.sh): the OpenGL ES library that draws with the phone's GPU, and gl_test, a triangle by it
+	# (userland/src/gl_test.c). RUN="PROGRAM ARGUMENT..." is a job that runs one of this image's programs as the system starts.
+	M=../xnu-deps/build/mesa/out-arm64e-apple-ios16.5
+	if [ -f $M/libOSMesa.8.dylib ]; then
+		/usr/bin/xcrun strip -x -o boot26/lib/libOSMesa.8.dylib $M/libOSMesa.8.dylib
+		$E -framework CoreFoundation -framework IOKit $M/libOSMesa.8.dylib -o boot26/bin/gl_test src/gl_test.c
+		for f in boot26/lib/libOSMesa.8.dylib boot26/bin/gl_test; do
+			/usr/bin/codesign -f -s - "$f"
+			obj/pac_lower -q "$f"
+		done
+	fi
 else
 	echo "boot-image.sh: no SDK at $SDK: no library for the window server (no touch screen)" >&2
+fi
+# The GPU's firmware, the phone's own (the other line's ../fw-gpu, pulled from its Android; FW_GPU=DIR, FW_GPU= for none):
+# the kernel starts the Adreno with it (boot-arg gpu=1, drivers/gpu/hakios.a630.c: fw/NAME of the image that came with it).
+FW_GPU=${FW_GPU-$(cd ../.. && pwd)/hakios-xnu-kernel/fw-gpu}
+if [ -n "$FW_GPU" ] && [ -d "$FW_GPU" ]; then
+	mkdir -p boot26/fw && cp "$FW_GPU"/a630_* boot26/fw/
 fi
 # what init26 puts into the empty /private/var (var_files() there): userland/var's settings, and the note that this
 # build's data has been migrated, under the build of the system that is started (ROOT's; 16.5's file names its own)
@@ -76,6 +94,15 @@ if [ -n "$ROOT" ] && [ -z "${ALL_JOBS:-}" ]; then
 	for f in "$ROOT"/System/Library/xpc/*; do
 		case $f in */launchd.plist|*/launchd.plist.sig) ;; *) cp "$f" boot26/xpc/ ;; esac
 	done
+	if [ -n "${RUN:-}" ]; then
+		python3 - $RUN <<'PY'
+import plistlib, sys
+job = {'Label': 'com.hakios.run', 'ProgramArguments': sys.argv[1:], 'RunAtLoad': True,
+       'StandardErrorPath': '/dev/console', 'StandardOutPath': '/dev/console'}
+plistlib.dump(job, open('boot26/LaunchDaemons/com.hakios.run.plist', 'wb'), fmt=plistlib.FMT_BINARY)
+PY
+		echo "  a job that runs: $RUN"
+	fi
 	if [ -n "${TOUCH:-}" ] && [ -f boot26/bin/rwtouch ]; then
 		python3 - $TOUCH <<'PY'
 import plistlib, sys

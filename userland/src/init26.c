@@ -285,6 +285,21 @@ main(int argc, char **argv, char **envp)
 	}
 	{
 		/*
+		 * /fw of the root, where the kernel's drivers look for the phone's firmware once there is a root (the modem's
+		 * files that it reads over TFTP, the audio DSP's image, Bluetooth's patch): this image's fw/, under a name the
+		 * volume has not got (kern.apfs_synthetic: a directory made of nothing).
+		 */
+		struct stat st;
+
+		if (stat("/fw", &st) == 0 && stat("/flash/fw", &st) != 0) {
+			if (sysctlbyname("kern.apfs_synthetic", NULL, NULL, "/flash/fw", 9) != 0) {
+				printf("init26: /flash/fw: %s\n", strerror(errno));
+			}
+			bind_dir("/fw", "/flash/fw");
+		}
+	}
+	{
+		/*
 		 * The programs that are started with a library of this image's in them (kern.exec_inject: "LIBRARY NAME ...",
 		 * groups parted by ";" -- bsd/kern/kern_exec.c), as this image's /etc/inject.conf has them
 		 * (tools/ios26/boot-image.sh): the window server with the one that gives it the phone's touch screen.

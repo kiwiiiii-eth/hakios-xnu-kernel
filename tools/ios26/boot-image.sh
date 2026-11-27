@@ -4,6 +4,7 @@
 # IPSW's root volume mounted (or unpacked) at ROOT, the launchd jobs the system is started with instead of all of its
 # own (userland/mkjobs.py: those named here, and the rest started only when asked for).
 #   env: JOBS="label ..."   the jobs started at boot (default: the ones below)    ALL_JOBS=1  no choice: launchd's own lists
+#        MORE_JOBS="label ..."  more of them, beside the default ones
 #        OSLOG="label ..."  jobs whose os_log goes to the console too ("all": every one)   ALLOW="word ..." see mkjobs.py
 # A cryptex's programs are looked for in ROOT/../cryptex and ROOT/../cryptex-app (mkjobs.py): links to where they are mounted.
 set -e
@@ -71,6 +72,36 @@ FW_GPU=${FW_GPU-$(cd ../.. && pwd)/hakios-xnu-kernel/fw-gpu}
 if [ -n "$FW_GPU" ] && [ -d "$FW_GPU" ]; then
 	mkdir -p boot26/fw && cp "$FW_GPU"/a630_* boot26/fw/
 fi
+# The rest of the phone's own firmware, as the other line has it beside its tree (never in a repository): the modem's and
+# the DSPs' (fw-modem: modem.mdt and its pieces, mba.mbn, image/ -- the phone's /vendor/firmware_mnt/image, which the modem
+# reads over TFTP and the audio DSP is started from -- and ath10k/ for the Wi-Fi radio), Bluetooth's patch and settings
+# (fw-bt), and the cameras' tables made of the vendor's module files (fw-camera). 170 MB: more than the loader takes with
+# a kernel (64 MB), so an image with these goes over as the resident one (SYS=userland/boot26.apfs tools/ios26/phone.sh).
+# The drivers read some from this image's memory and the others from /fw of the root, which init26 makes of this fw/.
+# FW_PHONE=DIR: where fw-modem and the others are; FW_PHONE= for none (QEMU).
+FW_PHONE=${FW_PHONE-$(cd ../.. && pwd)/hakios-xnu-kernel}
+rm -rf boot26/fw/image boot26/fw/ath10k; rm -f boot26/fw/modem.* boot26/fw/mba.mbn boot26/fw/cr* boot26/fw/camera-*
+if [ -n "$FW_PHONE" ] && [ -f "$FW_PHONE/fw-modem/modem.mdt" ]; then
+	mkdir -p boot26/fw
+	cp "$FW_PHONE"/fw-modem/modem.mdt "$FW_PHONE"/fw-modem/modem.b[0-9][0-9] boot26/fw/
+	[ -f "$FW_PHONE/fw-modem/mba.mbn" ] && cp "$FW_PHONE/fw-modem/mba.mbn" boot26/fw/
+	[ -d "$FW_PHONE/fw-modem/image" ] && cp -R "$FW_PHONE/fw-modem/image" boot26/fw/image
+	[ -d "$FW_PHONE/fw-modem/ath10k" ] && cp -R "$FW_PHONE/fw-modem/ath10k" boot26/fw/ath10k
+	for f in "$FW_PHONE"/fw-bt/crbtfw*.tlv "$FW_PHONE"/fw-bt/crnv*.bin "$FW_PHONE"/fw-haptic/*.bin "$FW_PHONE"/fw-audio/aw882xx_acf.bin; do
+		[ -f "$f" ] && cp "$f" boot26/fw/
+	done
+	for module in "$FW_PHONE"/fw-camera/com.qti.sensormodule.*.bin; do
+		[ -f "$module" ] || continue
+		sensor=$(basename "$module" .bin | sed 's/^com\.qti\.sensormodule\.[a-z]*_\([a-z0-9]*\).*/\1/')
+		../tools/camsensor.py "$module" "boot26/fw/camera-$sensor.tab" >/dev/null
+	done
+	for tuned in "$FW_PHONE"/fw-camera/com.qti.tuned.*.bin; do
+		[ -f "$tuned" ] || continue
+		case "$(basename "$tuned")" in com.qti.tuned.*_fat*.bin|com.qti.tuned.default.bin) continue ;; esac
+		sensor=$(basename "$tuned" .bin | sed 's/^com\.qti\.tuned\.[a-z]*_\([a-z0-9]*\).*/\1/')
+		../tools/camtuning.py "$tuned" "boot26/fw/camera-$sensor.isp" >/dev/null
+	done
+fi
 # what init26 puts into the empty /private/var (var_files() there): userland/var's settings, and the note that this
 # build's data has been migrated, under the build of the system that is started (ROOT's; 16.5's file names its own)
 mkdir -p boot26/var && cp -R var/ boot26/var/
@@ -94,6 +125,8 @@ JOBS=${JOBS-"
 	com.apple.iconservices.iconservicesagent com.apple.pluginkit.pkd
 	com.apple.SpringBoard
 "}
+# MORE_JOBS="label ...": jobs started at boot beside those (and let in whatever mkjobs.py's DENY says of them)
+JOBS="$JOBS ${MORE_JOBS:-}"
 # (com.apple.dmd, which 16.5's list keeps out for crashing there: Darwin 25's runs, and without it ScreenTimeAgent,
 # appprotectiond and IntelligencePlatformComputeService each ask launchd for it without a pause -- 4943 failed lookups in
 # a minute, three processors busy with nothing and launchd half of a fourth)

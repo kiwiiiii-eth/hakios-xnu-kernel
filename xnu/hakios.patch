@@ -2921,6 +2921,26 @@ index 648cb7043758..195151b70cac 100644
  				 * Framebuffers would normally use VM_WIMG_RT, which
  				 * io_map doesn't support.  However this buffer is set up
  				 * by the bootloader and doesn't require D$ cleaning, so
+diff --git a/osfmk/ipc/mach_port.c b/osfmk/ipc/mach_port.c
+index 7ef6a220c25b..4c35f2ad424b 100644
+--- a/osfmk/ipc/mach_port.c
++++ b/osfmk/ipc/mach_port.c
+@@ -2971,7 +2971,14 @@ mach_port_is_connection_for_service(
+ 	}
+ 
+ 	if (!mach_msg_filter_at_least(MACH_MSG_FILTER_CALLBACKS_VERSION_1)) {
+-		return KERN_NOT_SUPPORTED;
++		/*
++		 * HakiOS: no Sandbox here, so nobody has registered the callbacks, and no port has a label to compare.
++		 * Darwin 25's libxpc asks this of every check-in on a listener and takes anything but success (or "not a
++		 * service port") for a forged one: "Bogus check-in attempt. Ignoring." -- no service could be connected
++		 * to. The answer a service port without a label gets below: nothing to check.
++		 */
++		*filter_policy_id = 0;
++		return KERN_SUCCESS;
+ 	}
+ 
+ 	ret = ipc_port_translate_receive(space, service_port_name, &service_port);
 diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
 index 48f9405cc9ba..5038622601da 100644
 --- a/osfmk/kern/debug.c

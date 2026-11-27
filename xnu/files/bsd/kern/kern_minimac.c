@@ -69,7 +69,12 @@ miniamfi_vnode_check_signature(__unused struct vnode *vp, __unused struct label 
  * our own library be loaded into stock daemons (DYLD_INSERT_LIBRARIES).
  */
 #define AMFI_SYSCALL_CHECK_DYLD_POLICY  0x5a
-#define AMFI_DYLD_OUTPUT_ALLOW_ALL      0xffULL
+/*
+ * (bit 8 is not dyld's: Darwin 25's libsystem_trace asks the same question, and without it takes no "development"
+ * variable from the environment -- OS_ACTIVITY_DT_MODE among them, by which a job's os_log lines reach the console,
+ * the only place this port can read them)
+ */
+#define AMFI_DYLD_OUTPUT_ALLOW_ALL      0x1ffULL
 
 /*
  * Request 0x60, "query boot-arg state" (amfi_interface_query_bootarg_state() in libamfi): the

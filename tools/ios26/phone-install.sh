@@ -1,7 +1,7 @@
 #!/bin/bash
 # tools/ios26/phone-install.sh SYSTEM.apfs: a system image too large for the phone's memory (tools/ios26/system-image.sh:
 # 12.9 GB) into the 6T's userdata partition, from its first block, where the kernel mounts it as it lies
-# (init26_dev=rufs_userdata). THIS ERASES ANDROID'S DATA; darwin, and the system in it, are not touched.
+# (init26_dev=ufs_userdata: the block device). THIS ERASES ANDROID'S DATA; darwin, and the system in it, are not touched.
 #
 #   USERDATA_WRITE=yes   write. Without it: the plan, and the loader's read-only answers (userdata found, the FNV of
 #                        its first megabyte, the write refused without its word) -- nothing is written.

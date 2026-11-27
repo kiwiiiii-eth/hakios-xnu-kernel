@@ -3110,8 +3110,18 @@ plain_draw_begin(struct eagl *e, GLint enabled[4])
 	 * its own memory -- nothing -- and wrote that over everything: every launch image SpringBoard
 	 * keeps came out black, and with it the zoom that opens an application the first time.
 	 */
+	/*
+	 * (function 90: which function the draw is is not known -- Darwin 25's QuartzCore has no GLContext::function_uniform for
+	 * inject.c to learn it from. Its OpenGL ES renderer draws the labels' shadows itself, with a program, and sends a draw
+	 * with none besides, whose texture is the label's own picture: drawn as a picture, every label on the home screen had a
+	 * white glow (ios26-57; glplain=0, ios26-58: none). A draw of an unknown function with no program is not drawn.)
+	 */
 	if (!plain_draws || (plain_draws == 1 && e->bound[0] == 0) || reads_what_it_writes(e) ||
-	    (e->colour != 0 && e->colour == e->bound[0])) {
+	    (e->colour != 0 && e->colour == e->bound[0])
+#ifdef HAKIOS_DARWIN25
+	    || function >= 90
+#endif
+	    ) {
 		census_draw(e, function, CENSUS_NOT_DRAWN);
 		return false;
 	}

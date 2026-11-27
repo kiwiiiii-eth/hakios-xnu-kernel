@@ -2092,7 +2092,10 @@ hakios_gl_function_values(void *context, unsigned function, unsigned index, size
 
 /* boot-arg glplain=0: leave such draws as they are; 2: also those without a texture; 3: the two with a colour matrix drawn plainly too */
 static int plain_draws = 1;
-static uint64_t no_plain[2];            /* boot-arg glnoplain=N[,N...]: those functions' draws with no program are not drawn */
+static uint64_t no_plain[2];
+#ifdef HAKIOS_DARWIN25
+static int vblur_25_off = 1;            /* boot-arg glrwr=1: reads_what_it_writes() as in 16.5 */
+#endif            /* boot-arg glnoplain=N[,N...]: those functions' draws with no program are not drawn */
 
 /*
  * The blur whose radius varies over the picture (the filter variableBlur with a mask: the strip
@@ -2398,6 +2401,16 @@ vblur_level(struct eagl *e, int from)
 static bool
 reads_what_it_writes(struct eagl *e)
 {
+#ifdef HAKIOS_DARWIN25
+	/*
+	 * (16.5's variable blur, function 38 drawn into the texture it reads, its pending clear dropped. Darwin 25's
+	 * renderer has a program for what it draws there: with the clear dropped, what the texture held before stayed --
+	 * green and white stripes on the lock screen, ios26-73 .. 76, from the time the functions were known.)
+	 */
+	if (vblur_25_off) {
+		return false;
+	}
+#endif
 	return e->program == 0 && e->colour != 0 && e->colour == e->bound[0] && ca_context != NULL &&
 	       *(*(uint8_t **)((char *)ca_context + 0x10) + 0x10) == FUNCTION_VARIABLE_DOWNSAMPLE;
 }
@@ -3120,15 +3133,16 @@ plain_draw_begin(struct eagl *e, GLint enabled[4])
 	 * keeps came out black, and with it the zoom that opens an application the first time.
 	 */
 	/*
-	 * (function 90: which function the draw is is not known -- Darwin 25's QuartzCore has no GLContext::function_uniform for
+	 * (no context yet: which function the draw is is not known -- Darwin 25's QuartzCore has no GLContext::function_uniform for
 	 * inject.c to learn it from. Its OpenGL ES renderer draws the labels' shadows itself, with a program, and sends a draw
 	 * with none besides, whose texture is the label's own picture: drawn as a picture, every label on the home screen had a
-	 * white glow (ios26-57; glplain=0, ios26-58: none). A draw of an unknown function with no program is not drawn.)
+	 * white glow (ios26-57; glplain=0, ios26-58: none). A draw of an unknown function with no program is not drawn. Darwin 25
+	 * has 174 functions: 90 and above are functions, not "unknown" -- left out, the lock screen had stripes, ios26-75.)
 	 */
 	if (!plain_draws || (plain_draws == 1 && e->bound[0] == 0) || reads_what_it_writes(e) ||
 	    (e->colour != 0 && e->colour == e->bound[0])
 #ifdef HAKIOS_DARWIN25
-	    || function >= 90 || (function < 64 * 2 && (no_plain[function / 64] >> (function % 64) & 1))
+	    || ca_context == NULL || (function < 64 * 2 && (no_plain[function / 64] >> (function % 64) & 1))
 #endif
 	    ) {
 		census_draw(e, function, CENSUS_NOT_DRAWN);
@@ -4487,9 +4501,31 @@ install(void)
 			trace_corners = (GLsizei)strtol(argument + 16, NULL, 10);
 		}
 		fetch_offered = strstr(arguments, "glfetch=0") == NULL;
+#ifdef HAKIOS_DARWIN25
+		vblur_25_off = strstr(arguments, "glrwr=1") == NULL;
+#endif
 		{
 			const char *list = strstr(arguments, "glnoplain=");
 
+#ifdef HAKIOS_DARWIN25
+			/*
+			 * Darwin 25's function 52 ("vdk", by QuartzCore 26.5's own table of names -- 16.5's numbers are not these):
+			 * the shadow under the home screen's labels, which its OpenGL ES renderer has no shader for and draws with
+			 * no program; drawn as the picture it is given (the label itself, white), every label had a white glow
+			 * (ios26-57 .. 73; ios26-74, this alone not drawn: none). Not drawn unless glnoplain= says otherwise.
+			 * (66 "gbh" and 71 "gfs", gaussian passes, must be drawn: left out, a later pass read what was never
+			 * written, green stripes over the lock screen, ios26-73.)
+			 */
+			/*
+			 * ... and 73 ("clm", a colour matrix), drawn as its picture: what was in that picture had not been drawn,
+			 * green and white stripes at the left of the lock screen (ios26-73 .. 79; ios26-80, 52 and 73 not drawn:
+			 * none, and the clock there).
+			 */
+			if (list == NULL) {
+				no_plain[0] |= 1ULL << 52;
+				no_plain[1] |= 1ULL << (73 - 64);
+			}
+#endif
 			for (const char *at = list != NULL ? list + 10 : NULL; at != NULL && *at >= '0' && *at <= '9';) {
 				unsigned number = (unsigned)strtoul(at, (char **)&at, 10);
 

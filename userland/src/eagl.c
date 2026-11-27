@@ -4186,6 +4186,47 @@ my_texImageIOSurface(id self, SEL selector, IOSurfaceRef surface, unsigned long 
 }
 
 /* (the "image" is the target, GL_TEXTURE_2D, and means the texture bound to it) */
+#ifdef HAKIOS_DARWIN25
+/*
+ * Darwin 25 (QuartzCore of 23F84, iPhone12,1): CA::OGL::GLESContext::make_buffer_current() makes the surface it draws
+ * the screen into, has it attached to the IOSurface here, and then pushes it -- and Context::push_surface() now insists
+ * ("transient surface %p not found", an assertion) that a surface be on the context's list of those it tracks, which
+ * nothing puts a surface of this kind on: the window server has not drawn with OpenGL ES since that check was written.
+ * So it is put there from here, the one call into our code between the making and the pushing. The surface is in the
+ * caller's x21 and the context in its x19 (attach_image_entry() notes both, and where the call came from): only a
+ * call from that one place, with a surface that names that context, is acted on.
+ */
+#define D25_ATTACH_RETURN       0x1840ccae4UL   /* in make_buffer_current(), after -attachImage:toCoreSurface:invertedRender: */
+#define D25_CACHE_BASE          0x180000000UL
+
+void *hakios_attach_x19, *hakios_attach_x21, *hakios_attach_lr;
+
+static void
+track_display_surface(void)
+{
+	extern const void *_dyld_get_shared_cache_range(size_t *length);
+	size_t length = 0;
+	uintptr_t slide_now = (uintptr_t)_dyld_get_shared_cache_range(&length) - D25_CACHE_BASE;
+	char *context = hakios_attach_x19, *surface = hakios_attach_x21;
+	void **head;
+
+	if ((uintptr_t)hakios_attach_lr != D25_ATTACH_RETURN + slide_now || context == NULL || surface == NULL ||
+	    *(void **)(surface + 0xa0) != (void *)context) {
+		return;
+	}
+	/* (the list of a surface without bit 0x400 in its flags at 0x5c: the context's at 0x58, linked at 0x10 of each) */
+	head = (void **)(context + ((*(uint32_t *)(surface + 0x5c) & 0x400) ? 0x60 : 0x58));
+	for (void *p = *head; p != NULL; p = *(void **)((char *)p + 0x10)) {
+		if (p == (void *)surface) {
+			return;
+		}
+	}
+	*(void **)(surface + 0x10) = *head;
+	*head = surface;
+	say("hakios-gl: the screen's surface %p is on the list of context %p\n", (void *)surface, (void *)context);
+}
+#endif
+
 static BOOL
 my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface, BOOL inverted)
 {
@@ -4195,6 +4236,10 @@ my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface
 	GLint texture = 0;
 	uint32_t pixels;
 	uint64_t began;
+
+#ifdef HAKIOS_DARWIN25
+	track_display_surface();
+#endif
 
 	(void)selector;
 	if (e == NULL || surface == NULL) {
@@ -4295,6 +4340,30 @@ display_waits(void)
 	return waits;
 }
 
+#ifdef HAKIOS_DARWIN25
+/* -attachImage:toCoreSurface:invertedRender: as it is entered: the caller's x19, x21 and return address noted, then the function above */
+__attribute__((naked)) static void
+attach_image_entry(void)
+{
+	__asm__ volatile (
+		"adrp x9, _hakios_attach_x19@PAGE\n"
+		"str x19, [x9, _hakios_attach_x19@PAGEOFF]\n"
+		"adrp x9, _hakios_attach_x21@PAGE\n"
+		"str x21, [x9, _hakios_attach_x21@PAGEOFF]\n"
+		"adrp x9, _hakios_attach_lr@PAGE\n"
+		"str x30, [x9, _hakios_attach_lr@PAGEOFF]\n"
+		"b _my_attachImage_25\n");
+}
+
+BOOL my_attachImage_25(id self, SEL selector, unsigned long target, IOSurfaceRef surface, BOOL inverted);
+
+BOOL
+my_attachImage_25(id self, SEL selector, unsigned long target, IOSurfaceRef surface, BOOL inverted)
+{
+	return my_attachImage(self, selector, target, surface, inverted);
+}
+#endif
+
 __attribute__((constructor)) static void
 install(void)
 {
@@ -4308,7 +4377,11 @@ install(void)
 		{ "setParameter:to:", (IMP)my_setParameter },
 		{ "getMacroContextPrivate", (IMP)my_getMacroContextPrivate },
 		{ "texImageIOSurface:target:internalFormat:width:height:format:type:plane:invert:", (IMP)my_texImageIOSurface },
+#ifdef HAKIOS_DARWIN25
+		{ "attachImage:toCoreSurface:invertedRender:", (IMP)attach_image_entry },
+#else
 		{ "attachImage:toCoreSurface:invertedRender:", (IMP)my_attachImage },
+#endif
 		{ "dealloc", (IMP)my_dealloc },
 	};
 	Class class = objc_getClass("EAGLContext");

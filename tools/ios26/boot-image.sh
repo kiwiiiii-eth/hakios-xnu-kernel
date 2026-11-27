@@ -46,6 +46,17 @@ if [ -d "$SDK" ]; then
 	if [ -f $M/libOSMesa.8.dylib ]; then
 		/usr/bin/xcrun strip -x -o boot26/lib/libOSMesa.8.dylib $M/libOSMesa.8.dylib
 		$E -framework CoreFoundation -framework IOKit $M/libOSMesa.8.dylib -o boot26/bin/gl_test src/gl_test.c
+		# ... and the OpenGL ES that CoreAnimation asks an EAGLContext for, by that library (src/eagl.c): the window
+		# server's, when the kernel has the GPU (src/inject.c, opengl_es_25()); GL=0 leaves it out of the image
+		if [ "${GL:-1}" != 0 ]; then
+			python3 mkeagl.py src/eagl_slots.txt $M/gl.xml $M/exported-gl.txt src/eagl.c > obj/eagl_gen26.h
+			mkdir -p obj/gen26 && cp obj/eagl_gen26.h obj/gen26/eagl_gen.h
+			$E -dynamiclib -install_name /private/preboot/boot/lib/libhakios.gl.dylib -Iobj/gen26 -framework CoreFoundation \
+				-framework IOKit -framework IOSurface -lobjc $M/libOSMesa.8.dylib -o boot26/lib/libhakios.gl.dylib \
+				src/eagl.c src/gl_osmesa.c
+			/usr/bin/codesign -f -s - boot26/lib/libhakios.gl.dylib
+			obj/pac_lower -q boot26/lib/libhakios.gl.dylib
+		fi
 		for f in boot26/lib/libOSMesa.8.dylib boot26/bin/gl_test; do
 			/usr/bin/codesign -f -s - "$f"
 			obj/pac_lower -q "$f"

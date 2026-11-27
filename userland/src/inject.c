@@ -1530,6 +1530,190 @@ watch_metallib_lookups(const char *arguments)
 	    ca_metallib ? ca_metallib : "");
 }
 
+#ifdef HAKIOS_DARWIN25
+/* ---- backboardd, Darwin 25: CoreAnimation's OpenGL ES renderer in the window server ---------------- */
+
+/*
+ * Darwin 25's window server draws with Metal or, where there is no Metal device, with CoreAnimation's software
+ * rasterizer; it no longer tries OpenGL ES in between as 16.5's did (CA::WindowServer::EAGLServer::renderer()). But
+ * the OpenGL ES renderer is all still there -- CA::OGL::GLESContext, for CARenderer on an EAGLContext -- and it is made
+ * the way it always was: from an EAGLContext, whose -getMacroContextPrivate gives it its table of functions. So where
+ * the kernel has the phone's GPU (the service HakiosGPU) the window server is given one: an EAGLContext of ours
+ * (libhakios.gl.dylib: src/eagl.c, Mesa behind it), a GLESContext on it by QuartzCore's own gles_new_context(), and
+ * the rest as CA::WindowServer::AccelServer::renderer() does it for a Metal context, whose place in the classes'
+ * tables of virtual functions this takes.
+ *
+ * The addresses are those of QuartzCore in the shared cache of userland 26.5.2 (23F84) for iPhone12,1, before the
+ * slide; each function is looked at before it is used, and anything else than what is expected leaves the window
+ * server with its software renderer. Boot-arg gl=0: not this at all.
+ */
+#define D25_ACCEL_RENDERER      0x183f35d3cUL   /* CA::WindowServer::AccelServer::renderer() */
+#define D25_GLES_NEW_CONTEXT    0x18410426cUL   /* gles_new_context(void *, void *, unsigned) */
+#define D25_UPDATE_COLOR_CACHE  0x1840d1620UL   /* CA::OGL::Context::update_color_program_cache() */
+#define D25_FEATURE_FLAGS       0x1e9514e3cUL   /* global_feature_flags */
+#define D25_MALLOC_ZONE         0x1ec5d25c0UL   /* malloc_zone (x_malloc_get_zone) */
+#define D25_VTABLES_FROM        0x1ee1b1000UL   /* QuartzCore's tables of virtual functions lie between these */
+#define D25_VTABLES_TO          0x1ee1c3000UL
+#define D25_GL                  "/private/preboot/boot/lib/libhakios.gl.dylib"
+
+#define SERVER_FLAGS(server)    (*(uint32_t *)((char *)(server) + 0xb8))
+#define SERVER_DISPLAY(server)  (*(void **)((char *)(server) + 0x60))
+#define SERVER_CONTEXT(server)  (*(void **)((char *)(server) + 0x5c8))
+#define SERVER_RENDERER(server) (*(void **)((char *)(server) + 0x5d0))
+#define DISPLAY_RENDERER(d)     (*(void **)((char *)(d) + 0x148))
+#define CONTEXT_FLAGS(context)  (*(uint32_t *)((char *)(context) + 0x280))
+#define CONTEXT_FEATURES(c)     (*(uint32_t *)((char *)(c) + 0x378))
+
+extern void *malloc_zone_calloc(void *zone, size_t count, size_t size);
+extern void *malloc_default_zone(void);
+
+static void *
+gles_renderer(void *server)
+{
+	static int tried;
+	void *(*new_context)(void *, void *, unsigned) = (void *(*)(void *, void *, unsigned))(D25_GLES_NEW_CONTEXT + slide);
+	void (*update_color_cache)(void *) = (void (*)(void *))(D25_UPDATE_COLOR_CACHE + slide);
+	void *zone = *(void **)(D25_MALLOC_ZONE + slide);
+	struct {
+		uint32_t api, pad;
+		id context;
+	} request = { 3, 0, NULL };
+	Class eagl_class = objc_getClass("EAGLContext");
+	void *context, *display = SERVER_DISPLAY(server);
+	void **renderer;
+	uint32_t flags, before;
+	int32_t zero = 0;
+	id eagl, properties;
+
+	if (SERVER_RENDERER(server) != NULL) {
+		return SERVER_RENDERER(server);
+	}
+	if (tried) {
+		return NULL;                    /* the server's own software renderer, then */
+	}
+	tried = 1;
+	if (eagl_class == NULL || display == NULL) {
+		say("hakios: gl: no EAGLContext class (%p) or no display (%p): the software renderer\n", eagl_class, display);
+		return NULL;
+	}
+	properties = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSMutableDictionary"), sel_registerName("new"));
+	eagl = ((id (*)(id, SEL))objc_msgSend)((id)eagl_class, sel_registerName("alloc"));
+	eagl = ((id (*)(id, SEL, unsigned long, id))objc_msgSend)(eagl, sel_registerName("initWithAPI:properties:"), 3, properties);
+	if (eagl == NULL) {
+		say("hakios: gl: no EAGLContext of API 3: the software renderer\n");
+		return NULL;
+	}
+	((void (*)(id, SEL, unsigned, const int32_t *))objc_msgSend)(eagl, sel_registerName("setParameter:to:"), 608, &zero);
+	request.context = eagl;
+	context = new_context(&request, NULL, 0);
+	if (context == NULL) {
+		say("hakios: gl: gles_new_context() made nothing: the software renderer\n");
+		return NULL;
+	}
+	/* (as AccelServer::renderer() makes its own: 0x68 bytes, the context, a buffer of 256 KB, a 1) */
+	renderer = malloc_zone_calloc(zone != NULL ? zone : malloc_default_zone(), 1, 0x68);
+	renderer[0] = context;
+	renderer[6] = malloc(0x40000);
+	*(uint32_t *)((char *)renderer + 0x60) = 1;
+	SERVER_CONTEXT(server) = context;
+	SERVER_RENDERER(server) = renderer;
+	/* the context's 28th virtual function: whether the framebuffer is compressed -- it is not */
+	((void (*)(void *, int))(*(void ***)context)[0xe0 / 8])(context, 0);
+	DISPLAY_RENDERER(display) = renderer;
+	flags = SERVER_FLAGS(server) | 0x20010;         /* (what 16.5's EAGLServer gave its OpenGL ES context) */
+	before = CONTEXT_FLAGS(context);
+	CONTEXT_FLAGS(context) = flags;
+	CONTEXT_FEATURES(context) = *(uint32_t *)(D25_FEATURE_FLAGS + slide) | flags;
+	if ((before ^ flags) & 0x2000200) {
+		update_color_cache(context);
+	}
+	say("hakios: gl: the window server draws with OpenGL ES: context %p, renderer %p, flags %#x\n", context, (void *)renderer, flags);
+	return renderer;
+}
+
+static void
+opengl_es_25(const char *arguments)
+{
+	static const uint32_t accel_expected[4] = { 0xd503237f, 0xa9be4ff4, 0xa9017bfd, 0x910043fd };
+	static const uint32_t new_expected[3] = { 0xb9400008, 0x71000d1f, 0x54000301 };
+	uintptr_t accel = D25_ACCEL_RENDERER + slide;
+	io_service_t gpu;
+	unsigned replaced = 0;
+
+	for (const char *argument = arguments; (argument = strstr(argument, "gl=")) != NULL; argument += 3) {
+		if ((argument == arguments || argument[-1] == ' ') && argument[3] == '0') {
+			say("hakios: gl=0: CoreAnimation keeps its software renderer\n");
+			return;
+		}
+	}
+	if (access(D25_GL, R_OK) != 0) {
+		return;                                 /* (an image without the library) */
+	}
+	gpu = IOServiceGetMatchingService(0, IOServiceMatching("HakiosGPU"));
+	if (gpu == 0) {
+		say("hakios: no GPU to draw with: CoreAnimation keeps its software renderer\n");
+		return;
+	}
+	IOObjectRelease(gpu);
+	if (memcmp((void *)accel, accel_expected, sizeof(accel_expected)) != 0 ||
+	    memcmp((void *)(D25_GLES_NEW_CONTEXT + slide), new_expected, sizeof(new_expected)) != 0) {
+		say("hakios: gl: this is not the QuartzCore of 23F84: CoreAnimation keeps its software renderer\n");
+		return;
+	}
+	/* (EAGLContext is OpenGLES.framework's, which nothing in the window server has asked for yet) */
+	if (dlopen("/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_NOW) == NULL || dlopen(D25_GL, RTLD_NOW) == NULL) {
+		say("hakios: gl: %s\n", dlerror());
+		return;
+	}
+	/*
+	 * No compressed surfaces. The iPhone this system takes itself for has a GPU that draws into compressed surfaces
+	 * ('&BGA') and a display that shows them; the window server with a renderer on a GPU asks for such, and the Adreno
+	 * has no use for them ("-attachImage: ... an IOSurface of '&BGA': not done", and the window server aborts). Three
+	 * questions CoreAnimation asks of the device, each answered once and kept in a byte: asked here first, then put right.
+	 */
+	{
+		static const struct {
+			const char *what;
+			uintptr_t function, answer;
+			uint32_t expected[2];
+		} questions[] = {
+			{ "framebuffer compression", 0x1841886c0UL, 0x1e9512648UL, { 0xd0329c48, 0xf9432108 } },
+			{ "universal compression", 0x184188870UL, 0x1ec5cc8f8UL, { 0x90342228, 0xf944e908 } },
+			{ "lossy universal compression", 0x1841888c8UL, 0x1ec5cc4c8UL, { 0x90342228, 0xf9439108 } },
+		};
+
+		/* (QuartzCore's own switch for it, force_disable_all_compression, which all three answers give way to) */
+		*(volatile uint8_t *)(0x1e95154d1UL + slide) = 1;
+		for (unsigned i = 0; i < sizeof(questions) / sizeof(questions[0]); i++) {
+			int (*ask)(void) = (int (*)(void))(questions[i].function + slide);
+
+			if (memcmp((void *)(questions[i].function + slide), questions[i].expected, sizeof(questions[i].expected)) != 0) {
+				say("hakios: gl: %s: the function is not where it was: left alone\n", questions[i].what);
+				continue;
+			}
+			if (ask()) {
+				*(volatile uint8_t *)(questions[i].answer + slide) = 0;
+				say("hakios: gl: %s was on, is %s\n", questions[i].what, ask() ? "on" : "off");
+			}
+		}
+	}
+	for (uintptr_t *slot = (uintptr_t *)(D25_VTABLES_FROM + slide); slot < (uintptr_t *)(D25_VTABLES_TO + slide); slot++) {
+		if (*slot == accel) {
+			vm_address_t page = (vm_address_t)slot & ~(vm_address_t)(vm_page_size - 1);
+
+			if (vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS) {
+				say("hakios: gl: the table at %p cannot be written\n", (void *)slot);
+				continue;
+			}
+			*slot = (uintptr_t)gles_renderer;
+			vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ);
+			replaced++;
+		}
+	}
+	say("hakios: gl: AccelServer::renderer() replaced in %u tables of virtual functions\n", replaced);
+}
+#endif /* HAKIOS_DARWIN25 */
+
 __attribute__((constructor))
 static void
 hakios_init(void)
@@ -1596,6 +1780,9 @@ hakios_init(void)
 		opengl_es();
 		window_server_fixes();
 		brightness_bridge();            /* (the OnePlus 6T: the slider to the panel, through kern.hakios.brightness) */
+#endif
+#ifdef HAKIOS_DARWIN25
+		opengl_es_25(arguments);
 #endif
 		/*
 		 * brightness_fixes() is not used for now: with it backboardd no longer took our touch

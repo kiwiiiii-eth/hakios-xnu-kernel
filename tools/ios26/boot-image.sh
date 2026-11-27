@@ -45,6 +45,11 @@ fi
 # what init26 puts into the empty /private/var (var_files() there): userland/var's settings, and the note that this
 # build's data has been migrated, under the build of the system that is started (ROOT's; 16.5's file names its own)
 mkdir -p boot26/var && cp -R var/ boot26/var/
+# ... and two settings of Accessibility's that 16.5 has no need of: less transparency and less motion. Darwin 25 draws
+# its glass -- blurs and refraction behind every bar and sheet -- and the window server here draws with the processor.
+A=boot26/var/mobile/Library/Preferences/com.apple.Accessibility.plist
+/usr/libexec/PlistBuddy -c 'Add :ReduceMotionEnabled bool true' -c 'Add :EnhancedBackgroundContrastEnabled bool true' \
+	-c 'Add :ReduceMotionAutoplayMessagesEffectsEnabled bool false' "$A" >/dev/null
 if [ -n "$ROOT" ]; then
 	BUILD=$(/usr/libexec/PlistBuddy -c 'Print :ProductBuildVersion' "$ROOT/System/Library/CoreServices/SystemVersion.plist")
 	M=boot26/var/mobile/Library/Preferences/com.apple.migration.plist
@@ -60,6 +65,10 @@ JOBS=${JOBS-"
 	com.apple.iconservices.iconservicesagent com.apple.pluginkit.pkd
 	com.apple.SpringBoard
 "}
+# (com.apple.dmd, which 16.5's list keeps out for crashing there: Darwin 25's runs, and without it ScreenTimeAgent,
+# appprotectiond and IntelligencePlatformComputeService each ask launchd for it without a pause -- 4943 failed lookups in
+# a minute, three processors busy with nothing and launchd half of a fourth)
+export ALLOW="${ALLOW-com.apple.dmd}"
 if [ -n "$ROOT" ] && [ -z "${ALL_JOBS:-}" ]; then
 	mkdir -p boot26/LaunchDaemons boot26/empty boot26/xpc
 	OSLOG=${OSLOG-com.apple.backboardd} python3 mkjobs.py --rest "$ROOT" boot26/LaunchDaemons $JOBS > boot26.jobs

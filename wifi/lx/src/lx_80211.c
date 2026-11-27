@@ -152,6 +152,8 @@ struct lx_radio {
 	unsigned ba_sessions, ba_refused;
 	struct ieee80211_key_conf *pairwise_key, *group_key;
 	bool open;				/* the network joined (or being joined) is open: no RSN, no handshake, no keys */
+	uint8_t avoid[4][ETH_ALEN];		/* access points of the name that did not answer, in this join (station_join()) */
+	unsigned avoid_count;
 	volatile bool joined;			/* keys set: frames pass */
 	volatile bool joining;
 	int reached;				/* how far the access point has come as the driver's station (IEEE80211_STA_...) */
@@ -1906,8 +1908,35 @@ station_width(struct lx_radio *radio, struct linuxkpi_ieee80211_channel *primary
  * that was joined before is left first. The access point is the one a scan has heard best --
  * the last scan, if that heard the network, or one made now.
  */
+static int station_join_one(struct lx_radio *radio, const struct hakios_sta_join *what);
+
+/*
+ * A network of several access points (a campus's: STUST on channels 1, 11, 44, ...): the one heard best is tried first, and
+ * one that does not answer the authentication or the association -- 27 November, the 6T's best for STUST was a 5 GHz one at
+ * -72 dBm that never answered, while a 2.4 GHz one at -70 took us -- is passed over for the next best, up to four of them.
+ * Not for a join that asked for one access point by its address.
+ */
 static int
 station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
+{
+	int error;
+
+	radio->avoid_count = 0;
+	for (;;) {
+		error = station_join_one(radio, what);
+		if (error != ETIMEDOUT || !is_zero_ether_addr(what->bssid) || !radio->target.found ||
+		    radio->avoid_count >= sizeof(radio->avoid) / sizeof(radio->avoid[0])) {
+			break;
+		}
+		memcpy(radio->avoid[radio->avoid_count++], radio->target.address, ETH_ALEN);
+		lx_tell("lx: that access point did not answer: the next one of the name (%u passed over)\n", radio->avoid_count);
+	}
+	radio->avoid_count = 0;
+	return (error);
+}
+
+static int
+station_join_one(struct lx_radio *radio, const struct hakios_sta_join *what)
 {
 	const uint8_t *name = what->ssid;
 	unsigned name_length = what->ssid_length;
@@ -1955,7 +1984,13 @@ station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
 	for (unsigned i = 0; i < radio->heard_count; i++) {
 		const struct lx_heard *network = &radio->heard[i];
 
-		if (network->name_length == name_length && memcmp(network->name, name, name_length) == 0 && network->elements_length != 0 &&
+		bool avoided = false;
+
+		for (unsigned a = 0; a < radio->avoid_count; a++) {
+			avoided |= memcmp(radio->avoid[a], network->sender, ETH_ALEN) == 0;
+		}
+		if (!avoided && network->name_length == name_length && memcmp(network->name, name, name_length) == 0 &&
+		    network->elements_length != 0 &&
 		    (is_zero_ether_addr(what->bssid) || memcmp(what->bssid, network->sender, ETH_ALEN) == 0) &&
 		    (!target->found || network->signal > target->signal)) {
 			target->found = true;

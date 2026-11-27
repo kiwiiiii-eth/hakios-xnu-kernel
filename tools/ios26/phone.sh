@@ -48,7 +48,7 @@ if [ -n "${SYS:-}" ]; then
 	timeout 10 fastboot oem ramdisk 2>&1 | grep -q OKAY || { echo "phone: the loader refuses the system image"; exit 1; }
 	timeout 3600 fastboot stage "$SYS" 2>&1 | grep -q OKAY || { echo "phone: the system image did not go over"; exit 1; }
 	have=$(timeout 300 fastboot oem ramdisk fnv 2>&1 | sed -n 's/^(bootloader) fnv \([0-9a-f]*\).*/\1/p')
-	echo "phone: system image $(( $(stat -f %z "$SYS") / 1048576 )) MB in $(( $(date +%s) - T0 )) s, FNV $have (the file's: $want)"
+	echo "phone: system image $(( $(/usr/bin/stat -f %z "$SYS") / 1048576 )) MB in $(( $(date +%s) - T0 )) s, FNV $have (the file's: $want)"
 	[ -z "$want" ] || [ "$have" = "$want" ] || { echo "phone: the system image arrived damaged"; exit 1; }
 fi
 

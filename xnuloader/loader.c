@@ -3699,6 +3699,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 /*   fastboot getvar result        blocks until the kernel is back          */
 /*   fastboot get_staged log.txt   fetch loader + kernel log                */
 /*   fastboot oem hang             stop petting the watchdog (test)         */
+/*   fastboot oem userput MB WORD  the staged piece into userdata (above)   */
+/*   fastboot oem userfnv BYTES    FNV-1a of userdata's first BYTES          */
 /*   fastboot reboot               cold reset                               */
 
 #define USB_EP_OUT   0x01
@@ -4180,6 +4182,202 @@ sysimg_info(void)
 	    h.written_epoch, h.write_ms);
 	sysimg_text(text, sizeof(text), "", h.bytes, " bytes");
 	fb_reply("OKAY", text);
+}
+
+/* ------------------------------------------------------------------------ */
+/* A system too large for memory, in userdata                                */
+/*
+ * Darwin 25's system is 12 GB, its shared cache alone 5: it is no resident root image (the kernel's window is 5.3 GB,
+ * a download 4 GB at most), and darwin's place for one is 7.8 GiB. It is written into userdata instead -- Android's
+ * data, which this erases, at the owner's word -- from the partition's first block, so that the kernel mounts it as it
+ * lies there (/dev/ufs_userdata, read only: drivers/storage/hakios.ufs.c), and darwin and the system in it stay as
+ * they are. In pieces, since nothing here holds all of it:
+ *
+ *   "oem ramdisk", a download, "oem ramdisk fnv" for the host to compare, then
+ *   "oem userput MB erase-android-data"    the piece in the resident area into userdata, MB megabytes from its start,
+ *                                          every 8 MB read back and compared before the next; the area is empty after
+ *   "oem userfnv BYTES"                    the FNV-1a of userdata's first BYTES as they read now: the whole image's,
+ *                                          once every piece is in. Reads only.
+ *
+ * The partition has to be the only one named userdata, of the GPT, in blocks of 4096, not read only, the size its
+ * entry says and at least USERVOL_MIN_BLOCKS; a piece has to lie inside it, at a whole megabyte. Nothing else is
+ * written, and nothing at all without the word.
+ */
+#define USERVOL_MIN_BLOCKS  (16ULL << 18)           /* blocks of 4096: 16 GiB, room for a system */
+#define USERVOL_WORD        "erase-android-data"
+
+static efi_block_io *
+find_userdata(void)
+{
+	static const efi_guid part_guid = EFI_PARTITION_INFO_GUID;
+	static const efi_guid blk_guid = EFI_BLOCK_IO_GUID;
+	efi_handle *handles;
+	efi_block_io *found = NULL;
+	uint64_t count, matches = 0;
+
+	if (EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &part_guid, NULL, &count, &handles))) {
+		return NULL;
+	}
+	for (uint64_t i = 0; i < count; i++) {
+		efi_partition_info *info;
+		efi_block_io *bio;
+		char have[40];
+
+		if (EFI_ERROR(BS->handle_protocol(handles[i], &part_guid, (void **)&info)) || info->type != 2) {
+			continue;
+		}
+		ufs_name(info, have, sizeof(have));
+		if (!str_eq(have, "userdata") || EFI_ERROR(BS->handle_protocol(handles[i], &blk_guid, (void **)&bio))) {
+			continue;
+		}
+		matches++;
+		if (bio->media != NULL && bio->media->block_size == 4096 && !bio->media->read_only &&
+		    bio->media->last_block + 1 >= USERVOL_MIN_BLOCKS &&
+		    info->end_lba - info->start_lba + 1 == bio->media->last_block + 1) {
+			found = bio;
+		}
+	}
+	BS->free_pool(handles);
+	if (matches != 1) {
+		print("uservol: %d partitions named userdata: none is used\n", matches);
+		return NULL;
+	}
+	if (found == NULL) {
+		print("uservol: userdata is not what a system can go into (block size, size, or read only)\n");
+	}
+	return found;
+}
+
+static void
+uservol_put(const char *arg)
+{
+	efi_block_io *bio;
+	uint8_t *img = (uint8_t *)(win_base + RESIDENT_RD_OFFSET), *scratch;
+	uint64_t bytes = resident_rd_size, padded, at, size, started = READ_SYSREG(CNTVCT_EL0), last_said = 0;
+	const char *word = arg;
+	char text[64];
+
+	while (*word >= '0' && *word <= '9') {
+		word++;
+	}
+	if (word == arg || *word != ' ' || !str_eq(word + 1, USERVOL_WORD)) {
+		fb_reply("FAIL", "oem userput MB " USERVOL_WORD);
+		return;
+	}
+	if (bytes == 0) {
+		fb_reply("FAIL", "no piece staged: oem ramdisk, then the download");
+		return;
+	}
+	if ((bio = find_userdata()) == NULL) {
+		fb_reply("FAIL", "no userdata a system can go into");
+		return;
+	}
+	at = parse_number(arg, 10) << 20;
+	size = (bio->media->last_block + 1) * 4096;
+	padded = (bytes + 4095) & ~4095ULL;
+	if (at > size || padded > size - at) {
+		fb_reply("FAIL", "the piece does not lie inside userdata");
+		return;
+	}
+	scratch = img + ((padded + SYSIMG_PIECE - 1) & ~(SYSIMG_PIECE - 1));
+	if ((uint64_t)(uintptr_t)scratch + SYSIMG_PIECE > win_base + win_size) {
+		fb_reply("FAIL", "no room to read back");
+		return;
+	}
+	if (padded != bytes) {
+		memset(img + bytes, 0, padded - bytes);
+	}
+	print("uservol: writing %d bytes into userdata at %d\n", bytes, at);
+	for (uint64_t done = 0; done < padded; done += SYSIMG_PIECE) {
+		uint64_t len = padded - done < SYSIMG_PIECE ? padded - done : SYSIMG_PIECE;
+		const char *bad = NULL;
+
+		if (EFI_ERROR(bio->write_blocks(bio, bio->media->media_id, (at + done) / 4096, len, img + done))) {
+			bad = "write";
+		} else if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, (at + done) / 4096, len, scratch))) {
+			bad = "read back";
+		} else if (memcmp(img + done, scratch, len) != 0) {
+			bad = "read back different";
+		}
+		if (bad != NULL) {
+			print("uservol: at byte %d of the piece: %s\n", done, bad);
+			fb_reply("FAIL", "writing the piece");
+			return;
+		}
+		if (wdt_armed) {
+			wdt_pet();
+		}
+		if (done - last_said >= (256ULL << 20)) {
+			last_said = done;
+			sysimg_text(text, sizeof(text), "", done >> 20, " MB written");
+			fb_reply("INFO", text);
+		}
+	}
+	bio->flush_blocks(bio);
+	/* (the piece is no root image: a run after this must not start from it) */
+	resident_rd_size = 0;
+	print("uservol: %d bytes at %d written and read back in %d ms\n", bytes, at,
+	    (READ_SYSREG(CNTVCT_EL0) - started) * 1000 / READ_SYSREG(CNTFRQ_EL0));
+	fb_reply("OKAY", "");
+}
+
+static void
+uservol_fnv(const char *arg)
+{
+	static const char hex[] = "0123456789abcdef";
+	efi_block_io *bio;
+	struct payload_info pi;
+	uint8_t *buffer;
+	uint64_t bytes = parse_number(arg, 10), h = 0xcbf29ce484222325ULL, last_said = 0;
+	uint64_t started = READ_SYSREG(CNTVCT_EL0);
+	char text[64] = "fnv ";
+
+	if (resident_rd_size != 0) {
+		fb_reply("FAIL", "a root image is in the resident area");
+		return;
+	}
+	parse_payload(&pi, 0);
+	if (!choose_window(&pi) || win_size <= RESIDENT_RD_OFFSET + RESIDENT_RD_RESERVE) {
+		fb_reply("FAIL", "no memory window");
+		return;
+	}
+	if ((bio = find_userdata()) == NULL) {
+		fb_reply("FAIL", "no userdata a system can go into");
+		return;
+	}
+	if (bytes == 0 || bytes > (bio->media->last_block + 1) * 4096) {
+		fb_reply("FAIL", "oem userfnv BYTES, no more than userdata has");
+		return;
+	}
+	buffer = (uint8_t *)(win_base + RESIDENT_RD_OFFSET);
+	for (uint64_t done = 0; done < bytes; done += SYSIMG_PIECE) {
+		uint64_t len = bytes - done < SYSIMG_PIECE ? bytes - done : SYSIMG_PIECE;
+
+		if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, done / 4096, (len + 4095) & ~4095ULL, buffer))) {
+			print("uservol: reading at byte %d failed\n", done);
+			fb_reply("FAIL", "read error");
+			return;
+		}
+		h = ufs_fnv(h, buffer, len);
+		if (wdt_armed) {
+			wdt_pet();
+		}
+		if (done - last_said >= (1024ULL << 20)) {
+			char said[64];
+
+			last_said = done;
+			sysimg_text(said, sizeof(said), "", done >> 20, " MB read");
+			fb_reply("INFO", said);
+		}
+	}
+	print("uservol: the first %d bytes of userdata: fnv %x, read in %d ms\n", bytes, h,
+	    (READ_SYSREG(CNTVCT_EL0) - started) * 1000 / READ_SYSREG(CNTFRQ_EL0));
+	for (int i = 0; i < 16; i++) {
+		text[4 + i] = hex[(h >> (60 - 4 * i)) & 0xf];
+	}
+	text[20] = 0;
+	fb_reply("INFO", text);
+	fb_reply("OKAY", "");
 }
 
 /* ------------------------------------------------------------------------ */
@@ -4894,11 +5092,11 @@ fb_command(char *cmd)
 		    starts_with(cmd, "oem selftest") || starts_with(cmd, "oem hang") || starts_with(cmd, "oem recording") ||
 		    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap") ||
 		    starts_with(cmd, "oem readpart") || starts_with(cmd, "oem darwin") || starts_with(cmd, "oem slot") ||
-		    starts_with(cmd, "oem readunit") || starts_with(cmd, "oem gpt"))) {
+		    starts_with(cmd, "oem readunit") || starts_with(cmd, "oem gpt") || starts_with(cmd, "oem user"))) {
 			fb_reply("FAIL", "a kernel is running (oem stop ends it)");
 		} else if (gpt_written && (starts_with(cmd, "oem darwin") || starts_with(cmd, "oem ramdisk darwin") ||
 		    starts_with(cmd, "oem readpart") || starts_with(cmd, "oem slot") || starts_with(cmd, "oem run") ||
-		    starts_with(cmd, "oem selftest"))) {
+		    starts_with(cmd, "oem selftest") || starts_with(cmd, "oem user"))) {
 			fb_reply("FAIL", "the partition table was written: restart first");
 		} else if (starts_with(cmd, "oem stop")) {
 			/* the kernel looks at this once a second and comes back as it does when its time is up */
@@ -5068,6 +5266,10 @@ fb_command(char *cmd)
 			sysimg_put(cmd[13] == ' ' ? cmd + 14 : "0");
 		} else if (starts_with(cmd, "oem darwininfo")) {
 			sysimg_info();
+		} else if (starts_with(cmd, "oem userput ")) {
+			uservol_put(cmd + 12);
+		} else if (starts_with(cmd, "oem userfnv ")) {
+			uservol_fnv(cmd + 12);
 		} else if (starts_with(cmd, "oem readpart ")) {
 			read_partition_staged(cmd + 13);
 		} else if (starts_with(cmd, "oem screenshot")) {

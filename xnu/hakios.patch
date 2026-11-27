@@ -3442,6 +3442,37 @@ index d6dceb5298c2..ec50edfc455c 100644
  ifneq (,$(wildcard $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)))
  DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
  endif
+diff --git a/san/memory/ubsan_minimal.c b/san/memory/ubsan_minimal.c
+index b9585f2df582..92722a3c6e68 100644
+--- a/san/memory/ubsan_minimal.c
++++ b/san/memory/ubsan_minimal.c
+@@ -38,6 +38,7 @@
+ #include <kern/kalloc.h>
+ #include <kern/trap_telemetry.h>
+ #include <machine/machine_routines.h>
++#include <arm/thread.h>
+ #include <san/ubsan_minimal.h>
+ 
+ #define UBSAN_M_NONE            (0x0000)
+@@ -72,13 +73,15 @@ ubsan_minimal_trap_to_str(uint16_t trap)
+ 
+ void
+ ubsan_handle_brk_trap(
+-	__unused void     *state,
++	void              *state,
+ 	uint16_t          trap)
+ {
+ 	if (!ubsan_minimal_enabled) {
+ #if DEVELOPMENT
+-		/* We want to know about those sooner than later... */
+-		panic("UBSAN trap taken in early startup code");
++		/* We want to know about those sooner than later... (and where: there is no backtrace to read it from yet) */
++		panic("UBSAN trap taken in early startup code, at 0x%llx called from 0x%llx",
++		    (unsigned long long)get_saved_state_pc((arm_saved_state_t *)state),
++		    (unsigned long long)get_saved_state_lr((arm_saved_state_t *)state));
+ #endif /* DEVELOPMENT */
+ 		return;
+ 	}
 diff --git a/security/conf/Makefile b/security/conf/Makefile
 index d6dceb5298c2..ec50edfc455c 100644
 --- a/security/conf/Makefile

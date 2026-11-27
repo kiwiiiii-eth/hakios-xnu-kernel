@@ -92,6 +92,39 @@ miniamfi_vnode_check_signature(__unused struct vnode *vp, __unused struct label 
 #define AMFI_SYSCALL_QUERY_BOOTARG_STATE 0x60
 #define AMFI_BOOTARG_STATE_NOT_ENFORCING 0x86ULL
 
+/*
+ * Request 0x66, "launch constraint matches process" (amfi_launch_constraint_matches_process() in Darwin 25's
+ * libxpc): does the process of this audit token satisfy this lightweight code requirement? A service asks it of the
+ * peers it is particular about (_xpc_token_satisfies_lwcr). The argument: the token (32 bytes), the requirement and
+ * its length, and where the answer goes -- a code (0: it matches) and a message, 0x404 bytes. Unanswered, the caller
+ * was left with "no match" and an answer that still read "match", and libxpc asserts that the two agree: the window
+ * server died of it ten seconds into every start ('assertion failure: "matched == (match_result.error_code ==
+ * AICMR_MATCH)"'). Nothing is enforced by this kernel, so everything matches.
+ */
+#define AMFI_SYSCALL_CONSTRAINT_MATCHES 0x66
+
+static int
+miniamfi_constraint_matches(user_addr_t arg)
+{
+	struct {
+		uint8_t token[32];
+		user_addr_t constraint;
+		uint32_t constraint_len, pad0;
+		user_addr_t result;
+		uint32_t result_len, pad1;
+	} args;
+	uint32_t matches = 0;
+	int error = copyin(arg, &args, sizeof(args));
+
+	if (error == 0 && (args.result == 0 || args.result_len < sizeof(matches))) {
+		error = EINVAL;
+	}
+	if (error == 0) {
+		error = copyout(&matches, args.result, sizeof(matches));
+	}
+	return error;
+}
+
 static int
 miniamfi_policy_syscall(__unused struct proc *p, int call, user_addr_t arg)
 {
@@ -105,6 +138,9 @@ miniamfi_policy_syscall(__unused struct proc *p, int call, user_addr_t arg)
 
 	if (call == AMFI_SYSCALL_QUERY_BOOTARG_STATE) {
 		return copyout(&state, arg, sizeof(state));
+	}
+	if (call == AMFI_SYSCALL_CONSTRAINT_MATCHES) {
+		return miniamfi_constraint_matches(arg);
 	}
 	if (call != AMFI_SYSCALL_CHECK_DYLD_POLICY) {
 		return ENOPOLICY;               /* what user space got before there was a handler */

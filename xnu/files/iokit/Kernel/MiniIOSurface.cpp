@@ -30,8 +30,11 @@
 
 #include "MiniIOSurface.h"
 
-static_assert(sizeof(struct minisurf_plane) == 0x80, "plane layout");
-static_assert(sizeof(struct minisurf_result) == 0x68, "result layout");
+static_assert(sizeof(struct minisurf_plane) == 0x98, "plane layout");
+static_assert(sizeof(struct minisurf_result) == 0x88, "result layout");
+static_assert(offsetof(struct minisurf_result, pixelFormat) == 0x48 && offsetof(struct minisurf_result, planeCount) == 0x58 &&
+    offsetof(struct minisurf_result, lockSeed) == 0x68 && offsetof(struct minisurf_plane, compression) == 0x6c &&
+    offsetof(struct minisurf_plane, extendedPixels) == 0x88, "the fields IOSurface.framework reads");
 static_assert(offsetof(struct minisurf_shared, attachments) == 0x30, "shared layout");
 static_assert(sizeof(struct minisurf_result) + 20 * sizeof(struct minisurf_plane) == MINISURF_RESULT_MAX, "result size");
 
@@ -1115,17 +1118,24 @@ IOSurfaceRootUserClient::returnSurface(struct minisurf_client_ref * ref, bool kn
 IOReturn
 IOSurfaceRootUserClient::methodInit(IOExternalMethodArguments * args)
 {
+	/*
+	 * Darwin 25's IOSurface.framework (_ioSurfaceConnectInternal): 40 bytes, the three largest values 64 bits wide,
+	 * and the version it insists on -- 1, or "IOSurface.framework versus IOSurface.kext version mismatch" and the
+	 * connection closed -- at 0x22. (Darwin 22's: 24 bytes, the three in 32 bits, the version at 0x16.)
+	 */
 	struct {
 		uint32_t allocAlignMask;
 		uint32_t rowAlignMask;
-		uint32_t maxBytesPerRow;
-		uint32_t maxWidth;
-		uint32_t maxHeight;
+		uint64_t maxBytesPerRow;
+		uint64_t maxWidth;
+		uint64_t maxHeight;
 		uint16_t reserved;
 		uint16_t version;
+		uint32_t pad;
 	} reply;
 
-	static_assert(sizeof(reply) == 0x18, "init reply");
+	static_assert(sizeof(reply) == 0x28, "init reply");
+	static_assert(offsetof(__typeof__(reply), version) == 0x22, "init reply's version");
 	if (args->structureOutput == NULL || args->structureOutputSize < sizeof(reply)) {
 		return kIOReturnBadArgument;
 	}
@@ -1136,6 +1146,7 @@ IOSurfaceRootUserClient::methodInit(IOExternalMethodArguments * args)
 	reply.maxHeight = MINISURF_MAX_DIMENSION;
 	reply.reserved = 0;
 	reply.version = 1;
+	reply.pad = 0;
 	memcpy(args->structureOutput, &reply, sizeof(reply));
 	args->structureOutputSize = sizeof(reply);
 	return kIOReturnSuccess;
@@ -1777,6 +1788,8 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 		ref = findRef((uint32_t) args->scalarInput[0], false);
 		if (ref != NULL) {
 			ref->surface->shared()->ycbcrMatrix = (uint32_t) args->scalarInput[1];
+			/* (Darwin 25 reads it as a byte at 0x6e of the page: among the attachments) */
+			ref->surface->shared()->attachments[0x6e - 0x30] = (uint8_t) args->scalarInput[1];
 		}
 		IOLockUnlock(gSurfaceLock);
 		return ref ? kIOReturnSuccess : kIOReturnNotFound;

@@ -15,31 +15,38 @@
 #include "MiniDrivers.h"
 
 #define MINISURF_MAX_PLANES     4
-#define MINISURF_RESULT_MAX     0xa68           /* what IOSurface.framework reserves for a result */
+#define MINISURF_RESULT_MAX     0xc68           /* what IOSurface.framework reserves for a result */
 
-/* One plane, as IOSurface.framework reads it (0x80 bytes). */
+/*
+ * The two structures below are Darwin 25's (IOSurface.framework of userland 26, read off its IOSurfaceClientGet...
+ * functions, which take them from the client object at 0x70 on): every size and offset in 64 bits, where Darwin 22's
+ * had 32 -- a plane 0x98 bytes for 0x80, the header 0x88 for 0x68 -- and the rest in the same order. With the older
+ * layout the framework took a surface for one of no pixel format ("SW renderer invalid destination format").
+ */
+
+/* One plane, as IOSurface.framework reads it (0x98 bytes). */
 struct minisurf_plane {
-	uint32_t width;                         /* 0x00 */
-	uint32_t height;                        /* 0x04 */
-	uint32_t reserved08;
-	uint32_t offset;                        /* 0x0c from the base address */
-	uint32_t bytesPerRow;                   /* 0x10 */
-	uint32_t size;                          /* 0x14 */
-	uint16_t bytesPerElement;               /* 0x18 */
-	uint8_t  elementWidth;                  /* 0x1a */
-	uint8_t  elementHeight;                 /* 0x1b */
-	uint8_t  componentCount;                /* 0x1c */
-	uint8_t  addressFormat;                 /* 0x1d */
-	uint8_t  reserved1e[2];
-	uint8_t  componentBitDepth[4];          /* 0x20 */
-	uint8_t  componentBitOffset[4];         /* 0x24 */
-	uint8_t  componentName[4];              /* 0x28 */
-	uint8_t  componentType[4];              /* 0x2c */
-	uint8_t  componentRange[4];             /* 0x30 */
-	uint8_t  reserved34[0x20];
-	uint8_t  compression;                   /* 0x54: 1 = compressed, then there is no base address */
-	uint8_t  reserved55[0x1b];
-	uint32_t extendedPixels[4];             /* 0x70 */
+	uint64_t width;                         /* 0x00 */
+	uint64_t height;                        /* 0x08 */
+	uint64_t reserved10;
+	uint64_t offset;                        /* 0x18 from the base address */
+	uint64_t bytesPerRow;                   /* 0x20 */
+	uint64_t size;                          /* 0x28 */
+	uint16_t bytesPerElement;               /* 0x30 */
+	uint8_t  elementWidth;                  /* 0x32 */
+	uint8_t  elementHeight;                 /* 0x33 */
+	uint8_t  componentCount;                /* 0x34 */
+	uint8_t  addressFormat;                 /* 0x35 */
+	uint8_t  reserved36[2];
+	uint8_t  componentBitDepth[4];          /* 0x38 */
+	uint8_t  componentBitOffset[4];         /* 0x3c */
+	uint8_t  componentName[4];              /* 0x40 */
+	uint8_t  componentType[4];              /* 0x44 */
+	uint8_t  componentRange[4];             /* 0x48 */
+	uint8_t  reserved4c[0x20];
+	uint8_t  compression;                   /* 0x6c: 1 = compressed, then there is no base address */
+	uint8_t  reserved6d[0x1b];
+	uint32_t extendedPixels[4];             /* 0x88 */
 };
 
 /* What "create" and the lookups return: this header, then the planes (at least one). */
@@ -48,27 +55,29 @@ struct minisurf_result {
 	uint64_t shared;                        /* 0x08 struct minisurf_shared, mapped in the client */
 	uint64_t aux;                           /* 0x10 struct minisurf_aux, mapped in the client */
 	uint32_t sid;                           /* 0x18 */
-	uint32_t allocSize;                     /* 0x1c */
-	uint32_t width;                         /* 0x20 */
-	uint32_t height;                        /* 0x24 */
-	uint32_t bytesPerRow;                   /* 0x28 */
-	uint32_t offset;                        /* 0x2c */
-	uint32_t pixelFormat;                   /* 0x30 */
-	uint32_t reserved34;
-	uint32_t planeCount;                    /* 0x38 */
-	uint32_t reserved3c;
-	uint16_t bytesPerElement;               /* 0x40 */
-	uint8_t  elementWidth;                  /* 0x42 */
-	uint8_t  elementHeight;                 /* 0x43 */
-	uint32_t cacheMode;                     /* 0x44 */
-	uint32_t lockSeed;                      /* 0x48 the client keeps the seed of its last lock here */
-	uint8_t  subsampling;                   /* 0x4c */
-	uint8_t  prohibitUseCount;              /* 0x4d */
-	uint16_t reserved4e;
-	uint32_t parentID;                      /* 0x50 */
-	uint32_t sliceCount;                    /* 0x54 */
-	uint64_t traceID;                       /* 0x58 */
-	uint64_t protectionOptions;             /* 0x60 */
+	uint32_t reserved1c;
+	uint64_t allocSize;                     /* 0x20 */
+	uint64_t width;                         /* 0x28 */
+	uint64_t height;                        /* 0x30 */
+	uint64_t bytesPerRow;                   /* 0x38 */
+	uint64_t offset;                        /* 0x40 */
+	uint32_t pixelFormat;                   /* 0x48 */
+	uint32_t reserved4c;
+	uint64_t reserved50;
+	uint32_t planeCount;                    /* 0x58 */
+	uint32_t reserved5c;
+	uint16_t bytesPerElement;               /* 0x60 */
+	uint8_t  elementWidth;                  /* 0x62 */
+	uint8_t  elementHeight;                 /* 0x63 */
+	uint32_t cacheMode;                     /* 0x64 */
+	uint32_t lockSeed;                      /* 0x68 the client keeps the seed of its last lock here */
+	uint8_t  subsampling;                   /* 0x6c */
+	uint8_t  prohibitUseCount;              /* 0x6d */
+	uint16_t reserved6e;
+	uint32_t parentID;                      /* 0x70 */
+	uint32_t sliceCount;                    /* 0x74 */
+	uint64_t traceID;                       /* 0x78 */
+	uint64_t protectionOptions;             /* 0x80 */
 };
 
 /* State that every client reads straight from memory shared with the kernel. */
@@ -92,7 +101,7 @@ struct minisurf_shared {
 };
 
 struct minisurf_aux {
-	uint64_t timestamps[4];
+	uint64_t timestamps[5];                 /* (Darwin 25: five, the code below at 0x28) */
 	uint64_t detachModeCode;
 };
 

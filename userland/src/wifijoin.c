@@ -63,7 +63,7 @@ say_current(CFRunLoopTimerRef timer, void *info)
 			freeifaddrs(all);
 		}
 		printf("wifijoin: en0's address: %s\n", address[0] ? address : "none yet");
-		if (address[0] && !answered && tried < 6) {
+		if (address[0] && !answered && tried < 24) {
 			struct addrinfo *found = NULL, hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM };
 			struct sockaddr_in to = { .sin_len = sizeof(to), .sin_family = AF_INET, .sin_port = htons(80) };
 			int fd = socket(AF_INET, SOCK_STREAM, 0), error;
@@ -84,7 +84,7 @@ say_current(CFRunLoopTimerRef timer, void *info)
 			close(fd);
 		}
 	}
-	if (++times >= 12) {
+	if (++times >= 24) {                    /* (two minutes: configd ranks a new network "Never" for some 40 s first) */
 		exit(0);
 	}
 }

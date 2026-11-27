@@ -277,7 +277,13 @@ vendor_answer(const uint8_t *command, unsigned length, uint8_t *answer)
 	const uint8_t sub = length >= 5 ? command[4] : 0;
 	const bool antenna = lo == 0xe2 && hi == 0xfc && (sub == 0x15 || sub == 0x36);
 	const bool cal = lo == 0x1b && hi == 0xfd;
-	const unsigned extra = cal ? 64 : antenna ? 16 : (lo == 0x48 && hi == 0xfd) ? 1 : 0;
+	/*
+	 * 0xfdda, Read Proprietary Local Features (Darwin 25's bluetoothd sends it as its power-up begins): its parser,
+	 * _BCM_ProprietaryLocalFeaturesEventParser (bcm_vsc.c:343), asserts 4 bytes after the status, and bluetoothd stopped
+	 * on it every ten seconds ("ByteStream_NumReadBytesAvail(*pBs) >= 4"). Four bytes of 0: no features of Broadcom's.
+	 */
+	const bool features = lo == 0xda && hi == 0xfd;
+	const unsigned extra = cal ? 64 : antenna ? 16 : (lo == 0x48 && hi == 0xfd) ? 1 : features ? 4 : 0;
 
 	answer[0] = 0x04;
 	answer[1] = 0x0e;

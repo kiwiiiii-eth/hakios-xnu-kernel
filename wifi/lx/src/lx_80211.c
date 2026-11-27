@@ -151,6 +151,7 @@ struct lx_radio {
 	} ba[8];
 	unsigned ba_sessions, ba_refused;
 	struct ieee80211_key_conf *pairwise_key, *group_key;
+	bool open;				/* the network joined (or being joined) is open: no RSN, no handshake, no keys */
 	volatile bool joined;			/* keys set: frames pass */
 	volatile bool joining;
 	int reached;				/* how far the access point has come as the driver's station (IEEE80211_STA_...) */
@@ -1140,6 +1141,14 @@ management_received(struct lx_radio *radio, const uint8_t *f, unsigned length)
 		return;
 	}
 	if (f[0] == 0xb0 && length >= 30) {		/* authentication: algorithm, step (2: the answer), status */
+		if (radio->reached >= IEEE80211_STA_AUTH) {
+			/*
+			 * (an answer to the authentication sent again by the access point, once it has been taken: STUST's, 27
+			 * November, came while the association's answer was awaited, and was taken for it -- "THE ACCESS POINT
+			 * REFUSES (status 0)")
+			 */
+			return;
+		}
 		status = f[28] | f[29] << 8;
 		answer = (f[26] | f[27] << 8) != 2 ? ANSWER_NONE : status == 0 ? ANSWER_AUTHENTICATED : ANSWER_REFUSED;
 	} else if (f[0] == 0x10 && length >= 30) {	/* association response: capabilities, status, our number, elements */
@@ -1606,12 +1615,14 @@ request_elements(struct lx_radio *radio, uint8_t *out, unsigned group_cipher)
 		*at++ = (uint8_t)channel_of(channel->center_freq);
 		*at++ = 1;
 	}
-	radio->rsn[0] = 48;
-	radio->rsn[1] = 20;
-	memcpy(radio->rsn + 2, "\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x02\x00\x00", 20);
-	radio->rsn[7] = (uint8_t)group_cipher;
-	memcpy(at, radio->rsn, 22);
-	at += 22;
+	if (!radio->open) {
+		radio->rsn[0] = 48;
+		radio->rsn[1] = 20;
+		memcpy(radio->rsn + 2, "\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x02\x00\x00", 20);
+		radio->rsn[7] = (uint8_t)group_cipher;
+		memcpy(at, radio->rsn, 22);
+		at += 22;
+	}
 	if (element(target->elements, target->elements_length, 45) != NULL && band->ht_cap.ht_supported) {
 		uint16_t cap = (uint16_t)(band->ht_cap.cap & (radio->width > 20 ? 0xffff : ~(IEEE80211_HT_CAP_SUP_WIDTH_20_40 |
 		    IEEE80211_HT_CAP_SGI_40)));
@@ -1915,8 +1926,8 @@ station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
 	if (name_length == 0 || name_length > sizeof(radio->want)) {
 		return (EINVAL);
 	}
-	if (what->security != HAKIOS_STA_WPA2_PSK) {
-		lx_tell("lx: a network without WPA2 and a passphrase is asked for: that is not built\n");
+	if (what->security != HAKIOS_STA_WPA2_PSK && what->security != HAKIOS_STA_OPEN) {
+		lx_tell("lx: a network neither open nor of WPA2 and a passphrase is asked for: that is not built\n");
 		return (ENOTSUP);
 	}
 	if (radio->sta != NULL) {
@@ -1975,13 +1986,20 @@ station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
 		/* (a beacon can be heard on the channel next to its own: where it says it is counts) */
 		channel = linuxkpi_ieee80211_get_channel(hw->wiphy, linuxkpi_ieee80211_channel_to_frequency(e[2], channel->band));
 	}
-	obstacle = protection(target, &group_cipher);
+	/*
+	 * An open network (asked for without a key): one that says it is protected is not joined so; one that is not is joined
+	 * without the RSN element, the handshake and the keys -- its frames pass in the clear, as on any open network.
+	 */
+	radio->open = what->security == HAKIOS_STA_OPEN;
+	obstacle = !radio->open ? protection(target, &group_cipher) : (target->capability & 0x10) ||
+	    element(target->elements, target->elements_length, 48) != NULL ? "it is protected, and no key was given" : NULL;
 	lx_tell("lx: the network that is wanted: an access point on channel %u (%u MHz) at %d dBm, capabilities %#x, beacons every "
 	    "%u units; HT %s, VHT %s, WMM %s; %s%s\n", channel != NULL ? channel_of(channel->center_freq) : 0, channel != NULL ?
 	    channel->center_freq : 0, target->signal, target->capability, target->interval, element(target->elements,
 	    target->elements_length, 45) ? "yes" : "no", element(target->elements, target->elements_length, 191) ? "yes" : "no",
-	    vendor_element(target->elements, target->elements_length, wmm) ? "yes" : "no", obstacle == NULL ? "WPA2 with a "
-	    "passphrase and CCMP: it can be joined" : "IT CANNOT BE JOINED: ", obstacle == NULL ? "" : obstacle);
+	    vendor_element(target->elements, target->elements_length, wmm) ? "yes" : "no", obstacle == NULL ? radio->open ?
+	    "open: it can be joined" : "WPA2 with a passphrase and CCMP: it can be joined" : "IT CANNOT BE JOINED: ", obstacle == NULL ?
+	    "" : obstacle);
 	if (obstacle != NULL || channel == NULL || (channel->flags & IEEE80211_CHAN_DISABLED)) {
 		return (ENOTSUP);
 	}
@@ -1989,7 +2007,9 @@ station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
 	/* the key of the name and the passphrase, and what the handshake needs besides */
 	began = lx_os_nanoseconds();
 	bzero(&radio->wpa, sizeof(radio->wpa));
-	if (what->passphrase_length != 0) {
+	if (radio->open) {
+		/* (nothing to make) */
+	} else if (what->passphrase_length != 0) {
 		lx_wpa_pmk(what->passphrase, what->passphrase_length, name, name_length, radio->wpa.pmk);
 	} else {
 		memcpy(radio->wpa.pmk, what->pmk, sizeof(radio->wpa.pmk));
@@ -2000,8 +2020,10 @@ station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
 	radio->wpa.rsn = radio->rsn;
 	radio->wpa.rsn_length = 22;
 	radio->handshake = LX_WPA_NOTHING;
-	printf("lx: the key of the name (%u bytes) and the passphrase (%u bytes; 0: the key itself was given) is there: %llu ms\n",
-	    name_length, what->passphrase_length, (lx_os_nanoseconds() - began) / 1000000ull);
+	if (!radio->open) {
+		printf("lx: the key of the name (%u bytes) and the passphrase (%u bytes; 0: the key itself was given) is there: %llu ms\n",
+		    name_length, what->passphrase_length, (lx_os_nanoseconds() - began) / 1000000ull);
+	}
 
 	/* the access point's address, and its channel, 20 MHz wide */
 	vif->bss_conf.bssid = target->address;
@@ -2082,7 +2104,7 @@ station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
 		}
 		frame = management(radio, frame, 0x00);
 		/* capabilities: an infrastructure network, protected, and of the access point's own what a station repeats */
-		frame[0] = (uint8_t)(0x01 | 0x10 | (target->capability & 0x20));
+		frame[0] = (uint8_t)(0x01 | (radio->open ? 0 : 0x10) | (target->capability & 0x20));
 		frame[1] = (uint8_t)((target->capability & 0x0500) >> 8);
 		frame[2] = 10;				/* we listen at least every tenth beacon */
 		frame[3] = 0;
@@ -2128,6 +2150,10 @@ station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
 	    radio->sta->deflink.supp_rates[channel->band], radio->sta->deflink.ht_cap.ht_supported ? "yes" : "no",
 	    radio->sta->deflink.vht_cap.vht_supported ? "yes" : "no", radio->sta->deflink.rx_nss);
 
+	if (radio->open) {
+		lx_tell("lx: an open network: no handshake and no keys\n");
+		goto authorized;
+	}
 	/* the handshake: the access point begins it; its messages come in as frames and are answered where they come in */
 	began = lx_os_nanoseconds();
 	lx_os_lock();
@@ -2157,7 +2183,12 @@ station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
 	lx_tell("lx: THE KEYS ARE GIVEN TO THE DRIVER, %llu ms after the association: ours with the access point, and the group's "
 	    "(number %u, %u bytes): %d\n", (lx_os_nanoseconds() - began) / 1000000ull, radio->wpa.group_index,
 	    radio->wpa.group_length, ret);
-	if (ret != 0 || (ret = station_state(radio, IEEE80211_STA_ASSOC, IEEE80211_STA_AUTHORIZED)) != 0) {
+	if (ret != 0) {
+		error = -ret;
+		goto out;
+	}
+authorized:
+	if ((ret = station_state(radio, IEEE80211_STA_ASSOC, IEEE80211_STA_AUTHORIZED)) != 0) {
 		error = -ret;
 		goto out;
 	}
